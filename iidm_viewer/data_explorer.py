@@ -1,5 +1,11 @@
 import streamlit as st
 from iidm_viewer.network_info import COMPONENT_TYPES
+from iidm_viewer.filters import (
+    FILTERS,
+    build_vl_lookup,
+    enrich_with_joins,
+    render_filters,
+)
 
 
 # Component types that support voltage_level_id filtering
@@ -42,7 +48,13 @@ def render_data_explorer(network, selected_vl):
                 st.info(f"No {component.lower()} found in this network.")
                 return
 
+            df = enrich_with_joins(df, build_vl_lookup(network))
             total = len(df)
+
+            df = render_filters(
+                df, FILTERS.get(component, []), key_prefix=f"flt_{method_name}"
+            )
+
             if id_filter:
                 mask = df.index.astype(str).str.contains(
                     id_filter, case=False, na=False, regex=False
@@ -50,10 +62,10 @@ def render_data_explorer(network, selected_vl):
                 df = df[mask]
 
             if df.empty:
-                st.info(f"No {component.lower()} match ID filter {id_filter!r}.")
+                st.info(f"No {component.lower()} match the current filters.")
                 return
 
-            if id_filter:
+            if len(df) < total:
                 st.caption(f"{len(df)} of {total} {component.lower()}")
             else:
                 st.caption(f"{len(df)} {component.lower()}")

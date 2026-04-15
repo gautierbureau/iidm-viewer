@@ -47,7 +47,7 @@ def test_data_explorer_id_filter_empty_state(xiidm_upload):
     at.text_input(key="id_filter_get_generators").set_value("ZZZZZZ").run(timeout=30)
     assert not at.exception
     infos = [i.value for i in at.info]
-    assert any("No generators match ID filter" in i for i in infos)
+    assert any("No generators match the current filters" in i for i in infos)
 
 
 def test_data_explorer_filter_key_is_per_component(xiidm_upload):
