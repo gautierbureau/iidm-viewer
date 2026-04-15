@@ -25,6 +25,11 @@ def render_data_explorer(network, selected_vl):
             f"Filter by selected VL ({selected_vl})", value=False, key="filter_by_vl"
         )
 
+    id_filter = st.text_input(
+        "Filter by ID (substring, case-insensitive)",
+        key=f"id_filter_{method_name}",
+    )
+
     with st.spinner(f"Loading {component}..."):
         try:
             kwargs = {}
@@ -37,7 +42,21 @@ def render_data_explorer(network, selected_vl):
                 st.info(f"No {component.lower()} found in this network.")
                 return
 
-            st.caption(f"{len(df)} {component.lower()}")
+            total = len(df)
+            if id_filter:
+                mask = df.index.astype(str).str.contains(
+                    id_filter, case=False, na=False, regex=False
+                )
+                df = df[mask]
+
+            if df.empty:
+                st.info(f"No {component.lower()} match ID filter {id_filter!r}.")
+                return
+
+            if id_filter:
+                st.caption(f"{len(df)} of {total} {component.lower()}")
+            else:
+                st.caption(f"{len(df)} {component.lower()}")
             st.dataframe(df, use_container_width=True)
 
             csv = df.to_csv()
