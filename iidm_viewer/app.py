@@ -4,6 +4,7 @@ from iidm_viewer.components import vl_selector
 from iidm_viewer.network_info import render_overview
 from iidm_viewer.diagrams import render_nad_tab, render_sld_tab
 from iidm_viewer.data_explorer import render_data_explorer
+from iidm_viewer.extensions_explorer import render_extensions_explorer
 
 
 st.set_page_config(page_title="IIDM Viewer", layout="wide", page_icon="⚡")
@@ -41,8 +42,14 @@ if network is None:
     st.info("Upload an XIIDM file in the sidebar to get started.")
     st.stop()
 
-tab_overview, tab_nad, tab_sld, tab_data = st.tabs(
-    ["Overview", "Network Area Diagram", "Single Line Diagram", "Data Explorer"]
+tab_overview, tab_nad, tab_sld, tab_components, tab_extensions = st.tabs(
+    [
+        "Overview",
+        "Network Area Diagram",
+        "Single Line Diagram",
+        "Data Explorer Components",
+        "Data Explorer Extensions",
+    ]
 )
 
 with tab_overview:
@@ -54,5 +61,8 @@ with tab_nad:
 with tab_sld:
     render_sld_tab(network, selected_vl)
 
-with tab_data:
+with tab_components:
     render_data_explorer(network, selected_vl)
+
+with tab_extensions:
+    render_extensions_explorer(network)
