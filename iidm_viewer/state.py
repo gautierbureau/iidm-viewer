@@ -1,5 +1,6 @@
 import streamlit as st
-import pypowsybl.network as pn
+
+from iidm_viewer.powsybl_worker import NetworkProxy, run
 
 
 def init_state():
@@ -19,15 +20,17 @@ def load_network(uploaded_file):
     if uploaded_file.name.lower().endswith(".zip"):
         buf = BytesIO(uploaded_file.getbuffer())
     else:
-        # pypowsybl 1.14 load_from_string / load(path) produce networks that
-        # segfault across Streamlit reruns; zipping the payload and going
-        # through load_from_binary_buffer is the only stable path.
         import zipfile
         buf = BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr(uploaded_file.name, uploaded_file.getvalue())
         buf.seek(0)
-    network = pn.load_from_binary_buffer(buf)
+
+    def _load():
+        import pypowsybl.network as pn
+        return pn.load_from_binary_buffer(buf)
+
+    network = NetworkProxy(run(_load))
     st.session_state.network = network
     st.session_state.selected_vl = None
     return network

@@ -1,9 +1,9 @@
 import streamlit as st
-from pypowsybl.network import NadParameters, SldParameters
 from iidm_viewer.components import render_svg
 
 
 def render_nad_tab(network, selected_vl):
+    from pypowsybl.network import NadParameters
     depth = st.slider("Depth", min_value=0, max_value=10, value=1, key="nad_depth_slider")
 
     if not selected_vl:
@@ -24,6 +24,7 @@ def render_nad_tab(network, selected_vl):
 
 
 def render_sld_tab(network, selected_vl):
+    from pypowsybl.network import SldParameters
     if not selected_vl:
         st.info("Select a voltage level in the sidebar to display the Single Line Diagram.")
         return
