@@ -1,0 +1,37 @@
+import streamlit as st
+import streamlit.components.v1 as st_components
+from iidm_viewer.state import get_voltage_levels_df, filter_voltage_levels
+
+
+def vl_selector(network):
+    vls_df = get_voltage_levels_df(network)
+
+    vl_filter = st.text_input("Filter voltage levels", key="vl_filter_text")
+    filtered = filter_voltage_levels(vls_df, vl_filter)
+
+    if filtered.empty:
+        st.info("No voltage levels match the filter.")
+        return None
+
+    options = filtered["id"].tolist()
+    labels = filtered["display"].tolist()
+    label_map = dict(zip(options, labels))
+
+    current = st.session_state.get("selected_vl")
+    index = 0
+    if current in options:
+        index = options.index(current)
+
+    selected = st.selectbox(
+        "Voltage Level",
+        options=options,
+        index=index,
+        format_func=lambda x: label_map.get(x, x),
+        key="vl_selectbox",
+    )
+    st.session_state.selected_vl = selected
+    return selected
+
+
+def render_svg(svg_string, height=600):
+    st_components.html(svg_string, height=height, scrolling=True)

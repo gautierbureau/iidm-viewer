@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "iidm-viewer"
+version = "0.1.0"
+description = "A Streamlit app to visualize and explore IIDM network topology and data"
+requires-python = ">=3.9"
+dependencies = [
+    "streamlit>=1.30",
+    "pypowsybl>=1.14.0",
+    "pandas",
+]
+
+[project.scripts]
+iidm-viewer = "iidm_viewer.cli:main"

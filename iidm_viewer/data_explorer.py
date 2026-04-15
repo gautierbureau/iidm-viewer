@@ -1,0 +1,51 @@
+import streamlit as st
+from iidm_viewer.network_info import COMPONENT_TYPES
+
+
+# Component types that support voltage_level_id filtering
+VL_FILTERABLE = {
+    "Generators", "Loads", "Switches", "Shunt Compensators",
+    "Batteries", "Busbar Sections", "Static VAR Compensators",
+    "VSC Converter Stations", "LCC Converter Stations",
+}
+
+
+def render_data_explorer(network, selected_vl):
+    component = st.selectbox(
+        "Component type",
+        options=list(COMPONENT_TYPES.keys()),
+        key="component_type_select",
+    )
+
+    method_name = COMPONENT_TYPES[component]
+
+    filter_by_vl = False
+    if component in VL_FILTERABLE and selected_vl:
+        filter_by_vl = st.checkbox(
+            f"Filter by selected VL ({selected_vl})", value=False, key="filter_by_vl"
+        )
+
+    with st.spinner(f"Loading {component}..."):
+        try:
+            kwargs = {}
+            if filter_by_vl and selected_vl:
+                kwargs["voltage_level_id"] = selected_vl
+
+            df = getattr(network, method_name)(all_attributes=True, **kwargs)
+
+            if df.empty:
+                st.info(f"No {component.lower()} found in this network.")
+                return
+
+            st.caption(f"{len(df)} {component.lower()}")
+            st.dataframe(df, use_container_width=True)
+
+            csv = df.to_csv()
+            st.download_button(
+                label=f"Download {component} as CSV",
+                data=csv,
+                file_name=f"{component.lower().replace(' ', '_')}.csv",
+                mime="text/csv",
+            )
+        except Exception as e:
+            st.error(f"Error loading {component}: {e}")
