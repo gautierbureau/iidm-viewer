@@ -1,3 +1,4 @@
+import pandas as pd
 import streamlit as st
 
 from iidm_viewer.powsybl_worker import NetworkProxy, run
@@ -117,6 +118,88 @@ def update_components(network, component: str, changes_df):
 
     run(_do_update)
     st.session_state.pop("_vl_lookup_cache", None)
+
+
+# Component label -> creation spec. For now only node-breaker feeder-bay
+# creation is exposed; the backend handles the disconnector + breaker switches
+# internally so the user only has to pick a busbar section.
+ENERGY_SOURCES = ["OTHER", "HYDRO", "NUCLEAR", "WIND", "SOLAR", "THERMAL"]
+FEEDER_DIRECTIONS = ["TOP", "BOTTOM"]
+
+CREATABLE_COMPONENTS: dict[str, dict] = {
+    "Generators": {
+        "bay_function": "create_generator_bay",
+        "required": [
+            "id",
+            "bus_or_busbar_section_id",
+            "min_p",
+            "max_p",
+            "target_p",
+            "voltage_regulator_on",
+            "position_order",
+        ],
+        "optional": [
+            "energy_source",
+            "target_q",
+            "target_v",
+            "rated_s",
+            "direction",
+        ],
+    },
+}
+
+
+def list_node_breaker_voltage_levels(network):
+    """Return node-breaker voltage levels as a DataFrame with id/display/nominal_v."""
+    vls = network.get_voltage_levels(all_attributes=True)
+    if "topology_kind" not in vls.columns:
+        return pd.DataFrame(columns=["id", "display", "nominal_v"])
+    nb = vls[vls["topology_kind"] == "NODE_BREAKER"].reset_index()
+    if nb.empty:
+        return pd.DataFrame(columns=["id", "display", "nominal_v"])
+    nb["display"] = nb.apply(lambda r: r["name"] if r["name"] else r["id"], axis=1)
+    return nb[["id", "display", "nominal_v"]].sort_values("display")
+
+
+def list_busbar_sections(network, voltage_level_id: str):
+    """Return a sorted list of busbar section ids in the given voltage level."""
+    bbs = network.get_busbar_sections()
+    if bbs.empty:
+        return []
+    return sorted(bbs[bbs["voltage_level_id"] == voltage_level_id].index.tolist())
+
+
+def create_component_bay(network, component: str, fields: dict):
+    """Create a new injection on a busbar section via a clean feeder bay.
+
+    Routes through pypowsybl's ``create_*_bay`` helper which, in node-breaker
+    voltage levels, allocates nodes and inserts a closed disconnector plus a
+    breaker between the busbar section and the new injection. Callers supply
+    the busbar id and the injection attributes; node numbering stays internal.
+    """
+    if component not in CREATABLE_COMPONENTS:
+        raise ValueError(f"{component!r} is not creatable")
+    spec = CREATABLE_COMPONENTS[component]
+    missing = [
+        f for f in spec["required"]
+        if fields.get(f) is None or fields.get(f) == ""
+    ]
+    if missing:
+        raise ValueError(f"Missing required fields: {', '.join(missing)}")
+
+    row = {k: v for k, v in fields.items() if v is not None and v != ""}
+    df = pd.DataFrame([row]).set_index("id")
+    bay_fn_name = spec["bay_function"]
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_create():
+        import pypowsybl.network as pn
+        fn = getattr(pn, bay_fn_name)
+        fn(raw, df)
+
+    run(_do_create)
+    st.session_state.pop("_vl_lookup_cache", None)
+    st.session_state.pop("_map_data_cache", None)
 
 
 def get_voltage_levels_df(network):

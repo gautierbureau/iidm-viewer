@@ -4,8 +4,12 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from iidm_viewer.state import (
+    CREATABLE_COMPONENTS,
+    create_component_bay,
     filter_voltage_levels,
     get_voltage_levels_df,
+    list_busbar_sections,
+    list_node_breaker_voltage_levels,
     load_network,
 )
 
@@ -108,3 +112,96 @@ def test_get_voltage_levels_df_display_prefers_name_over_id(xiidm_upload):
     for _, row in df.iterrows():
         expected = row["name"] if row["name"] else row["id"]
         assert row["display"] == expected
+
+
+# --- Component creation (feeder-bay) ---
+
+
+def test_creatable_components_has_generator_entry():
+    assert "Generators" in CREATABLE_COMPONENTS
+    spec = CREATABLE_COMPONENTS["Generators"]
+    assert spec["bay_function"] == "create_generator_bay"
+    assert "id" in spec["required"]
+    assert "bus_or_busbar_section_id" in spec["required"]
+
+
+def test_list_node_breaker_voltage_levels_ieee14_is_empty(xiidm_upload):
+    """IEEE14 is bus-breaker so the helper must return an empty frame."""
+    net = load_network(xiidm_upload)
+    df = list_node_breaker_voltage_levels(net)
+    assert df.empty
+
+
+def test_list_node_breaker_voltage_levels_returns_nb_vls(node_breaker_network):
+    df = list_node_breaker_voltage_levels(node_breaker_network)
+    assert not df.empty
+    assert {"id", "display", "nominal_v"}.issubset(df.columns)
+    assert "S1VL1" in set(df["id"])
+
+
+def test_list_busbar_sections_filters_by_vl(node_breaker_network):
+    bbs = list_busbar_sections(node_breaker_network, "S1VL2")
+    assert bbs == ["S1VL2_BBS1", "S1VL2_BBS2"]
+
+
+def test_list_busbar_sections_empty_for_unknown_vl(node_breaker_network):
+    assert list_busbar_sections(node_breaker_network, "NOPE") == []
+
+
+def test_create_component_bay_creates_generator_with_switches(node_breaker_network):
+    fields = {
+        "id": "TEST_GEN",
+        "bus_or_busbar_section_id": "S1VL1_BBS",
+        "min_p": 0.0,
+        "max_p": 100.0,
+        "target_p": 50.0,
+        "target_q": 0.0,
+        "voltage_regulator_on": False,
+        "energy_source": "HYDRO",
+        "position_order": 100,
+        "direction": "BOTTOM",
+    }
+    create_component_bay(node_breaker_network, "Generators", fields)
+
+    gens = node_breaker_network.get_generators()
+    assert "TEST_GEN" in gens.index
+    row = gens.loc["TEST_GEN"]
+    assert row["voltage_level_id"] == "S1VL1"
+    assert row["target_p"] == 50.0
+    assert row["energy_source"] == "HYDRO"
+
+    # Feeder-bay: breaker + disconnector on the new generator
+    switches = node_breaker_network.get_switches()
+    owned = [sid for sid in switches.index if sid.startswith("TEST_GEN_")]
+    kinds = set(switches.loc[owned, "kind"])
+    assert "BREAKER" in kinds
+    assert "DISCONNECTOR" in kinds
+
+
+def test_create_component_bay_rejects_unknown_component(node_breaker_network):
+    with pytest.raises(ValueError, match="not creatable"):
+        create_component_bay(node_breaker_network, "Loads", {"id": "L1"})
+
+
+def test_create_component_bay_rejects_missing_required(node_breaker_network):
+    with pytest.raises(ValueError, match="Missing required"):
+        create_component_bay(
+            node_breaker_network,
+            "Generators",
+            {"id": "X", "min_p": 0.0, "max_p": 100.0},
+        )
+
+
+def test_create_component_bay_surfaces_pypowsybl_errors(node_breaker_network):
+    """An unknown busbar section id should propagate pypowsybl's error."""
+    fields = {
+        "id": "NO_BBS_GEN",
+        "bus_or_busbar_section_id": "DOES_NOT_EXIST",
+        "min_p": 0.0,
+        "max_p": 100.0,
+        "target_p": 50.0,
+        "voltage_regulator_on": False,
+        "position_order": 10,
+    }
+    with pytest.raises(Exception, match="not found"):
+        create_component_bay(node_breaker_network, "Generators", fields)

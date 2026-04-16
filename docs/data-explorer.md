@@ -57,6 +57,44 @@ When "Apply N changes & Run Load Flow" is clicked:
 This pattern is necessary because `st.rerun()` discards any `st.success/warning`
 rendered in the same pass.
 
+## Component creation — `CREATABLE_COMPONENTS`
+
+Defined in `state.py`. Maps component label → creation spec:
+
+```python
+"Generators": {
+    "bay_function": "create_generator_bay",
+    "required": ["id", "bus_or_busbar_section_id", "min_p", "max_p",
+                 "target_p", "voltage_regulator_on", "position_order"],
+    "optional": ["energy_source", "target_q", "target_v", "rated_s", "direction"],
+}
+```
+
+The render flow inserts a collapsible "Create a new generator" expander at
+the top of the Generators view (in `_render_create_generator_form`). Scope
+for v1:
+
+- **Node-breaker voltage levels only** (`list_node_breaker_voltage_levels`
+  filters by `topology_kind == "NODE_BREAKER"`). Bus-breaker VLs are
+  skipped; if none exist, an info message is shown.
+- The user picks a voltage level and then a **busbar section**
+  (`list_busbar_sections`).
+- `create_component_bay(network, "Generators", fields)` routes the call
+  through the worker thread and invokes
+  `pypowsybl.network.create_generator_bay(raw, df)`, which allocates new
+  nodes and inserts **disconnector + breaker** between the busbar section
+  and the generator. The user never sees node numbers.
+
+Validation happens on the main thread before dispatch (required fields,
+`max_p >= min_p`, `target_v > 0` when regulating). pypowsybl errors (e.g.
+unknown busbar section, duplicate id) propagate as `PyPowsyblError` and
+surface via `st.error(...)`.
+
+Adding another creatable injection type = add an entry to
+`CREATABLE_COMPONENTS` (pointing to the matching `create_*_bay` helper) and
+a form renderer. The worker-thread dispatch in `create_component_bay`
+already works for any `pypowsybl.network.create_*_bay` function.
+
 ## Column priority — `PRIORITY_COLUMNS`
 
 For Generators and Loads, certain columns are moved to sit right after `name`
