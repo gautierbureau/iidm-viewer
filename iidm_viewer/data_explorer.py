@@ -2,9 +2,12 @@ import pandas as pd
 import streamlit as st
 from iidm_viewer.network_info import COMPONENT_TYPES
 from iidm_viewer.state import (
+    CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
     EDITABLE_COMPONENTS,
     LOCATOR_FIELDS,
+    branch_side_locator_fields,
+    create_branch_bay,
     create_component_bay,
     list_busbar_sections,
     list_node_breaker_voltage_levels,
@@ -229,6 +232,98 @@ def _render_create_component_form(network, component: str):
         st.rerun()
 
 
+def _render_side_picker(network, nb_vls, vl_labels, prefix: str, side: int):
+    """Render VL + busbar-section selectbox pair for one side of a branch."""
+    vl_id = st.selectbox(
+        f"Voltage level {side}",
+        nb_vls["id"].tolist(),
+        format_func=lambda i: vl_labels.get(i, i),
+        key=f"{prefix}_vl_{side}",
+    )
+    bbs_options = list_busbar_sections(network, vl_id)
+    if not bbs_options:
+        st.warning(f"No busbar sections found in {vl_id}.")
+        return None
+    bbs_id = st.selectbox(
+        f"Busbar section {side}", bbs_options, key=f"{prefix}_bbs_{side}"
+    )
+    return bbs_id
+
+
+def _render_create_branch_form(network, component: str):
+    """Collapsible form to create a new line or 2-winding transformer.
+
+    Branches need two feeder bays, so the form shows two VL + busbar pickers
+    side by side plus per-side position/direction fields. 2WTs additionally
+    require that both voltage levels belong to the same substation — that's
+    validated in :func:`validate_create_branch_fields`.
+    """
+    spec = CREATABLE_BRANCHES[component]
+    singular = {
+        "Lines": "line",
+        "2-Winding Transformers": "2-winding transformer",
+    }.get(component, component.lower())
+    prefix = f"new_{spec['bay_function']}"
+
+    with st.expander(f"Create a new {singular}", expanded=False):
+        nb_vls = list_node_breaker_voltage_levels(network)
+        if nb_vls.empty:
+            st.info(
+                f"{component} creation is currently limited to node-breaker "
+                "voltage levels; none were found in this network."
+            )
+            return
+
+        vl_labels = {
+            r["id"]: f"{r['display']} ({r['nominal_v']:.0f} kV, sub {r['substation_id']})"
+            for _, r in nb_vls.iterrows()
+        }
+
+        col1, col2 = st.columns(2)
+        with col1:
+            bbs1 = _render_side_picker(network, nb_vls, vl_labels, prefix, 1)
+        with col2:
+            bbs2 = _render_side_picker(network, nb_vls, vl_labels, prefix, 2)
+        if not bbs1 or not bbs2:
+            return
+
+        with st.form(key=f"{prefix}_form", clear_on_submit=False):
+            raw_fields = _render_generic_field_grid(spec["fields"], prefix)
+            st.markdown("**Side 1**")
+            raw_loc1 = _render_generic_field_grid(
+                branch_side_locator_fields(1), prefix
+            )
+            st.markdown("**Side 2**")
+            raw_loc2 = _render_generic_field_grid(
+                branch_side_locator_fields(2), prefix
+            )
+            submit = st.form_submit_button(f"Create {singular}")
+
+        if not submit:
+            return
+
+        fields = _coerce_field_values(spec["fields"], raw_fields)
+        fields.update(_coerce_field_values(branch_side_locator_fields(1), raw_loc1))
+        fields.update(_coerce_field_values(branch_side_locator_fields(2), raw_loc2))
+        fields["bus_or_busbar_section_id_1"] = bbs1
+        fields["bus_or_busbar_section_id_2"] = bbs2
+
+        # rated_s=0 is the form's "unset" sentinel for 2WTs.
+        if component == "2-Winding Transformers" and fields.get("rated_s") == 0.0:
+            fields.pop("rated_s", None)
+
+        try:
+            create_branch_bay(network, component, fields)
+        except Exception as e:
+            st.error(f"Create failed: {e}")
+            return
+
+        st.success(
+            f"Created {singular} {fields['id']} between {bbs1} and {bbs2}."
+        )
+        st.rerun()
+
+
 def render_data_explorer(network, selected_vl):
     lf_status = st.session_state.pop("_lf_status_message", None)
     if lf_status:
@@ -250,6 +345,8 @@ def render_data_explorer(network, selected_vl):
 
     if component in CREATABLE_COMPONENTS:
         _render_create_component_form(network, component)
+    elif component in CREATABLE_BRANCHES:
+        _render_create_branch_form(network, component)
 
     filter_by_vl = False
     if component in VL_FILTERABLE and selected_vl:

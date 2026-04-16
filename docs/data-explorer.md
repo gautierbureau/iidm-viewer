@@ -101,6 +101,48 @@ change required. The generic form renderer (`_render_generic_field_grid`)
 handles text/number/bool/select widgets from the spec; `create_component_bay`
 already dispatches to any `create_*_bay` function.
 
+## Branch creation — `CREATABLE_BRANCHES`
+
+Lines and 2-Winding Transformers connect two voltage levels, so they use
+a dedicated two-sided form (`_render_create_branch_form`) instead of the
+single-side injection form.
+
+The `CREATABLE_BRANCHES` registry (in `state.py`) mirrors
+`CREATABLE_COMPONENTS` but adds a `same_substation` flag:
+
+```python
+"Lines":                  {"bay_function": "create_line_bays", ...,
+                            "same_substation": False}
+"2-Winding Transformers": {"bay_function": "create_2_windings_transformer_bays",
+                            ..., "same_substation": True}
+```
+
+Side-specific locator fields (`bus_or_busbar_section_id_1/2`,
+`position_order_1/2`, `direction_1/2`) are generated at render time via
+`branch_side_locator_fields(side)` by suffixing the shared
+`_BRANCH_SIDE_LOCATOR` template.
+
+Render flow (for a node-breaker network):
+
+1. Two **voltage level + busbar section** pickers side by side
+   (`_render_side_picker` for sides 1 and 2). Bus-breaker VLs are
+   skipped for v1, same as for injections.
+2. Electrical fields (e.g. `r`, `x`, `g1/b1/g2/b2` for lines;
+   `r`, `x`, `g`, `b`, `rated_u1`, `rated_u2`, optional `rated_s` for
+   2WTs) rendered from the spec.
+3. Per-side `position_order` + `direction` locator fields rendered
+   under **Side 1** / **Side 2** headings.
+4. `create_branch_bay(network, component, fields)` runs
+   `validate_create_branch_fields` on the main thread, then dispatches
+   `pypowsybl.network.<bay_function>(raw, df)` through the worker
+   thread.
+
+`validate_create_branch_fields` enforces required fields on both sides
+and — for components with `same_substation=True` (i.e. 2WTs) — verifies
+both picked busbar sections belong to the same substation (via
+`_substations_of_bbs`), producing a friendly error before pypowsybl is
+involved.
+
 ## Column priority — `PRIORITY_COLUMNS`
 
 For Generators and Loads, certain columns are moved to sit right after `name`
