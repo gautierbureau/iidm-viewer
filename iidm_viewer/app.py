@@ -9,6 +9,7 @@ from iidm_viewer.extensions_explorer import render_extensions_explorer
 from iidm_viewer.reactive_curves import render_reactive_curves
 from iidm_viewer.operational_limits import render_operational_limits
 from iidm_viewer.network_map import render_network_map
+from iidm_viewer.pmax_visualization import render_pmax_visualization
 
 
 st.set_page_config(page_title="IIDM Viewer", layout="wide", page_icon="⚡")
@@ -67,7 +68,7 @@ if network is None:
     st.info("Upload an XIIDM file in the sidebar to get started.")
     st.stop()
 
-tab_overview, tab_map, tab_nad, tab_sld, tab_components, tab_extensions, tab_rcc, tab_limits = st.tabs(
+tab_overview, tab_map, tab_nad, tab_sld, tab_components, tab_extensions, tab_rcc, tab_limits, tab_pmax = st.tabs(
     [
         "Overview",
         "Network Map",
@@ -77,6 +78,7 @@ tab_overview, tab_map, tab_nad, tab_sld, tab_components, tab_extensions, tab_rcc
         "Data Explorer Extensions",
         "Reactive Capability Curves",
         "Operational Limits",
+        "Pmax Visualization",
     ]
 )
 
@@ -103,3 +105,6 @@ with tab_rcc:
 
 with tab_limits:
     render_operational_limits(network, selected_vl)
+
+with tab_pmax:
+    render_pmax_visualization(network, selected_vl)
