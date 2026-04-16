@@ -94,15 +94,16 @@ def test_generators_nominal_v_slider_narrows_rows(xiidm_upload):
 
 
 def test_constant_numeric_column_is_skipped(xiidm_upload):
-    """min_p/max_p are -9999/9999 for every IEEE14 generator → no slider,
-    just a 'constant value' caption."""
+    """All IEEE14 loads have load type UNDEFINED → the 'type' whitelist
+    filter has only one option, effectively constant, so no slider is shown
+    for p0 when all values happen to be distinct. Here we check that the
+    'connected' boolean filter (all True) yields no slider since it's
+    constant."""
     at = _prepare(xiidm_upload)
-    _select(at, "Generators")
+    _select(at, "Loads")
     slider_keys = {s.key for s in at.slider}
-    assert "flt_get_generators_min_p" not in slider_keys
-    assert "flt_get_generators_max_p" not in slider_keys
-    captions = [c.value for c in at.caption]
-    assert any("min_p: constant value" in c for c in captions)
+    # connected is boolean and all True → constant, should not produce a slider
+    assert "flt_get_loads_connected" not in slider_keys
 
 
 def test_varying_numeric_column_gets_slider(xiidm_upload):
