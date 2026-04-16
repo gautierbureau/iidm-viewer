@@ -16,3 +16,17 @@ dependencies = [
 
 [project.scripts]
 iidm-viewer = "iidm_viewer.cli:main"
+
+[tool.pytest.ini_options]
+addopts = "--cov=iidm_viewer --cov-report=term-missing --cov-report=xml"
+
+[tool.coverage.run]
+source = ["iidm_viewer"]
+omit = ["iidm_viewer/cli.py"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]
