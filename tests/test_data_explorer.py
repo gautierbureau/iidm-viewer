@@ -96,3 +96,44 @@ def test_data_explorer_vl_filterable_entries_map_to_registry():
     from iidm_viewer.network_info import COMPONENT_TYPES
 
     assert VL_FILTERABLE.issubset(set(COMPONENT_TYPES))
+
+
+def test_data_explorer_create_form_shows_info_for_bus_breaker_network(xiidm_upload):
+    """IEEE14 is bus-breaker, so the create-generator form should render the
+    'no node-breaker voltage levels found' info message.
+    """
+    at = _prepare(xiidm_upload)
+    at.selectbox(key="component_type_select").select("Generators").run(timeout=30)
+    assert not at.exception
+    infos = [i.value for i in at.info]
+    assert any("node-breaker" in i.lower() for i in infos)
+
+
+def test_data_explorer_create_form_hidden_for_non_generators(xiidm_upload):
+    """The create-generator form is specific to Generators and must not
+    appear for other component types.
+    """
+    at = _prepare(xiidm_upload)
+    at.selectbox(key="component_type_select").select("Loads").run(timeout=30)
+    assert not at.exception
+    # The info string from the create-generator form is unique enough
+    infos = [i.value for i in at.info]
+    assert not any("node-breaker" in i.lower() for i in infos)
+
+
+def test_data_explorer_create_form_renders_for_node_breaker(node_breaker_network):
+    """With a node-breaker network loaded, the Generators view must render
+    the creation form (no 'node-breaker' info fallback) and must not raise.
+    """
+    at = AppTest.from_file("iidm_viewer/app.py")
+    at.run(timeout=30)
+    at.session_state["network"] = node_breaker_network
+    at.session_state["_last_file"] = "four_substations.xiidm"
+    at.run(timeout=30)
+    at.selectbox(key="component_type_select").select("Generators").run(timeout=30)
+    assert not at.exception
+    infos = [i.value for i in at.info]
+    # No 'no node-breaker VLs' info should show: we DO have them.
+    assert not any("no node-breaker" in i.lower() for i in infos)
+    # The VL selectbox for the new generator must exist.
+    assert any(s.key == "new_gen_vl" for s in at.selectbox)

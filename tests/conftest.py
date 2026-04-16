@@ -44,3 +44,20 @@ def zip_upload(xiidm_bytes) -> FakeUploadedFile:
 @pytest.fixture(autouse=True)
 def cwd_project_root(monkeypatch):
     monkeypatch.chdir(ROOT)
+
+
+@pytest.fixture
+def node_breaker_network():
+    """A NetworkProxy wrapping a small node-breaker test network.
+
+    Uses pypowsybl's ``create_four_substations_node_breaker_network`` because
+    IEEE14 (the regular fixture) is bus-breaker and exercises a different
+    branch of the feeder-bay helper.
+    """
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    return NetworkProxy(run(_make))

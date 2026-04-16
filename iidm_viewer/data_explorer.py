@@ -1,7 +1,17 @@
 import pandas as pd
 import streamlit as st
 from iidm_viewer.network_info import COMPONENT_TYPES
-from iidm_viewer.state import EDITABLE_COMPONENTS, update_components, run_loadflow
+from iidm_viewer.state import (
+    CREATABLE_COMPONENTS,
+    EDITABLE_COMPONENTS,
+    ENERGY_SOURCES,
+    FEEDER_DIRECTIONS,
+    create_component_bay,
+    list_busbar_sections,
+    list_node_breaker_voltage_levels,
+    run_loadflow,
+    update_components,
+)
 from iidm_viewer.filters import (
     FILTERS,
     build_vl_lookup,
@@ -93,6 +103,140 @@ def _compute_changes(original: pd.DataFrame, edited: pd.DataFrame,
     return pd.DataFrame(rows)
 
 
+def _render_create_generator_form(network):
+    """Collapsible form to create a new generator on a busbar section.
+
+    Restricted to node-breaker voltage levels: pypowsybl's ``create_generator_bay``
+    inserts the disconnector + breaker so the user never deals with node numbers.
+    """
+    with st.expander("Create a new generator", expanded=False):
+        nb_vls = list_node_breaker_voltage_levels(network)
+        if nb_vls.empty:
+            st.info(
+                "Generator creation is currently limited to node-breaker "
+                "voltage levels; none were found in this network."
+            )
+            return
+
+        vl_labels = {
+            r["id"]: f"{r['display']} ({r['nominal_v']:.0f} kV)"
+            for _, r in nb_vls.iterrows()
+        }
+        vl_id = st.selectbox(
+            "Voltage level",
+            nb_vls["id"].tolist(),
+            format_func=lambda i: vl_labels.get(i, i),
+            key="new_gen_vl",
+        )
+
+        bbs_options = list_busbar_sections(network, vl_id)
+        if not bbs_options:
+            st.warning(f"No busbar sections found in {vl_id}.")
+            return
+        bbs_id = st.selectbox(
+            "Busbar section", bbs_options, key="new_gen_bbs"
+        )
+
+        with st.form(key="create_generator_form", clear_on_submit=False):
+            c1, c2 = st.columns(2)
+            new_id = c1.text_input("ID *", key="new_gen_id")
+            energy = c2.selectbox(
+                "Energy source",
+                ENERGY_SOURCES,
+                index=0,
+                key="new_gen_energy",
+            )
+
+            c1, c2, c3 = st.columns(3)
+            min_p = c1.number_input(
+                "min_p (MW) *", value=0.0, key="new_gen_min_p"
+            )
+            max_p = c2.number_input(
+                "max_p (MW) *", value=100.0, key="new_gen_max_p"
+            )
+            target_p = c3.number_input(
+                "target_p (MW) *", value=0.0, key="new_gen_target_p"
+            )
+
+            regulator_on = st.checkbox(
+                "Voltage regulator on",
+                value=False,
+                key="new_gen_reg",
+            )
+            c1, c2, c3 = st.columns(3)
+            target_v = c1.number_input(
+                "target_v (kV)", value=0.0, key="new_gen_target_v"
+            )
+            target_q = c2.number_input(
+                "target_q (MVar)", value=0.0, key="new_gen_target_q"
+            )
+            rated_s = c3.number_input(
+                "rated_s (MVA, 0 = unset)",
+                value=0.0,
+                min_value=0.0,
+                key="new_gen_rated_s",
+            )
+
+            c1, c2 = st.columns(2)
+            position_order = c1.number_input(
+                "Position order *",
+                value=10,
+                step=10,
+                min_value=0,
+                key="new_gen_position",
+                help="Order of this feeder on the busbar (ConnectablePosition).",
+            )
+            direction = c2.selectbox(
+                "Direction",
+                FEEDER_DIRECTIONS,
+                index=1,
+                key="new_gen_direction",
+            )
+
+            submit = st.form_submit_button("Create generator")
+
+        if not submit:
+            return
+
+        new_id = new_id.strip()
+        if not new_id:
+            st.error("ID is required.")
+            return
+        if max_p < min_p:
+            st.error("max_p must be >= min_p.")
+            return
+        if regulator_on and target_v <= 0:
+            st.error("target_v must be > 0 when voltage regulator is on.")
+            return
+
+        fields = {
+            "id": new_id,
+            "bus_or_busbar_section_id": bbs_id,
+            "min_p": float(min_p),
+            "max_p": float(max_p),
+            "target_p": float(target_p),
+            "voltage_regulator_on": bool(regulator_on),
+            "energy_source": energy,
+            "position_order": int(position_order),
+            "direction": direction,
+        }
+        if regulator_on:
+            fields["target_v"] = float(target_v)
+        else:
+            fields["target_q"] = float(target_q)
+        if rated_s > 0:
+            fields["rated_s"] = float(rated_s)
+
+        try:
+            create_component_bay(network, "Generators", fields)
+        except Exception as e:
+            st.error(f"Create failed: {e}")
+            return
+
+        st.success(f"Created generator {new_id} on {bbs_id}.")
+        st.rerun()
+
+
 def render_data_explorer(network, selected_vl):
     lf_status = st.session_state.pop("_lf_status_message", None)
     if lf_status:
@@ -111,6 +255,9 @@ def render_data_explorer(network, selected_vl):
     )
 
     method_name = COMPONENT_TYPES[component]
+
+    if component in CREATABLE_COMPONENTS and component == "Generators":
+        _render_create_generator_form(network)
 
     filter_by_vl = False
     if component in VL_FILTERABLE and selected_vl:
