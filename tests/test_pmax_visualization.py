@@ -13,11 +13,17 @@ def _load_and_run(xiidm_upload):
     return network
 
 
-def test_no_data_without_loadflow(xiidm_upload):
-    """Without a load flow, bus voltages are zero → empty result."""
+def test_pmax_data_without_loadflow_has_zero_p_actual(xiidm_upload):
+    """Without a load flow p1 is absent → p_actual_mw = 0 for all lines.
+
+    The IEEE14 XIIDM file stores bus voltages (v_mag > 0) so Pmax can be
+    computed, but line power flows are not stored, so p_actual stays 0.
+    """
     network = load_network(xiidm_upload)
     df = _compute_pmax_data(network)
-    assert df.empty
+    # Voltages are stored → rows are produced; power flows are not → P = 0
+    assert not df.empty
+    assert (df["p_actual_mw"] == 0.0).all()
 
 
 def test_pmax_data_after_loadflow(xiidm_upload):
