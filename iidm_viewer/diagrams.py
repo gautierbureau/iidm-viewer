@@ -1,10 +1,18 @@
 import streamlit as st
 from iidm_viewer.components import render_svg
+from iidm_viewer.nad_interactive import make_interactive_nad_svg
+from iidm_viewer.powsybl_worker import run
 
 
 def render_nad_tab(network, selected_vl):
     from pypowsybl.network import NadParameters
     depth = st.slider("Depth", min_value=0, max_value=10, value=1, key="nad_depth_slider")
+    interactive = st.checkbox(
+        "Enable click-to-select (experimental)",
+        value=True,
+        key="nad_interactive",
+        help="Click a voltage-level node on the diagram to select it in the sidebar.",
+    )
 
     if not selected_vl:
         st.info("Select a voltage level in the sidebar to display the Network Area Diagram.")
@@ -18,7 +26,17 @@ def render_nad_tab(network, selected_vl):
                 depth=depth,
                 nad_parameters=nad_params,
             )
-            render_svg(svg.svg, height=700)
+            if interactive:
+                # Extract strings via the proxy (each .attr call does its own
+                # run() on the worker).  Do NOT nest these inside another run()
+                # — that would deadlock the single-threaded executor.
+                from types import SimpleNamespace
+                html = make_interactive_nad_svg(
+                    SimpleNamespace(svg=svg.svg, metadata=svg.metadata)
+                )
+                render_svg(html, height=700)
+            else:
+                render_svg(svg.svg, height=700)
         except Exception as e:
             st.error(f"Error generating NAD: {e}")
 
