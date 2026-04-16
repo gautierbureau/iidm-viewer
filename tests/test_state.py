@@ -117,12 +117,30 @@ def test_get_voltage_levels_df_display_prefers_name_over_id(xiidm_upload):
 # --- Component creation (feeder-bay) ---
 
 
-def test_creatable_components_has_generator_entry():
-    assert "Generators" in CREATABLE_COMPONENTS
-    spec = CREATABLE_COMPONENTS["Generators"]
-    assert spec["bay_function"] == "create_generator_bay"
-    assert "id" in spec["required"]
-    assert "bus_or_busbar_section_id" in spec["required"]
+def test_creatable_components_has_expected_injection_types():
+    expected = {
+        "Generators": "create_generator_bay",
+        "Loads": "create_load_bay",
+        "Batteries": "create_battery_bay",
+        "Static VAR Compensators": "create_static_var_compensator_bay",
+        "VSC Converter Stations": "create_vsc_converter_station_bay",
+        "LCC Converter Stations": "create_lcc_converter_station_bay",
+    }
+    for label, bay_fn in expected.items():
+        assert label in CREATABLE_COMPONENTS, label
+        spec = CREATABLE_COMPONENTS[label]
+        assert spec["bay_function"] == bay_fn
+        field_names = {f["name"] for f in spec["fields"]}
+        assert "id" in field_names
+
+
+def test_creatable_components_every_spec_has_required_id_field():
+    for label, spec in CREATABLE_COMPONENTS.items():
+        id_field = next(
+            (f for f in spec["fields"] if f["name"] == "id"), None
+        )
+        assert id_field is not None, f"{label} missing id field"
+        assert id_field["required"], f"{label} id must be required"
 
 
 def test_list_node_breaker_voltage_levels_ieee14_is_empty(xiidm_upload):
@@ -180,15 +198,166 @@ def test_create_component_bay_creates_generator_with_switches(node_breaker_netwo
 
 def test_create_component_bay_rejects_unknown_component(node_breaker_network):
     with pytest.raises(ValueError, match="not creatable"):
-        create_component_bay(node_breaker_network, "Loads", {"id": "L1"})
+        create_component_bay(node_breaker_network, "Lines", {"id": "L1"})
 
 
 def test_create_component_bay_rejects_missing_required(node_breaker_network):
-    with pytest.raises(ValueError, match="Missing required"):
+    # Missing target_p + position_order + busbar → validation must reject
+    with pytest.raises(ValueError, match="required"):
         create_component_bay(
             node_breaker_network,
             "Generators",
             {"id": "X", "min_p": 0.0, "max_p": 100.0},
+        )
+
+
+def test_create_component_bay_validates_minmax_p(node_breaker_network):
+    with pytest.raises(ValueError, match="max_p must be"):
+        create_component_bay(
+            node_breaker_network,
+            "Generators",
+            {
+                "id": "BADGEN",
+                "bus_or_busbar_section_id": "S1VL1_BBS",
+                "min_p": 100.0,
+                "max_p": 50.0,
+                "target_p": 75.0,
+                "voltage_regulator_on": False,
+                "position_order": 50,
+            },
+        )
+
+
+def test_create_component_bay_validates_voltage_regulator(node_breaker_network):
+    with pytest.raises(ValueError, match="target_v must be"):
+        create_component_bay(
+            node_breaker_network,
+            "Generators",
+            {
+                "id": "REGGEN",
+                "bus_or_busbar_section_id": "S1VL1_BBS",
+                "min_p": 0.0,
+                "max_p": 100.0,
+                "target_p": 50.0,
+                "voltage_regulator_on": True,
+                "target_v": 0.0,
+                "position_order": 50,
+            },
+        )
+
+
+def test_create_component_bay_creates_load(node_breaker_network):
+    create_component_bay(
+        node_breaker_network,
+        "Loads",
+        {
+            "id": "TEST_LOAD",
+            "bus_or_busbar_section_id": "S1VL1_BBS",
+            "p0": 12.5,
+            "q0": 3.0,
+            "type": "UNDEFINED",
+            "position_order": 200,
+            "direction": "BOTTOM",
+        },
+    )
+    loads = node_breaker_network.get_loads()
+    assert "TEST_LOAD" in loads.index
+    assert loads.loc["TEST_LOAD", "p0"] == 12.5
+    assert loads.loc["TEST_LOAD", "voltage_level_id"] == "S1VL1"
+
+
+def test_create_component_bay_creates_battery(node_breaker_network):
+    create_component_bay(
+        node_breaker_network,
+        "Batteries",
+        {
+            "id": "TEST_BAT",
+            "bus_or_busbar_section_id": "S1VL1_BBS",
+            "min_p": 0.0,
+            "max_p": 50.0,
+            "target_p": 10.0,
+            "target_q": 0.0,
+            "position_order": 210,
+            "direction": "BOTTOM",
+        },
+    )
+    bats = node_breaker_network.get_batteries()
+    assert "TEST_BAT" in bats.index
+    assert bats.loc["TEST_BAT", "max_p"] == 50.0
+
+
+def test_create_component_bay_creates_svc(node_breaker_network):
+    create_component_bay(
+        node_breaker_network,
+        "Static VAR Compensators",
+        {
+            "id": "TEST_SVC",
+            "bus_or_busbar_section_id": "S1VL1_BBS",
+            "b_min": -0.01,
+            "b_max": 0.01,
+            "regulation_mode": "VOLTAGE",
+            "regulating": True,
+            "target_v": 225.0,
+            "position_order": 220,
+            "direction": "BOTTOM",
+        },
+    )
+    svcs = node_breaker_network.get_static_var_compensators()
+    assert "TEST_SVC" in svcs.index
+    assert svcs.loc["TEST_SVC", "regulation_mode"] == "VOLTAGE"
+
+
+def test_create_component_bay_creates_vsc_station(node_breaker_network):
+    create_component_bay(
+        node_breaker_network,
+        "VSC Converter Stations",
+        {
+            "id": "TEST_VSC",
+            "bus_or_busbar_section_id": "S1VL1_BBS",
+            "loss_factor": 1.0,
+            "voltage_regulator_on": False,
+            "target_q": 5.0,
+            "position_order": 230,
+            "direction": "BOTTOM",
+        },
+    )
+    vsc = node_breaker_network.get_vsc_converter_stations()
+    assert "TEST_VSC" in vsc.index
+
+
+def test_create_component_bay_creates_lcc_station(node_breaker_network):
+    create_component_bay(
+        node_breaker_network,
+        "LCC Converter Stations",
+        {
+            "id": "TEST_LCC",
+            "bus_or_busbar_section_id": "S1VL1_BBS",
+            "power_factor": 0.85,
+            "loss_factor": 1.0,
+            "position_order": 240,
+            "direction": "BOTTOM",
+        },
+    )
+    lcc = node_breaker_network.get_lcc_converter_stations()
+    assert "TEST_LCC" in lcc.index
+    assert lcc.loc["TEST_LCC", "power_factor"] == pytest.approx(0.85)
+
+
+def test_create_component_bay_svc_voltage_mode_needs_target_v(node_breaker_network):
+    with pytest.raises(ValueError, match="target_v must be"):
+        create_component_bay(
+            node_breaker_network,
+            "Static VAR Compensators",
+            {
+                "id": "BAD_SVC",
+                "bus_or_busbar_section_id": "S1VL1_BBS",
+                "b_min": -0.01,
+                "b_max": 0.01,
+                "regulation_mode": "VOLTAGE",
+                "regulating": True,
+                "target_v": 0.0,
+                "position_order": 250,
+            },
         )
 
 

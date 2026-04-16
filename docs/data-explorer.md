@@ -59,41 +59,47 @@ rendered in the same pass.
 
 ## Component creation — `CREATABLE_COMPONENTS`
 
-Defined in `state.py`. Maps component label → creation spec:
+Defined in `state.py`. Maps component label → creation spec. Each spec
+has:
 
-```python
-"Generators": {
-    "bay_function": "create_generator_bay",
-    "required": ["id", "bus_or_busbar_section_id", "min_p", "max_p",
-                 "target_p", "voltage_regulator_on", "position_order"],
-    "optional": ["energy_source", "target_q", "target_v", "rated_s", "direction"],
-}
-```
+- `bay_function` — the `pypowsybl.network.create_*_bay` entry point.
+- `fields` — a list of typed field dicts driving the form
+  (`name`, `label`, `kind` in {`text`, `float`, `int`, `bool`, `select`},
+  `required`, `default`, optional `options`, `help`, `min_value`, `step`).
+- `validate` (optional) — key into `_VALIDATORS` for extra business-rule
+  checks (e.g. `max_p >= min_p`, `target_v > 0` when regulating).
 
-The render flow inserts a collapsible "Create a new generator" expander at
-the top of the Generators view (in `_render_create_generator_form`). Scope
-for v1:
+Currently creatable: Generators, Loads, Batteries, Static VAR Compensators,
+VSC Converter Stations, LCC Converter Stations. Each maps to its
+matching `create_*_bay` helper in pypowsybl 1.14.
 
-- **Node-breaker voltage levels only** (`list_node_breaker_voltage_levels`
-  filters by `topology_kind == "NODE_BREAKER"`). Bus-breaker VLs are
-  skipped; if none exist, an info message is shown.
-- The user picks a voltage level and then a **busbar section**
-  (`list_busbar_sections`).
-- `create_component_bay(network, "Generators", fields)` routes the call
-  through the worker thread and invokes
-  `pypowsybl.network.create_generator_bay(raw, df)`, which allocates new
-  nodes and inserts **disconnector + breaker** between the busbar section
-  and the generator. The user never sees node numbers.
+Shared locator fields (`position_order`, `direction`) live in
+`LOCATOR_FIELDS` and are appended to every form. The `bus_or_busbar_section_id`
+comes from a VL + busbar picker rendered above the `st.form`.
 
-Validation happens on the main thread before dispatch (required fields,
-`max_p >= min_p`, `target_v > 0` when regulating). pypowsybl errors (e.g.
-unknown busbar section, duplicate id) propagate as `PyPowsyblError` and
-surface via `st.error(...)`.
+The Data Explorer inserts a collapsible "Create a new ..." expander at the
+top of any creatable component's view
+(`_render_create_component_form(network, component)`). Render flow:
 
-Adding another creatable injection type = add an entry to
-`CREATABLE_COMPONENTS` (pointing to the matching `create_*_bay` helper) and
-a form renderer. The worker-thread dispatch in `create_component_bay`
-already works for any `pypowsybl.network.create_*_bay` function.
+1. Pick a **node-breaker voltage level** from
+   `list_node_breaker_voltage_levels` (empty → info message, bus-breaker
+   VLs skipped for v1).
+2. Pick a **busbar section** within that VL (`list_busbar_sections`).
+3. Fill component fields (rendered generically from the spec) + the
+   locator fields.
+4. `create_component_bay(network, component, fields)` runs
+   `validate_create_fields` on the main thread, then dispatches
+   `pypowsybl.network.<bay_function>(raw, df)` through the worker thread.
+   In node-breaker VLs the helper allocates nodes and inserts a
+   **disconnector + breaker** between the busbar section and the new
+   injection, so the user never sees node numbers.
+5. pypowsybl errors (unknown busbar, duplicate id, enum mismatches)
+   propagate and surface via `st.error(...)`.
+
+Adding another creatable injection type is one registry entry — no UI
+change required. The generic form renderer (`_render_generic_field_grid`)
+handles text/number/bool/select widgets from the spec; `create_component_bay`
+already dispatches to any `create_*_bay` function.
 
 ## Column priority — `PRIORITY_COLUMNS`
 
