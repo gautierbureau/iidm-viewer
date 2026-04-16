@@ -58,7 +58,8 @@ def _compute_pmax_data(network) -> pd.DataFrame:
 
         # Pmax = V1_kV × V2_kV / X_Ω  [MW]
         pmax = v1 * v2 / abs(x)
-        p_actual = abs(float(r.get("p1", 0) or 0))
+        p1_raw = r.get("p1")
+        p_actual = abs(float(p1_raw)) if pd.notna(p1_raw) else 0.0
 
         ratio = p_actual / pmax if pmax > 1e-6 else float("nan")
         if pd.notna(ratio) and 0.0 <= ratio <= 1.0:
