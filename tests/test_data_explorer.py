@@ -109,14 +109,12 @@ def test_data_explorer_create_form_shows_info_for_bus_breaker_network(xiidm_uplo
     assert any("node-breaker" in i.lower() for i in infos)
 
 
-def test_data_explorer_create_form_hidden_for_non_generators(xiidm_upload):
-    """The create-generator form is specific to Generators and must not
-    appear for other component types.
-    """
+def test_data_explorer_create_form_hidden_for_non_creatable(xiidm_upload):
+    """Non-creatable component types (e.g. Lines) must not show a create form."""
     at = _prepare(xiidm_upload)
-    at.selectbox(key="component_type_select").select("Loads").run(timeout=30)
+    at.selectbox(key="component_type_select").select("Lines").run(timeout=30)
     assert not at.exception
-    # The info string from the create-generator form is unique enough
+    # The 'node-breaker' info string is unique to the create form.
     infos = [i.value for i in at.info]
     assert not any("node-breaker" in i.lower() for i in infos)
 
@@ -136,4 +134,16 @@ def test_data_explorer_create_form_renders_for_node_breaker(node_breaker_network
     # No 'no node-breaker VLs' info should show: we DO have them.
     assert not any("no node-breaker" in i.lower() for i in infos)
     # The VL selectbox for the new generator must exist.
-    assert any(s.key == "new_gen_vl" for s in at.selectbox)
+    assert any(s.key == "new_create_generator_bay_vl" for s in at.selectbox)
+
+
+def test_data_explorer_create_form_renders_for_loads(node_breaker_network):
+    """The generic form should render for Loads as well when node-breaker."""
+    at = AppTest.from_file("iidm_viewer/app.py")
+    at.run(timeout=30)
+    at.session_state["network"] = node_breaker_network
+    at.session_state["_last_file"] = "four_substations.xiidm"
+    at.run(timeout=30)
+    at.selectbox(key="component_type_select").select("Loads").run(timeout=30)
+    assert not at.exception
+    assert any(s.key == "new_create_load_bay_vl" for s in at.selectbox)

@@ -4,8 +4,7 @@ from iidm_viewer.network_info import COMPONENT_TYPES
 from iidm_viewer.state import (
     CREATABLE_COMPONENTS,
     EDITABLE_COMPONENTS,
-    ENERGY_SOURCES,
-    FEEDER_DIRECTIONS,
+    LOCATOR_FIELDS,
     create_component_bay,
     list_busbar_sections,
     list_node_breaker_voltage_levels,
@@ -103,17 +102,82 @@ def _compute_changes(original: pd.DataFrame, edited: pd.DataFrame,
     return pd.DataFrame(rows)
 
 
-def _render_create_generator_form(network):
-    """Collapsible form to create a new generator on a busbar section.
+def _render_field(field: dict, key: str):
+    """Render one form widget from a field spec and return its value."""
+    kind = field["kind"]
+    label = field["label"] + (" *" if field["required"] else "")
+    help_text = field.get("help")
+    default = field.get("default")
+    if kind == "text":
+        return st.text_input(label, value=default or "", key=key, help=help_text)
+    if kind == "float":
+        kw = {"value": float(default), "key": key, "help": help_text}
+        if "min_value" in field:
+            kw["min_value"] = float(field["min_value"])
+        return st.number_input(label, **kw)
+    if kind == "int":
+        kw = {
+            "value": int(default),
+            "step": int(field.get("step", 1)),
+            "key": key,
+            "help": help_text,
+        }
+        if "min_value" in field:
+            kw["min_value"] = int(field["min_value"])
+        return st.number_input(label, **kw)
+    if kind == "bool":
+        return st.checkbox(label, value=bool(default), key=key, help=help_text)
+    if kind == "select":
+        options = field["options"]
+        idx = options.index(default) if default in options else 0
+        return st.selectbox(label, options, index=idx, key=key, help=help_text)
+    raise ValueError(f"Unknown field kind {kind!r}")
 
-    Restricted to node-breaker voltage levels: pypowsybl's ``create_generator_bay``
-    inserts the disconnector + breaker so the user never deals with node numbers.
+
+def _render_generic_field_grid(fields_spec: list[dict], key_prefix: str) -> dict:
+    """Render all fields in a responsive 3-column grid."""
+    values: dict = {}
+    for chunk_start in range(0, len(fields_spec), 3):
+        chunk = fields_spec[chunk_start:chunk_start + 3]
+        cols = st.columns(len(chunk))
+        for col, spec in zip(cols, chunk):
+            with col:
+                values[spec["name"]] = _render_field(
+                    spec, key=f"{key_prefix}_{spec['name']}"
+                )
+    return values
+
+
+def _coerce_field_values(fields_spec: list[dict], raw_values: dict) -> dict:
+    """Strip text fields and cast int fields; pass float/bool/select through."""
+    coerced = {}
+    for spec in fields_spec:
+        v = raw_values.get(spec["name"])
+        if spec["kind"] == "text":
+            v = (v or "").strip()
+        elif spec["kind"] == "int" and v is not None:
+            v = int(v)
+        coerced[spec["name"]] = v
+    return coerced
+
+
+def _render_create_component_form(network, component: str):
+    """Collapsible form to create a new injection via a feeder bay.
+
+    Registry-driven: fields come from :data:`CREATABLE_COMPONENTS` plus the
+    shared locator fields. Restricted to node-breaker voltage levels, where
+    pypowsybl's ``create_*_bay`` helper inserts the disconnector + breaker
+    so the user never deals with node numbers.
     """
-    with st.expander("Create a new generator", expanded=False):
+    spec = CREATABLE_COMPONENTS[component]
+    singular = component.lower().rstrip("s")
+    prefix = f"new_{spec['bay_function']}"
+
+    with st.expander(f"Create a new {singular}", expanded=False):
         nb_vls = list_node_breaker_voltage_levels(network)
         if nb_vls.empty:
             st.info(
-                "Generator creation is currently limited to node-breaker "
+                f"{component} creation is currently limited to node-breaker "
                 "voltage levels; none were found in this network."
             )
             return
@@ -126,7 +190,7 @@ def _render_create_generator_form(network):
             "Voltage level",
             nb_vls["id"].tolist(),
             format_func=lambda i: vl_labels.get(i, i),
-            key="new_gen_vl",
+            key=f"{prefix}_vl",
         )
 
         bbs_options = list_busbar_sections(network, vl_id)
@@ -134,106 +198,34 @@ def _render_create_generator_form(network):
             st.warning(f"No busbar sections found in {vl_id}.")
             return
         bbs_id = st.selectbox(
-            "Busbar section", bbs_options, key="new_gen_bbs"
+            "Busbar section", bbs_options, key=f"{prefix}_bbs"
         )
 
-        with st.form(key="create_generator_form", clear_on_submit=False):
-            c1, c2 = st.columns(2)
-            new_id = c1.text_input("ID *", key="new_gen_id")
-            energy = c2.selectbox(
-                "Energy source",
-                ENERGY_SOURCES,
-                index=0,
-                key="new_gen_energy",
-            )
-
-            c1, c2, c3 = st.columns(3)
-            min_p = c1.number_input(
-                "min_p (MW) *", value=0.0, key="new_gen_min_p"
-            )
-            max_p = c2.number_input(
-                "max_p (MW) *", value=100.0, key="new_gen_max_p"
-            )
-            target_p = c3.number_input(
-                "target_p (MW) *", value=0.0, key="new_gen_target_p"
-            )
-
-            regulator_on = st.checkbox(
-                "Voltage regulator on",
-                value=False,
-                key="new_gen_reg",
-            )
-            c1, c2, c3 = st.columns(3)
-            target_v = c1.number_input(
-                "target_v (kV)", value=0.0, key="new_gen_target_v"
-            )
-            target_q = c2.number_input(
-                "target_q (MVar)", value=0.0, key="new_gen_target_q"
-            )
-            rated_s = c3.number_input(
-                "rated_s (MVA, 0 = unset)",
-                value=0.0,
-                min_value=0.0,
-                key="new_gen_rated_s",
-            )
-
-            c1, c2 = st.columns(2)
-            position_order = c1.number_input(
-                "Position order *",
-                value=10,
-                step=10,
-                min_value=0,
-                key="new_gen_position",
-                help="Order of this feeder on the busbar (ConnectablePosition).",
-            )
-            direction = c2.selectbox(
-                "Direction",
-                FEEDER_DIRECTIONS,
-                index=1,
-                key="new_gen_direction",
-            )
-
-            submit = st.form_submit_button("Create generator")
+        with st.form(key=f"{prefix}_form", clear_on_submit=False):
+            raw_fields = _render_generic_field_grid(spec["fields"], prefix)
+            st.markdown("---")
+            raw_locator = _render_generic_field_grid(LOCATOR_FIELDS, prefix)
+            submit = st.form_submit_button(f"Create {singular}")
 
         if not submit:
             return
 
-        new_id = new_id.strip()
-        if not new_id:
-            st.error("ID is required.")
-            return
-        if max_p < min_p:
-            st.error("max_p must be >= min_p.")
-            return
-        if regulator_on and target_v <= 0:
-            st.error("target_v must be > 0 when voltage regulator is on.")
-            return
+        fields = _coerce_field_values(spec["fields"], raw_fields)
+        fields.update(_coerce_field_values(LOCATOR_FIELDS, raw_locator))
+        fields["bus_or_busbar_section_id"] = bbs_id
 
-        fields = {
-            "id": new_id,
-            "bus_or_busbar_section_id": bbs_id,
-            "min_p": float(min_p),
-            "max_p": float(max_p),
-            "target_p": float(target_p),
-            "voltage_regulator_on": bool(regulator_on),
-            "energy_source": energy,
-            "position_order": int(position_order),
-            "direction": direction,
-        }
-        if regulator_on:
-            fields["target_v"] = float(target_v)
-        else:
-            fields["target_q"] = float(target_q)
-        if rated_s > 0:
-            fields["rated_s"] = float(rated_s)
+        # rated_s=0 is the form's "unset" sentinel; pypowsybl treats missing
+        # columns as unset, so drop it rather than sending zero.
+        if component == "Generators" and fields.get("rated_s") == 0.0:
+            fields.pop("rated_s", None)
 
         try:
-            create_component_bay(network, "Generators", fields)
+            create_component_bay(network, component, fields)
         except Exception as e:
             st.error(f"Create failed: {e}")
             return
 
-        st.success(f"Created generator {new_id} on {bbs_id}.")
+        st.success(f"Created {singular} {fields['id']} on {bbs_id}.")
         st.rerun()
 
 
@@ -256,8 +248,8 @@ def render_data_explorer(network, selected_vl):
 
     method_name = COMPONENT_TYPES[component]
 
-    if component in CREATABLE_COMPONENTS and component == "Generators":
-        _render_create_generator_form(network)
+    if component in CREATABLE_COMPONENTS:
+        _render_create_component_form(network, component)
 
     filter_by_vl = False
     if component in VL_FILTERABLE and selected_vl:
