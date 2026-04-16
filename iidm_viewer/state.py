@@ -311,15 +311,15 @@ def validate_create_fields(component: str, fields: dict) -> list[str]:
 
 
 def list_node_breaker_voltage_levels(network):
-    """Return node-breaker voltage levels as a DataFrame with id/display/nominal_v."""
+    """Return node-breaker voltage levels as a DataFrame with id/display/substation_id/nominal_v."""
     vls = network.get_voltage_levels(all_attributes=True)
     if "topology_kind" not in vls.columns:
-        return pd.DataFrame(columns=["id", "display", "nominal_v"])
+        return pd.DataFrame(columns=["id", "display", "substation_id", "nominal_v"])
     nb = vls[vls["topology_kind"] == "NODE_BREAKER"].reset_index()
     if nb.empty:
-        return pd.DataFrame(columns=["id", "display", "nominal_v"])
+        return pd.DataFrame(columns=["id", "display", "substation_id", "nominal_v"])
     nb["display"] = nb.apply(lambda r: r["name"] if r["name"] else r["id"], axis=1)
-    return nb[["id", "display", "nominal_v"]].sort_values("display")
+    return nb[["id", "display", "substation_id", "nominal_v"]].sort_values("display")
 
 
 def list_busbar_sections(network, voltage_level_id: str):
@@ -328,6 +328,21 @@ def list_busbar_sections(network, voltage_level_id: str):
     if bbs.empty:
         return []
     return sorted(bbs[bbs["voltage_level_id"] == voltage_level_id].index.tolist())
+
+
+def _dispatch_bay_create(network, bay_fn_name: str, fields: dict):
+    """Build a one-row DataFrame and call pypowsybl's ``<bay_fn_name>``."""
+    row = {k: v for k, v in fields.items() if v is not None and v != ""}
+    df = pd.DataFrame([row]).set_index("id")
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_create():
+        import pypowsybl.network as pn
+        getattr(pn, bay_fn_name)(raw, df)
+
+    run(_do_create)
+    st.session_state.pop("_vl_lookup_cache", None)
+    st.session_state.pop("_map_data_cache", None)
 
 
 def create_component_bay(network, component: str, fields: dict):
@@ -345,19 +360,138 @@ def create_component_bay(network, component: str, fields: dict):
     if errors:
         raise ValueError("; ".join(errors))
 
-    row = {k: v for k, v in fields.items() if v is not None and v != ""}
-    df = pd.DataFrame([row]).set_index("id")
-    bay_fn_name = CREATABLE_COMPONENTS[component]["bay_function"]
-    raw = object.__getattribute__(network, "_obj")
+    _dispatch_bay_create(
+        network,
+        CREATABLE_COMPONENTS[component]["bay_function"],
+        fields,
+    )
 
-    def _do_create():
-        import pypowsybl.network as pn
-        fn = getattr(pn, bay_fn_name)
-        fn(raw, df)
 
-    run(_do_create)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_map_data_cache", None)
+# --- Branches (two-end connectables: lines + 2-winding transformers) ---
+
+# Shared locator fields for each side of a branch. Rendered twice (sides 1 + 2)
+# by the form renderer; keys are ``*_1`` / ``*_2``.
+_BRANCH_SIDE_LOCATOR = [
+    {"name": "position_order", "label": "Position order",
+     "kind": "int", "required": True, "default": 10,
+     "min_value": 0, "step": 10, "help": _POSITION_HELP},
+    {"name": "direction", "label": "Direction", "kind": "select",
+     "required": False, "default": "BOTTOM", "options": FEEDER_DIRECTIONS},
+]
+
+CREATABLE_BRANCHES: dict[str, dict] = {
+    "Lines": {
+        "bay_function": "create_line_bays",
+        "fields": [
+            {"name": "id", "label": "ID", "kind": "text", "required": True, "default": ""},
+            {"name": "r", "label": "r (Ω)", "kind": "float", "required": True, "default": 0.1},
+            {"name": "x", "label": "x (Ω)", "kind": "float", "required": True, "default": 1.0},
+            {"name": "g1", "label": "g1 (S)", "kind": "float", "required": True, "default": 0.0},
+            {"name": "b1", "label": "b1 (S)", "kind": "float", "required": True, "default": 0.0},
+            {"name": "g2", "label": "g2 (S)", "kind": "float", "required": True, "default": 0.0},
+            {"name": "b2", "label": "b2 (S)", "kind": "float", "required": True, "default": 0.0},
+        ],
+        "same_substation": False,
+    },
+    "2-Winding Transformers": {
+        "bay_function": "create_2_windings_transformer_bays",
+        "fields": [
+            {"name": "id", "label": "ID", "kind": "text", "required": True, "default": ""},
+            {"name": "r", "label": "r (Ω)", "kind": "float", "required": True, "default": 0.5},
+            {"name": "x", "label": "x (Ω)", "kind": "float", "required": True, "default": 10.0},
+            {"name": "g", "label": "g (S)", "kind": "float", "required": True, "default": 0.0},
+            {"name": "b", "label": "b (S)", "kind": "float", "required": True, "default": 0.0},
+            {"name": "rated_u1", "label": "rated_u1 (kV)", "kind": "float",
+             "required": True, "default": 400.0},
+            {"name": "rated_u2", "label": "rated_u2 (kV)", "kind": "float",
+             "required": True, "default": 225.0},
+            {"name": "rated_s", "label": "rated_s (MVA, 0 = unset)",
+             "kind": "float", "required": False, "default": 0.0, "min_value": 0.0},
+        ],
+        # pypowsybl only allows 2WTs between two VLs of the same substation.
+        "same_substation": True,
+    },
+}
+
+
+def branch_side_locator_fields(side: int) -> list[dict]:
+    """Locator fields for one side of a branch, with names suffixed ``_<side>``."""
+    return [
+        {**f, "name": f"{f['name']}_{side}", "label": f"{f['label']} {side}"}
+        for f in _BRANCH_SIDE_LOCATOR
+    ]
+
+
+def validate_create_branch_fields(component: str, fields: dict, network=None) -> list[str]:
+    """Validate branch creation fields. Checks electrical fields + side-1/side-2
+    locator fields + busbar ids; if ``same_substation`` is set and a network is
+    supplied, verifies both chosen busbar sections live in the same substation.
+    """
+    spec = CREATABLE_BRANCHES.get(component)
+    if not spec:
+        return [f"{component!r} is not a creatable branch"]
+    errors = []
+    all_required = (
+        spec["fields"]
+        + branch_side_locator_fields(1)
+        + branch_side_locator_fields(2)
+    )
+    for f in all_required:
+        if f["required"] and (fields.get(f["name"]) is None
+                               or fields.get(f["name"]) == ""):
+            errors.append(f"{f['label']} is required.")
+    for side in (1, 2):
+        key = f"bus_or_busbar_section_id_{side}"
+        if not fields.get(key):
+            errors.append(f"Busbar section {side} is required.")
+    if spec.get("same_substation") and network is not None:
+        sub = _substations_of_bbs(
+            network,
+            fields.get("bus_or_busbar_section_id_1"),
+            fields.get("bus_or_busbar_section_id_2"),
+        )
+        if sub is not None and sub[0] != sub[1]:
+            errors.append(
+                f"{component} must connect voltage levels of the same substation "
+                f"(side 1: {sub[0]!r}, side 2: {sub[1]!r})."
+            )
+    return errors
+
+
+def _substations_of_bbs(network, bbs1: str, bbs2: str):
+    """Return ``(sub1, sub2)`` for the two busbar sections, or None if missing."""
+    if not bbs1 or not bbs2:
+        return None
+    bbs = network.get_busbar_sections()
+    vls = network.get_voltage_levels()
+    if bbs1 not in bbs.index or bbs2 not in bbs.index:
+        return None
+    vl1 = bbs.loc[bbs1, "voltage_level_id"]
+    vl2 = bbs.loc[bbs2, "voltage_level_id"]
+    if vl1 not in vls.index or vl2 not in vls.index:
+        return None
+    return vls.loc[vl1, "substation_id"], vls.loc[vl2, "substation_id"]
+
+
+def create_branch_bay(network, component: str, fields: dict):
+    """Create a new line or 2-winding transformer with feeder bays on each side.
+
+    ``fields`` must include the electrical fields, ``bus_or_busbar_section_id_1``,
+    ``bus_or_busbar_section_id_2``, and ``position_order_1``/``_2``. Routes
+    through the pypowsybl worker thread exactly like :func:`create_component_bay`.
+    """
+    if component not in CREATABLE_BRANCHES:
+        raise ValueError(f"{component!r} is not a creatable branch")
+
+    errors = validate_create_branch_fields(component, fields, network=network)
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    _dispatch_bay_create(
+        network,
+        CREATABLE_BRANCHES[component]["bay_function"],
+        fields,
+    )
 
 
 def get_voltage_levels_df(network):

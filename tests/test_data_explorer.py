@@ -110,9 +110,9 @@ def test_data_explorer_create_form_shows_info_for_bus_breaker_network(xiidm_uplo
 
 
 def test_data_explorer_create_form_hidden_for_non_creatable(xiidm_upload):
-    """Non-creatable component types (e.g. Lines) must not show a create form."""
+    """Non-creatable component types (e.g. 3-Winding Transformers) must not show a create form."""
     at = _prepare(xiidm_upload)
-    at.selectbox(key="component_type_select").select("Lines").run(timeout=30)
+    at.selectbox(key="component_type_select").select("3-Winding Transformers").run(timeout=30)
     assert not at.exception
     # The 'node-breaker' info string is unique to the create form.
     infos = [i.value for i in at.info]
@@ -147,3 +147,42 @@ def test_data_explorer_create_form_renders_for_loads(node_breaker_network):
     at.selectbox(key="component_type_select").select("Loads").run(timeout=30)
     assert not at.exception
     assert any(s.key == "new_create_load_bay_vl" for s in at.selectbox)
+
+
+def test_data_explorer_branch_form_renders_for_lines(node_breaker_network):
+    """Lines view must render two VL + busbar pickers on a node-breaker network."""
+    at = AppTest.from_file("iidm_viewer/app.py")
+    at.run(timeout=30)
+    at.session_state["network"] = node_breaker_network
+    at.session_state["_last_file"] = "four_substations.xiidm"
+    at.run(timeout=30)
+    at.selectbox(key="component_type_select").select("Lines").run(timeout=30)
+    assert not at.exception
+    keys = {s.key for s in at.selectbox}
+    assert "new_create_line_bays_vl_1" in keys
+    assert "new_create_line_bays_vl_2" in keys
+    assert "new_create_line_bays_bbs_1" in keys
+    assert "new_create_line_bays_bbs_2" in keys
+
+
+def test_data_explorer_branch_form_renders_for_2wt(node_breaker_network):
+    """2-Winding Transformers view must render two side pickers on node-breaker."""
+    at = AppTest.from_file("iidm_viewer/app.py")
+    at.run(timeout=30)
+    at.session_state["network"] = node_breaker_network
+    at.session_state["_last_file"] = "four_substations.xiidm"
+    at.run(timeout=30)
+    at.selectbox(key="component_type_select").select("2-Winding Transformers").run(timeout=30)
+    assert not at.exception
+    keys = {s.key for s in at.selectbox}
+    assert "new_create_2_windings_transformer_bays_vl_1" in keys
+    assert "new_create_2_windings_transformer_bays_vl_2" in keys
+
+
+def test_data_explorer_branch_form_shows_info_for_bus_breaker_network(xiidm_upload):
+    """On a bus-breaker network, Lines view must fall back to the node-breaker info."""
+    at = _prepare(xiidm_upload)
+    at.selectbox(key="component_type_select").select("Lines").run(timeout=30)
+    assert not at.exception
+    infos = [i.value for i in at.info]
+    assert any("node-breaker" in i.lower() for i in infos)

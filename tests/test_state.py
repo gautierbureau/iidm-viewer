@@ -4,7 +4,9 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from iidm_viewer.state import (
+    CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
+    create_branch_bay,
     create_component_bay,
     filter_voltage_levels,
     get_voltage_levels_df,
@@ -374,3 +376,106 @@ def test_create_component_bay_surfaces_pypowsybl_errors(node_breaker_network):
     }
     with pytest.raises(Exception, match="not found"):
         create_component_bay(node_breaker_network, "Generators", fields)
+
+
+# --- Branch creation (lines + 2-winding transformers) ---
+
+
+def test_creatable_branches_has_lines_and_2wt():
+    assert "Lines" in CREATABLE_BRANCHES
+    assert CREATABLE_BRANCHES["Lines"]["bay_function"] == "create_line_bays"
+    assert "2-Winding Transformers" in CREATABLE_BRANCHES
+    assert (
+        CREATABLE_BRANCHES["2-Winding Transformers"]["bay_function"]
+        == "create_2_windings_transformer_bays"
+    )
+
+
+def test_creatable_branches_same_substation_flag():
+    assert CREATABLE_BRANCHES["Lines"]["same_substation"] is False
+    assert CREATABLE_BRANCHES["2-Winding Transformers"]["same_substation"] is True
+
+
+def _base_line_fields():
+    return {
+        "id": "NEW_LINE",
+        "r": 0.1, "x": 1.0,
+        "g1": 0.0, "b1": 0.0, "g2": 0.0, "b2": 0.0,
+        "bus_or_busbar_section_id_1": "S2VL1_BBS",
+        "position_order_1": 100, "direction_1": "TOP",
+        "bus_or_busbar_section_id_2": "S3VL1_BBS",
+        "position_order_2": 100, "direction_2": "TOP",
+    }
+
+
+def _base_2wt_fields():
+    return {
+        "id": "NEW_2WT",
+        "r": 0.5, "x": 10.0, "g": 0.0, "b": 1e-6,
+        "rated_u1": 400.0, "rated_u2": 225.0,
+        "bus_or_busbar_section_id_1": "S1VL2_BBS1",
+        "position_order_1": 100, "direction_1": "TOP",
+        "bus_or_busbar_section_id_2": "S1VL1_BBS",
+        "position_order_2": 100, "direction_2": "BOTTOM",
+    }
+
+
+def test_create_branch_bay_creates_line(node_breaker_network):
+    create_branch_bay(node_breaker_network, "Lines", _base_line_fields())
+    lines = node_breaker_network.get_lines()
+    assert "NEW_LINE" in lines.index
+    row = lines.loc["NEW_LINE"]
+    assert row["voltage_level1_id"] == "S2VL1"
+    assert row["voltage_level2_id"] == "S3VL1"
+
+
+def test_create_branch_bay_creates_2wt(node_breaker_network):
+    create_branch_bay(
+        node_breaker_network, "2-Winding Transformers", _base_2wt_fields()
+    )
+    tr = node_breaker_network.get_2_windings_transformers()
+    assert "NEW_2WT" in tr.index
+    row = tr.loc["NEW_2WT"]
+    assert row["voltage_level1_id"] == "S1VL2"
+    assert row["voltage_level2_id"] == "S1VL1"
+    assert row["rated_u1"] == 400.0
+    assert row["rated_u2"] == 225.0
+
+
+def test_create_branch_bay_rejects_2wt_across_substations(node_breaker_network):
+    """A 2WT can only connect two VLs of the same substation. S1VL2 and S2VL1
+    live in different substations so pypowsybl must refuse — we surface it as
+    a friendly error BEFORE dispatch.
+    """
+    fields = _base_2wt_fields()
+    fields["bus_or_busbar_section_id_2"] = "S2VL1_BBS"
+    with pytest.raises(ValueError, match="same substation"):
+        create_branch_bay(
+            node_breaker_network, "2-Winding Transformers", fields
+        )
+
+
+def test_create_branch_bay_rejects_missing_side_locator(node_breaker_network):
+    fields = _base_line_fields()
+    fields.pop("position_order_2")
+    with pytest.raises(ValueError, match="Position order 2 is required"):
+        create_branch_bay(node_breaker_network, "Lines", fields)
+
+
+def test_create_branch_bay_rejects_missing_busbar(node_breaker_network):
+    fields = _base_line_fields()
+    fields["bus_or_busbar_section_id_1"] = ""
+    with pytest.raises(ValueError, match="Busbar section 1"):
+        create_branch_bay(node_breaker_network, "Lines", fields)
+
+
+def test_create_branch_bay_rejects_unknown_component(node_breaker_network):
+    with pytest.raises(ValueError, match="not a creatable branch"):
+        create_branch_bay(node_breaker_network, "Generators", {})
+
+
+def test_create_branch_bay_surfaces_pypowsybl_errors(node_breaker_network):
+    fields = _base_line_fields()
+    fields["bus_or_busbar_section_id_2"] = "DOES_NOT_EXIST"
+    with pytest.raises(Exception, match="not found"):
+        create_branch_bay(node_breaker_network, "Lines", fields)
