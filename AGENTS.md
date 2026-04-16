@@ -115,22 +115,39 @@ Minimum steps every end-to-end run must perform:
 
 ## 3. Architecture
 
-- `app.py` — entry point: sidebar (file uploader + VL selector) and four
-  tabs (Overview, NAD, SLD, Data Explorer).
-- `state.py` — session state, `load_network` (wraps result in
-  `NetworkProxy`), voltage-level dataframe helpers.
-- `powsybl_worker.py` — the thread-isolation mechanism. Touch
-  carefully.
-- `components.py` — `vl_selector`, `render_svg`.
-- `network_info.py` — Overview tab and the `COMPONENT_TYPES` registry.
-- `diagrams.py` — NAD and SLD tabs. Imports `NadParameters` /
-  `SldParameters` lazily inside the render functions (they are plain
-  Python classes, but keeping pypowsybl imports lazy is the repo rule).
-- `data_explorer.py` — tabular view with VL filter and ID substring
-  filter.
+Everything pypowsybl-facing flows: UI code → `NetworkProxy` → worker thread →
+pypowsybl → result wrapped and handed back.
 
-Everything pypowsybl-facing flows: UI code → `NetworkProxy` → worker
-thread → pypowsybl → result wrapped and handed back.
+### Module map
+
+| File | Role | Deep-dive |
+|---|---|---|
+| `powsybl_worker.py` | Single-threaded executor + `NetworkProxy` | [docs/threading.md](docs/threading.md) |
+| `state.py` | Session state init, `load_network`, `run_loadflow`, `update_components`, `EDITABLE_COMPONENTS` | [docs/loadflow.md](docs/loadflow.md) |
+| `lf_parameters.py` | Load flow parameter dialog + `get_lf_parameters()` | [docs/loadflow.md](docs/loadflow.md) |
+| `app.py` | Entry point: sidebar + 8 tabs | [docs/tabs.md](docs/tabs.md) |
+| `components.py` | `vl_selector`, `render_svg` | [docs/tabs.md](docs/tabs.md) |
+| `network_info.py` | `COMPONENT_TYPES` registry, Overview tab | [docs/tabs.md](docs/tabs.md) |
+| `diagrams.py` | NAD and SLD tab render functions | [docs/tabs.md](docs/tabs.md) |
+| `nad_interactive.py` | Click-to-select SVG injection for NAD | [docs/tabs.md](docs/tabs.md) |
+| `data_explorer.py` | Editable component tables, apply + LF flow | [docs/data-explorer.md](docs/data-explorer.md) |
+| `filters.py` | `FILTERS` whitelist, `build_vl_lookup`, `enrich_with_joins`, `render_filters` | [docs/filters.md](docs/filters.md) |
+| `network_map.py` | Leaflet map tab | [docs/network-map.md](docs/network-map.md) |
+| `operational_limits.py` | Loading % table + per-element limit chart | [docs/tabs.md](docs/tabs.md) |
+| `reactive_curves.py` | Generator reactive capability curve chart | [docs/tabs.md](docs/tabs.md) |
+| `extensions_explorer.py` | Extensions tab | [docs/tabs.md](docs/tabs.md) |
+| `cli.py` | `iidm-viewer` entry-point shim | — |
+
+### Quick-start by task
+
+| I want to… | Read first |
+|---|---|
+| Add/change any pypowsybl call | §1 + [docs/threading.md](docs/threading.md) |
+| Change load flow execution or parameters | [docs/loadflow.md](docs/loadflow.md) |
+| Add or modify a tab | [docs/tabs.md](docs/tabs.md) |
+| Change the editable-data or Apply+LF flow | [docs/data-explorer.md](docs/data-explorer.md) |
+| Change the filter system | [docs/filters.md](docs/filters.md) |
+| Change the network map | [docs/network-map.md](docs/network-map.md) |
 
 ## 4. Troubleshooting segfaults
 
