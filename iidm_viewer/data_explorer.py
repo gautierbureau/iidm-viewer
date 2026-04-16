@@ -94,6 +94,14 @@ def _compute_changes(original: pd.DataFrame, edited: pd.DataFrame,
 
 
 def render_data_explorer(network, selected_vl):
+    lf_status = st.session_state.pop("_lf_status_message", None)
+    if lf_status:
+        status_text, is_success = lf_status
+        if is_success:
+            st.success(status_text)
+        else:
+            st.warning(status_text)
+
     component_options = list(COMPONENT_TYPES.keys())
     component = st.selectbox(
         "Component type",
@@ -192,10 +200,10 @@ def render_data_explorer(network, selected_vl):
                                 with st.spinner("Running load flow..."):
                                     results = run_loadflow(network)
                                 status = results[0].status.name if results else "UNKNOWN"
-                                if status == "CONVERGED":
-                                    st.success(f"Load flow: {status}")
-                                else:
-                                    st.warning(f"Load flow: {status}")
+                                st.session_state["_lf_status_message"] = (
+                                    f"Load flow: {status}",
+                                    status == "CONVERGED",
+                                )
                             st.rerun()
                         except Exception as e:
                             st.error(f"Update failed: {e}")
