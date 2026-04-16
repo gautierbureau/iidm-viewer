@@ -25,6 +25,11 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build
 
+      - name: Upload to GitHub Release
+        uses: actions/upload-artifact@v4
+        with:
+          path: dist/*
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
