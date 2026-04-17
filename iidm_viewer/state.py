@@ -86,8 +86,14 @@ EDITABLE_COMPONENTS: dict[str, tuple[str, list[str]]] = {
     ),
     "HVDC Lines": ("update_hvdc_lines", ["active_power_setpoint", "converters_mode"]),
     "Dangling Lines": ("update_dangling_lines", ["p0", "q0", "connected"]),
-    "Lines": ("update_lines", ["connected1", "connected2"]),
-    "2-Winding Transformers": ("update_2_windings_transformers", ["connected1", "connected2"]),
+    "Lines": (
+        "update_lines",
+        ["r", "x", "g1", "b1", "g2", "b2", "connected1", "connected2"],
+    ),
+    "2-Winding Transformers": (
+        "update_2_windings_transformers",
+        ["r", "x", "g", "b", "connected1", "connected2"],
+    ),
 }
 
 
