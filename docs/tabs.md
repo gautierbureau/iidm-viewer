@@ -36,9 +36,12 @@ Calls `network.get_network_area_diagram(voltage_level_ids=[selected_vl], depth=d
 The result is a `NadResult`-like proxy with `.svg` and `.metadata` attributes.
 
 When interactive mode is on, `nad_interactive.make_interactive_nad_svg` injects
-`<style>` + `<script>` into the SVG before rendering. Clicking a VL node rewrites
-`?selected_vl=VLx` on the top-level URL, which Streamlit picks up via
-`st.query_params` on the next rerun (`app.py` lines 20-22).
+`<style>` + `<script>` into the SVG before rendering. Clicking a VL node posts
+`{channel: 'iidm-viewer', type: 'nad-vl-click', vl: <equipmentId>}` to
+`window.parent` via `postMessage`. Nothing on the Python side consumes that
+message today — `st.components.v1.html` is a one-way iframe. Wiring it into
+session state requires a custom Streamlit component
+(see [future-interactive-viewer.md](future-interactive-viewer.md)).
 
 Note: accessing `.svg` and `.metadata` from the proxy issues two separate `run()`
 calls. Do not wrap these inside another `run()` — that deadlocks the executor.
