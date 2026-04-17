@@ -7,17 +7,26 @@ from iidm_viewer.state import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
     CREATABLE_CONTAINERS,
+    CREATABLE_HVDC_LINES,
     CREATABLE_TAP_CHANGERS,
+    OPERATIONAL_LIMITS_TARGETS,
+    REACTIVE_LIMITS_TARGETS,
     create_branch_bay,
     create_component_bay,
     create_container,
     create_coupling_device,
     create_empty_network,
+    create_hvdc_line,
+    create_operational_limits,
+    create_reactive_limits,
     create_tap_changer,
     filter_voltage_levels,
     get_voltage_levels_df,
     list_busbar_sections,
+    list_converter_stations,
     list_node_breaker_voltage_levels,
+    list_operational_limit_candidates,
+    list_reactive_limit_candidates,
     list_substations_df,
     list_two_winding_transformers,
     load_network,
@@ -935,4 +944,271 @@ def test_create_coupling_device_rejects_unknown_busbar_section(node_breaker_netw
     with pytest.raises(ValueError, match="Unknown busbar section"):
         create_coupling_device(
             node_breaker_network, "S1VL2_BBS1", "DOES_NOT_EXIST"
+        )
+
+
+# --- HVDC lines ---
+
+
+def _fresh_vsc_pair(network):
+    """Create two standalone VSC stations so an HVDC line can connect them."""
+    create_component_bay(
+        network,
+        "VSC Converter Stations",
+        {
+            "id": "NEW_VSC_A",
+            "bus_or_busbar_section_id": "S3VL1_BBS",
+            "loss_factor": 1.0,
+            "voltage_regulator_on": False,
+            "target_q": 5.0,
+            "position_order": 500, "direction": "TOP",
+        },
+    )
+    create_component_bay(
+        network,
+        "VSC Converter Stations",
+        {
+            "id": "NEW_VSC_B",
+            "bus_or_busbar_section_id": "S4VL1_BBS",
+            "loss_factor": 1.0,
+            "voltage_regulator_on": False,
+            "target_q": 5.0,
+            "position_order": 510, "direction": "TOP",
+        },
+    )
+    return "NEW_VSC_A", "NEW_VSC_B"
+
+
+def test_creatable_hvdc_lines_registry_has_expected_fields():
+    spec = CREATABLE_HVDC_LINES
+    assert spec["create_function"] == "create_hvdc_lines"
+    names = {f["name"] for f in spec["fields"]}
+    assert {
+        "id", "r", "nominal_v", "max_p", "target_p", "converters_mode",
+    }.issubset(names)
+
+
+def test_list_converter_stations_returns_vsc_and_lcc(node_breaker_network):
+    stations = list_converter_stations(node_breaker_network)
+    kinds = {kind for _, kind in stations}
+    assert {"VSC", "LCC"}.issubset(kinds)
+    ids = {sid for sid, _ in stations}
+    assert {"VSC1", "VSC2", "LCC1", "LCC2"}.issubset(ids)
+
+
+def test_create_hvdc_line_between_two_fresh_stations(node_breaker_network):
+    a, b = _fresh_vsc_pair(node_breaker_network)
+    create_hvdc_line(
+        node_breaker_network,
+        {
+            "id": "NEW_HVDC",
+            "r": 1.0,
+            "nominal_v": 400.0,
+            "max_p": 1000.0,
+            "target_p": 500.0,
+            "converters_mode": "SIDE_1_RECTIFIER_SIDE_2_INVERTER",
+            "converter_station1_id": a,
+            "converter_station2_id": b,
+        },
+    )
+    hvdc = node_breaker_network.get_hvdc_lines()
+    assert "NEW_HVDC" in hvdc.index
+    row = hvdc.loc["NEW_HVDC"]
+    assert row["converter_station1_id"] == a
+    assert row["converter_station2_id"] == b
+    assert row["max_p"] == 1000.0
+
+
+def test_create_hvdc_line_rejects_same_station(node_breaker_network):
+    with pytest.raises(ValueError, match="must differ"):
+        create_hvdc_line(
+            node_breaker_network,
+            {
+                "id": "BAD_HVDC",
+                "r": 1.0, "nominal_v": 400.0,
+                "max_p": 1000.0, "target_p": 0.0,
+                "converters_mode": "SIDE_1_RECTIFIER_SIDE_2_INVERTER",
+                "converter_station1_id": "VSC1",
+                "converter_station2_id": "VSC1",
+            },
+        )
+
+
+def test_create_hvdc_line_rejects_missing_station(node_breaker_network):
+    with pytest.raises(ValueError, match="Converter station 2"):
+        create_hvdc_line(
+            node_breaker_network,
+            {
+                "id": "BAD_HVDC2",
+                "r": 1.0, "nominal_v": 400.0,
+                "max_p": 1000.0, "target_p": 0.0,
+                "converters_mode": "SIDE_1_RECTIFIER_SIDE_2_INVERTER",
+                "converter_station1_id": "VSC1",
+            },
+        )
+
+
+def test_create_hvdc_line_rejects_target_p_gt_max_p(node_breaker_network):
+    with pytest.raises(ValueError, match="<= max_p"):
+        create_hvdc_line(
+            node_breaker_network,
+            {
+                "id": "BAD_HVDC3",
+                "r": 1.0, "nominal_v": 400.0,
+                "max_p": 500.0, "target_p": 1000.0,
+                "converters_mode": "SIDE_1_RECTIFIER_SIDE_2_INVERTER",
+                "converter_station1_id": "VSC1",
+                "converter_station2_id": "LCC1",
+            },
+        )
+
+
+# --- Reactive limits ---
+
+
+def test_reactive_limits_targets_has_expected_components():
+    assert set(REACTIVE_LIMITS_TARGETS.keys()) == {
+        "Generators", "Batteries", "VSC Converter Stations",
+    }
+
+
+def test_list_reactive_limit_candidates_for_generators(node_breaker_network):
+    ids = list_reactive_limit_candidates(node_breaker_network, "Generators")
+    assert "GH1" in ids
+
+
+def test_create_reactive_limits_minmax_on_generator(node_breaker_network):
+    create_reactive_limits(
+        node_breaker_network, "GH1", "minmax",
+        [{"min_q": -75.0, "max_q": 60.0}],
+    )
+    gen = node_breaker_network.get_generators(all_attributes=True).loc["GH1"]
+    assert gen["min_q"] == -75.0
+    assert gen["max_q"] == 60.0
+
+
+def test_create_reactive_limits_curve_on_generator(node_breaker_network):
+    create_reactive_limits(
+        node_breaker_network, "GTH1", "curve",
+        [
+            {"p": 0.0, "min_q": -100.0, "max_q": 100.0},
+            {"p": 200.0, "min_q": -50.0, "max_q": 50.0},
+        ],
+    )
+    curve = node_breaker_network.get_reactive_capability_curve_points()
+    assert "GTH1" in curve.index.get_level_values("id")
+    rows = curve.loc["GTH1"]
+    assert len(rows) == 2
+    assert rows["p"].tolist() == [0.0, 200.0]
+
+
+def test_create_reactive_limits_rejects_unknown_mode(node_breaker_network):
+    with pytest.raises(ValueError, match="Unknown reactive-limits mode"):
+        create_reactive_limits(
+            node_breaker_network, "GH1", "banana",
+            [{"min_q": -1.0, "max_q": 1.0}],
+        )
+
+
+def test_create_reactive_limits_minmax_rejects_inverted(node_breaker_network):
+    with pytest.raises(ValueError, match="max_q must be"):
+        create_reactive_limits(
+            node_breaker_network, "GH1", "minmax",
+            [{"min_q": 100.0, "max_q": -100.0}],
+        )
+
+
+def test_create_reactive_limits_curve_needs_two_distinct_p(node_breaker_network):
+    with pytest.raises(ValueError, match="2 distinct p"):
+        create_reactive_limits(
+            node_breaker_network, "GH1", "curve",
+            [
+                {"p": 0.0, "min_q": -10.0, "max_q": 10.0},
+                {"p": 0.0, "min_q": -5.0, "max_q": 5.0},
+            ],
+        )
+
+
+def test_create_reactive_limits_rejects_empty_payload(node_breaker_network):
+    with pytest.raises(ValueError, match="At least one row"):
+        create_reactive_limits(node_breaker_network, "GH1", "minmax", [])
+
+
+# --- Operational limits ---
+
+
+def test_operational_limits_targets_has_expected_components():
+    assert set(OPERATIONAL_LIMITS_TARGETS.keys()) == {
+        "Lines", "2-Winding Transformers", "Dangling Lines",
+    }
+
+
+def test_list_operational_limit_candidates_for_lines(node_breaker_network):
+    ids = list_operational_limit_candidates(node_breaker_network, "Lines")
+    assert "LINE_S3S4" in ids
+
+
+def test_create_operational_limits_replaces_default_group(node_breaker_network):
+    """LINE_S3S4 starts with limits in DEFAULT — creating new ones replaces them."""
+    create_operational_limits(
+        node_breaker_network, "LINE_S3S4", "ONE", "CURRENT",
+        [
+            {"name": "permanent", "value": 700.0, "acceptable_duration": -1},
+            {"name": "TATL_60", "value": 900.0, "acceptable_duration": 60},
+        ],
+    )
+    ol = node_breaker_network.get_operational_limits(
+        all_attributes=True
+    ).reset_index()
+    rows = ol[
+        (ol["element_id"] == "LINE_S3S4")
+        & (ol["side"] == "ONE")
+        & (ol["group_name"] == "DEFAULT")
+    ]
+    durations = sorted(rows["acceptable_duration"].tolist())
+    assert durations == [-1, 60]
+    perm = rows[rows["acceptable_duration"] == -1].iloc[0]
+    assert perm["value"] == 700.0
+
+
+def test_create_operational_limits_rejects_zero_permanent_limits(node_breaker_network):
+    with pytest.raises(ValueError, match="permanent"):
+        create_operational_limits(
+            node_breaker_network, "LINE_S3S4", "ONE", "CURRENT",
+            [{"name": "TATL_60", "value": 900.0, "acceptable_duration": 60}],
+        )
+
+
+def test_create_operational_limits_rejects_multiple_permanent_limits(node_breaker_network):
+    with pytest.raises(ValueError, match="permanent"):
+        create_operational_limits(
+            node_breaker_network, "LINE_S3S4", "ONE", "CURRENT",
+            [
+                {"name": "p1", "value": 900.0, "acceptable_duration": -1},
+                {"name": "p2", "value": 700.0, "acceptable_duration": -1},
+            ],
+        )
+
+
+def test_create_operational_limits_rejects_unknown_type(node_breaker_network):
+    with pytest.raises(ValueError, match="Type must be one of"):
+        create_operational_limits(
+            node_breaker_network, "LINE_S3S4", "ONE", "BANANA",
+            [{"name": "p", "value": 700.0, "acceptable_duration": -1}],
+        )
+
+
+def test_create_operational_limits_rejects_unknown_side(node_breaker_network):
+    with pytest.raises(ValueError, match="Side must be one of"):
+        create_operational_limits(
+            node_breaker_network, "LINE_S3S4", "THREE", "CURRENT",
+            [{"name": "p", "value": 700.0, "acceptable_duration": -1}],
+        )
+
+
+def test_create_operational_limits_rejects_negative_value(node_breaker_network):
+    with pytest.raises(ValueError, match="non-negative"):
+        create_operational_limits(
+            node_breaker_network, "LINE_S3S4", "ONE", "CURRENT",
+            [{"name": "p", "value": -1.0, "acceptable_duration": -1}],
         )

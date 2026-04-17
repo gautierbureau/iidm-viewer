@@ -216,6 +216,69 @@ switch id prefix.
 that both busbar sections exist, differ, and share the same voltage
 level before dispatching to pypowsybl via the worker thread.
 
+## HVDC line creation — `CREATABLE_HVDC_LINES`
+
+HVDC lines connect two *existing* converter stations (VSC or LCC) rather
+than two busbars, so they don't use a `_bay` helper. The form
+(`_render_create_hvdc_line_form`, shown on the **HVDC Lines** component
+view) picks the two endpoints from `list_converter_stations(network)`
+and dispatches `network.create_hvdc_lines(df)` via the worker.
+
+Fields: id, name, r, nominal_v, max_p, target_p, converters_mode
+(`SIDE_1_RECTIFIER_SIDE_2_INVERTER` or `SIDE_1_INVERTER_SIDE_2_RECTIFIER`).
+
+`validate_create_hvdc_line_fields` enforces required fields, distinct
+endpoints, and `|target_p| <= max_p`. pypowsybl handles remaining errors
+(unknown station id, station already owning an HVDC line, …).
+
+## Reactive limits — `create_reactive_limits`
+
+Attaches reactive limits to an *existing* generator, battery, or VSC
+station (anything with reactive capability). Two modes:
+
+- **min/max**: single `(min_q, max_q)` pair → `create_minmax_reactive_limits`.
+- **curve**: ≥2 rows of `(p, min_q, max_q)` → `create_curve_reactive_limits`.
+  At least two distinct `p` values are required.
+
+pypowsybl replaces any existing reactive limits on the target.
+
+The form (`_render_create_reactive_limits_form`) appears in the
+Generators / Batteries / VSC Converter Stations views and shows a
+target picker, an `st.radio` for the kind, and either a min/max pair or
+a dynamic-row `st.data_editor` depending on the kind.
+
+`REACTIVE_LIMITS_TARGETS` maps component labels to the network getter
+used to enumerate valid targets. `create_reactive_limits(network,
+element_id, mode, payload)` runs all validation on the main thread then
+dispatches the right `create_*_reactive_limits` call through the worker.
+
+## Operational limits — `create_operational_limits`
+
+Attaches current / apparent-power / active-power limits to an existing
+line, 2-winding transformer, or dangling line. Limits are always
+submitted as a *group* — pypowsybl replaces the target group on write.
+
+The form (`_render_create_operational_limits_form`) appears on the
+Lines / 2-Winding Transformers / Dangling Lines views and takes:
+
+- **Target** element id
+- **Side** (`ONE` or `TWO`)
+- **Type** (`CURRENT`, `APPARENT_POWER`, `ACTIVE_POWER`)
+- **Group name** (defaults to `DEFAULT`)
+- Dynamic-row editor for the limit rows (name, value,
+  acceptable_duration, fictitious). `acceptable_duration = -1` denotes
+  the permanent limit.
+
+`create_operational_limits` enforces:
+
+- Exactly one permanent limit per call.
+- Non-negative values; `acceptable_duration` must be `-1` or `>= 0`.
+- The underlying dataframe uses `element_id` as the index (required by
+  pypowsybl's `create_operational_limits`).
+
+`OPERATIONAL_LIMITS_TARGETS` lists supported component types and the
+getter used to enumerate candidate element ids.
+
 ## Container creation — `CREATABLE_CONTAINERS`
 
 Substations, Voltage Levels, and Busbar Sections don't have a ``_bay`` helper:
