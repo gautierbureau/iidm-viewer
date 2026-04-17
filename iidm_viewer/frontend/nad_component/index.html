@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IIDM NAD</title>
+<style>
+  html, body { margin: 0; padding: 0; background: white; font-family: sans-serif; }
+  #nad { width: 100%; box-sizing: border-box; }
+  #nad svg { max-width: 100%; height: auto; display: block; }
+  #nad .nad-vl-nodes > g,
+  #nad .nad-branch-edges > g { cursor: pointer; }
+  #nad .nad-vl-nodes > g:hover { filter: brightness(1.15); }
+</style>
+</head>
+<body>
+<div id="nad"></div>
+<script>
+(function () {
+  var container = document.getElementById("nad");
+  var vlMap = {};
+  var edgeMap = {};
+
+  function send(msg) { window.parent.postMessage(msg, "*"); }
+
+  function buildMaps(metadata) {
+    vlMap = {};
+    edgeMap = {};
+    (metadata.nodes || []).forEach(function (n) {
+      if (n.svgId != null && n.equipmentId) {
+        vlMap[String(n.svgId)] = n.equipmentId;
+      }
+    });
+    (metadata.edges || []).forEach(function (e) {
+      if (e.svgId == null) return;
+      edgeMap[String(e.svgId)] = {
+        node1: String(e.node1 != null ? e.node1 : ""),
+        node2: String(e.node2 != null ? e.node2 : ""),
+        equipmentId: e.equipmentId || ""
+      };
+    });
+  }
+
+  function attachHandlers() {
+    container.querySelectorAll(".nad-vl-nodes > g").forEach(function (g) {
+      g.addEventListener("click", function (evt) {
+        var vl = vlMap[g.getAttribute("id")];
+        if (!vl) return;
+        send({
+          type: "streamlit:setComponentValue",
+          dataType: "json",
+          value: { type: "nad-vl-click", vl: vl, ts: Date.now() }
+        });
+        evt.stopPropagation();
+      });
+    });
+    container.querySelectorAll(".nad-branch-edges > g").forEach(function (g) {
+      g.addEventListener("click", function (evt) {
+        var info = edgeMap[g.getAttribute("id")];
+        if (!info) return;
+        send({
+          type: "streamlit:setComponentValue",
+          dataType: "json",
+          value: { type: "nad-edge-click", edge: info, ts: Date.now() }
+        });
+        evt.stopPropagation();
+      });
+    });
+  }
+
+  function measureHeight(fallback) {
+    var svg = container.querySelector("svg");
+    if (!svg) return fallback;
+    var rect = svg.getBoundingClientRect();
+    var h = Math.ceil(rect.height);
+    return h > 0 ? h : fallback;
+  }
+
+  function render(args) {
+    args = args || {};
+    var metadata = {};
+    try { metadata = args.metadata ? JSON.parse(args.metadata) : {}; }
+    catch (e) { metadata = {}; }
+
+    container.innerHTML = args.svg || "";
+    buildMaps(metadata);
+    attachHandlers();
+
+    var requested = typeof args.height === "number" ? args.height : 700;
+    var measured = measureHeight(requested);
+    send({ type: "streamlit:setFrameHeight", height: Math.min(measured, requested) });
+  }
+
+  window.addEventListener("message", function (e) {
+    if (!e.data || e.data.type !== "streamlit:render") return;
+    render(e.data.args);
+  });
+
+  send({ type: "streamlit:componentReady", apiVersion: 1 });
+})();
+</script>
+</body>
+</html>
