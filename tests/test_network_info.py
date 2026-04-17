@@ -5,6 +5,7 @@ from iidm_viewer.network_info import (
     COMPONENT_TYPES,
     _branch_losses_totals,
     _country_totals,
+    _losses_by_country,
 )
 from iidm_viewer.state import load_network, run_loadflow
 
@@ -72,15 +73,55 @@ def test_branch_losses_totals_after_lf(xiidm_upload):
     assert abs(losses["total"] - (losses["lines"] + losses["transformers"])) < 1e-9
 
 
-def test_country_totals_ieee14(xiidm_upload):
-    """IEEE14 totals: generation target_p sum and load p0 sum, aggregated by country."""
+def test_country_totals_target_values_ieee14(xiidm_upload):
+    """Without a load flow, target columns populate and actuals stay NaN."""
+    import pandas as pd
+
     net = load_network(xiidm_upload)
     df = _country_totals(net)
     assert not df.empty
-    assert set(df.columns) == {"country", "generation_mw", "consumption_mw"}
-    # IEEE14 totals (target_p / p0): 272.4 MW generation, 259.0 MW consumption.
-    assert abs(df["generation_mw"].sum() - 272.4) < 1.0
-    assert abs(df["consumption_mw"].sum() - 259.0) < 1.0
+    assert set(df.columns) == {
+        "country",
+        "generation_target_mw", "generation_actual_mw",
+        "consumption_target_mw", "consumption_actual_mw",
+    }
+    # IEEE14 targets: ~272.4 MW generation, ~259.0 MW consumption.
+    assert abs(df["generation_target_mw"].sum() - 272.4) < 1.0
+    assert abs(df["consumption_target_mw"].sum() - 259.0) < 1.0
+    # Actuals are NaN before a load flow.
+    assert df["generation_actual_mw"].isna().all()
+    assert df["consumption_actual_mw"].isna().all()
+
+
+def test_country_totals_actual_values_after_lf(xiidm_upload):
+    """After a load flow, actual values populate and stay close to targets."""
+    net = load_network(xiidm_upload)
+    run_loadflow(net)
+    df = _country_totals(net)
+    assert not df["generation_actual_mw"].isna().all()
+    assert not df["consumption_actual_mw"].isna().all()
+    # Actual generation >= target + losses (slack picks up losses); actual
+    # consumption should match target closely on IEEE14.
+    assert df["generation_actual_mw"].sum() > df["generation_target_mw"].sum() - 1.0
+    assert abs(
+        df["consumption_actual_mw"].sum() - df["consumption_target_mw"].sum()
+    ) < 5.0
+
+
+def test_losses_by_country_ieee14(xiidm_upload):
+    """After LF, IEEE14 is single-country; per-country losses sum to total."""
+    net = load_network(xiidm_upload)
+    run_loadflow(net)
+    by_country = _losses_by_country(net)
+    assert not by_country.empty
+    total = _branch_losses_totals(net)["total"]
+    assert abs(by_country.sum() - total) < 1e-6
+
+
+def test_losses_by_country_empty_before_lf(xiidm_upload):
+    net = load_network(xiidm_upload)
+    by_country = _losses_by_country(net)
+    assert by_country.empty
 
 
 def test_component_types_keys_match_network_methods():
