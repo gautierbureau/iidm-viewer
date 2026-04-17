@@ -137,7 +137,10 @@ pypowsybl → result wrapped and handed back.
 | `frontend/sld_component/dist/` | Built bundle shipped in the wheel (`pyproject.toml` excludes the source tree) | — |
 | `data_explorer.py` | Editable component tables, apply + LF flow | [docs/data-explorer.md](docs/data-explorer.md) |
 | `filters.py` | `FILTERS` whitelist, `build_vl_lookup`, `enrich_with_joins`, `render_filters` | [docs/filters.md](docs/filters.md) |
-| `network_map.py` | Leaflet map tab | [docs/network-map.md](docs/network-map.md) |
+| `network_map.py` | Geographical map tab: extraction → `render_interactive_map` | [docs/network-map.md](docs/network-map.md) |
+| `map_component.py` | `declare_component` wrapper for the map | [docs/network-map.md](docs/network-map.md) |
+| `frontend/map_component/src/main.ts` | Vite/TS wrapper around `@powsybl/network-map-layers` (deck.gl + MapLibre) | [frontend/map_component/README.md](iidm_viewer/frontend/map_component/README.md) |
+| `frontend/map_component/dist/` | Built bundle shipped in the wheel (`pyproject.toml` excludes the source tree) | — |
 | `operational_limits.py` | Loading % table + per-element limit chart | [docs/tabs.md](docs/tabs.md) |
 | `reactive_curves.py` | Generator reactive capability curve chart | [docs/tabs.md](docs/tabs.md) |
 | `extensions_explorer.py` | Extensions tab | [docs/tabs.md](docs/tabs.md) |

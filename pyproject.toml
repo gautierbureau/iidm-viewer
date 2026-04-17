@@ -39,6 +39,14 @@ exclude = [
     "iidm_viewer/frontend/sld_component/tsconfig.json",
     "iidm_viewer/frontend/sld_component/.gitignore",
     "iidm_viewer/frontend/sld_component/index.html",
+    "iidm_viewer/frontend/map_component/src",
+    "iidm_viewer/frontend/map_component/node_modules",
+    "iidm_viewer/frontend/map_component/package.json",
+    "iidm_viewer/frontend/map_component/package-lock.json",
+    "iidm_viewer/frontend/map_component/vite.config.ts",
+    "iidm_viewer/frontend/map_component/tsconfig.json",
+    "iidm_viewer/frontend/map_component/.gitignore",
+    "iidm_viewer/frontend/map_component/index.html",
 ]
 
 [tool.pytest.ini_options]
