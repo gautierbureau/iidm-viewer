@@ -30,6 +30,28 @@ def _get_current_flows(network) -> dict[str, dict[str, float]]:
     return flows
 
 
+def _get_branch_losses(network) -> dict[str, float]:
+    """Return {element_id: losses_MW} for lines and 2-winding transformers.
+
+    Active-power losses = p1 + p2 (pypowsybl sign convention: both flows
+    positive when entering the branch). Returns NaN where p1 or p2 is NaN
+    (typically before any load flow has run).
+    """
+    losses: dict[str, float] = {}
+    for method in ("get_lines", "get_2_windings_transformers"):
+        try:
+            df = getattr(network, method)(attributes=["p1", "p2"])
+        except Exception:
+            continue
+        for idx, row in df.iterrows():
+            p1, p2 = row["p1"], row["p2"]
+            if pd.notna(p1) and pd.notna(p2):
+                losses[idx] = float(p1) + float(p2)
+            else:
+                losses[idx] = float("nan")
+    return losses
+
+
 def _side_label(side: str) -> str:
     return "Side 1" if side == "ONE" else "Side 2"
 
@@ -99,7 +121,8 @@ def _compute_loading(network, limits_reset: pd.DataFrame) -> pd.DataFrame:
     """Compute loading % = I_actual / I_permanent_limit for every element/side.
 
     Returns a DataFrame sorted by descending loading with columns:
-    element_id, element_type, side, permanent_limit, current, loading_pct.
+    element_id, element_type, side, permanent_limit, current, loading_pct,
+    losses.
     """
     # Permanent limits only, no sentinel
     perm = limits_reset[
@@ -136,6 +159,10 @@ def _compute_loading(network, limits_reset: pd.DataFrame) -> pd.DataFrame:
     # Keep the worst side per element
     idx_max = merged.groupby("element_id")["loading_pct"].idxmax()
     worst = merged.loc[idx_max].sort_values("loading_pct", ascending=False)
+
+    # Attach per-element losses (p1 + p2)
+    losses = _get_branch_losses(network)
+    worst["losses"] = worst["element_id"].map(losses)
     return worst.reset_index(drop=True)
 
 
@@ -217,13 +244,16 @@ def render_operational_limits(network, selected_vl):
                 return ""
 
             show = above[["element_id", "element_name", "element_type", "side",
-                          "current", "permanent_limit", "loading_pct"]].copy()
+                          "current", "permanent_limit", "loading_pct",
+                          "losses"]].copy()
             show.columns = ["Element", "Name", "Type", "Worst side",
-                            "I (A)", "Permanent limit (A)", "Loading (%)"]
+                            "I (A)", "Permanent limit (A)", "Loading (%)",
+                            "Losses (MW)"]
             show["Worst side"] = show["Worst side"].map(
                 {"ONE": "Side 1", "TWO": "Side 2"})
             show["I (A)"] = show["I (A)"].round(1)
             show["Loading (%)"] = show["Loading (%)"].round(1)
+            show["Losses (MW)"] = show["Losses (MW)"].round(3)
 
             styled = show.style.map(_color_loading, subset=["Loading (%)"])
             st.dataframe(styled, use_container_width=True, hide_index=True)
@@ -265,6 +295,13 @@ def render_operational_limits(network, selected_vl):
     # Get current flows for the chart
     flows = _get_current_flows(network)
     current_flow = flows.get(selected_element)
+
+    # Losses for this element (p1 + p2)
+    elem_losses = _get_branch_losses(network).get(selected_element)
+    if elem_losses is not None and pd.notna(elem_losses):
+        st.metric("Active-power losses", f"{elem_losses:.3f} MW")
+    else:
+        st.caption("Losses unavailable (run a load flow to compute p1 + p2).")
 
     fig = _build_element_chart(selected_element, elem_limits, current_flow)
     st.plotly_chart(fig, use_container_width=True)

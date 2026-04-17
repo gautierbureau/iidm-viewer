@@ -1,8 +1,12 @@
 """COMPONENT_TYPES registry and Overview rendering."""
 import pytest
 
-from iidm_viewer.network_info import COMPONENT_TYPES
-from iidm_viewer.state import load_network
+from iidm_viewer.network_info import (
+    COMPONENT_TYPES,
+    _branch_losses_totals,
+    _country_totals,
+)
+from iidm_viewer.state import load_network, run_loadflow
 
 
 def test_component_types_are_callable_on_network(xiidm_upload):
@@ -50,6 +54,33 @@ def test_overview_renders_network_metrics(xiidm_upload):
     # Non-zero component counts from IEEE14 should appear as metrics.
     assert "Voltage Levels" in metric_labels
     assert "Lines" in metric_labels
+
+
+def test_branch_losses_totals_before_lf(xiidm_upload):
+    """Without a load flow, p1/p2 are NaN so totals report no data."""
+    net = load_network(xiidm_upload)
+    losses = _branch_losses_totals(net)
+    assert losses.get("_has_data") is False
+
+
+def test_branch_losses_totals_after_lf(xiidm_upload):
+    net = load_network(xiidm_upload)
+    run_loadflow(net)
+    losses = _branch_losses_totals(net)
+    assert losses.get("_has_data") is True
+    # total == lines + transformers
+    assert abs(losses["total"] - (losses["lines"] + losses["transformers"])) < 1e-9
+
+
+def test_country_totals_ieee14(xiidm_upload):
+    """IEEE14 totals: generation target_p sum and load p0 sum, aggregated by country."""
+    net = load_network(xiidm_upload)
+    df = _country_totals(net)
+    assert not df.empty
+    assert set(df.columns) == {"country", "generation_mw", "consumption_mw"}
+    # IEEE14 totals (target_p / p0): 272.4 MW generation, 259.0 MW consumption.
+    assert abs(df["generation_mw"].sum() - 272.4) < 1.0
+    assert abs(df["consumption_mw"].sum() - 259.0) < 1.0
 
 
 def test_component_types_keys_match_network_methods():
