@@ -49,21 +49,33 @@ the component layer for that.
 
 ## Current state (2026-04)
 
-Stage 1 is **implemented**:
+**Stage 1 and Stage 2 are both implemented.**
 
-- `iidm_viewer/nad_component.py` + `iidm_viewer/frontend/nad_component/index.html`
-  declare a custom Streamlit component. The iframe speaks the Streamlit
-  wire protocol directly (`streamlit:componentReady` / `streamlit:render` /
-  `streamlit:setComponentValue` / `streamlit:setFrameHeight`) — no
-  `streamlit-component-lib` dependency.
+- `iidm_viewer/nad_component.py` declares the custom Streamlit component
+  pointing at `iidm_viewer/frontend/nad_component/dist/`.
+- The frontend (`iidm_viewer/frontend/nad_component/`) is a Vite +
+  TypeScript project. `src/main.ts` (~60 lines) wraps
+  `@powsybl/network-viewer-core`'s `NetworkAreaDiagramViewer` and
+  speaks the Streamlit wire protocol directly
+  (`streamlit:componentReady` / `streamlit:render` /
+  `streamlit:setComponentValue` / `streamlit:setFrameHeight`). No
+  `streamlit-component-lib` / React dependency.
+- The library supplies pan, zoom, drag, hover, right-click, and the
+  `onSelectNodeCallback(equipmentId, ...)` that fires on VL clicks.
+  We translate that callback into
+  `{type: "nad-vl-click", vl, ts}` via `setComponentValue`.
 - `diagrams.render_nad_tab` calls `render_interactive_nad(svg, metadata,
   height, key)`, reads the returned click dict, updates
-  `st.session_state.selected_vl`, and calls `st.rerun()`. No page reload,
-  session state preserved.
-- The obsolete `nad_interactive.py` (server-side SVG injection) and its
-  test are removed; hit-testing runs in the browser against
-  `.nad-vl-nodes > g` and `.nad-branch-edges > g` — the selectors verified
-  against pypowsybl 1.14's IEEE_14 NAD SVG.
+  `st.session_state.selected_vl`, and calls `st.rerun()`. No page reload;
+  session state and the NetworkProxy survive.
+- `dist/index.html` + `dist/assets/nad-component.js` are committed so
+  `pip install` works without Node. CI (`.github/workflows/ci.yml`) and
+  Release (`.github/workflows/release.yml`) run
+  `npm ci && npm run build` in `iidm_viewer/frontend/nad_component/`
+  before tests / wheel packaging.
+- Stage 1's server-side SVG injection (`nad_interactive.py`) and the
+  Stage 1 inline hit-testing in `index.html` are both gone — the
+  library handles hit-testing.
 
 ## Upgrade plan — minimal bidirectional component (path to Option 1)
 

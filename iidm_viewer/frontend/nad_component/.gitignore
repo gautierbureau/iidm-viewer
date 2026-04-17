@@ -1,0 +1,4 @@
+node_modules/
+# dist/ is committed so the wheel can ship it without an npm build at
+# `pip install` time. CI rebuilds dist/ from source before packaging to
+# keep it in sync with src/ and package.json.

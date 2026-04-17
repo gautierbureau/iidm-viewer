@@ -37,17 +37,22 @@ The result is a `NadResult`-like proxy with `.svg` and `.metadata` attributes.
 
 Rendering goes through `nad_component.render_interactive_nad(svg, metadata,
 height, key)` — a custom Streamlit component declared from
-`iidm_viewer/frontend/nad_component/`. The iframe implements the Streamlit
-component wire protocol directly (no `streamlit-component-lib` dep), injects
-the SVG, and attaches click handlers on `.nad-vl-nodes > g` and
-`.nad-branch-edges > g`. Click payloads come back as
-`{"type": "nad-vl-click", "vl": "<equipmentId>", "ts": ...}` or
-`{"type": "nad-edge-click", "edge": {...}, "ts": ...}`.
+`iidm_viewer/frontend/nad_component/dist/`. The frontend is a Vite-built
+TypeScript wrapper around
+[`@powsybl/network-viewer-core`](https://www.npmjs.com/package/@powsybl/network-viewer-core):
+the library supplies pan, zoom, drag, hover, and hit-testing; our
+`src/main.ts` (~60 lines) speaks the Streamlit wire protocol directly
+(no `streamlit-component-lib` dep) and translates
+`onSelectNodeCallback(equipmentId, ...)` into
+`{"type": "nad-vl-click", "vl": "<equipmentId>", "ts": ...}` via
+`setComponentValue`.
 
 `render_nad_tab` writes `vl` into `st.session_state.selected_vl` and calls
 `st.rerun()`; session state survives so the uploaded network and NetworkProxy
 stay intact. See [future-interactive-viewer.md](future-interactive-viewer.md)
-for the upgrade path to `@powsybl/network-viewer-core` (drag / pan-zoom).
+for the full upgrade history and
+[`iidm_viewer/frontend/nad_component/README.md`](../iidm_viewer/frontend/nad_component/README.md)
+for the build workflow.
 
 Note: accessing `.svg` and `.metadata` from the proxy issues two separate `run()`
 calls. Do not wrap these inside another `run()` — that deadlocks the executor.
