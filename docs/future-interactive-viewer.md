@@ -1,4 +1,4 @@
-# Future work — interactive NAD / SLD navigation
+# Interactive NAD / SLD navigation
 
 Park for later: make the diagrams behave like `@powsybl/network-viewer`
 (click a NAD node to jump to its SLD, drag nodes around, walk through
@@ -49,7 +49,10 @@ the component layer for that.
 
 ## Current state (2026-04)
 
-**Stage 1 and Stage 2 are both implemented.**
+**Stages 1, 2, and 3 are all implemented.** The NAD tab and the SLD
+tab both render through library-backed custom Streamlit components;
+clicking a VL node (NAD) or a navigation arrow (SLD) updates
+`st.session_state.selected_vl` and reruns.
 
 - `iidm_viewer/nad_component.py` declares the custom Streamlit component
   pointing at `iidm_viewer/frontend/nad_component/dist/`.
@@ -76,6 +79,29 @@ the component layer for that.
 - Stage 1's server-side SVG injection (`nad_interactive.py`) and the
   Stage 1 inline hit-testing in `index.html` are both gone — the
   library handles hit-testing.
+
+### Stage 3 — interactive SLD tab
+
+- `iidm_viewer/sld_component.py` declares a second custom component
+  (`iidm_sld`) pointing at `iidm_viewer/frontend/sld_component/dist/`.
+- The frontend mirrors the NAD scaffolding: a Vite + TypeScript
+  project whose `src/main.ts` (~90 lines) wraps
+  `@powsybl/network-viewer-core`'s `SingleLineDiagramViewer`. The
+  constructor is called with `svgType = "voltage-level"` and an
+  `onNextVoltageCallback(nextVId)` that posts
+  `{type: "sld-vl-click", vl, ts}` via `setComponentValue`. Other
+  callbacks (`onBreakerCallback`, `onFeederCallback`, `onBusCallback`)
+  are `null` for now — click-to-navigate only.
+- `diagrams.render_sld_tab` now reads both `.svg` and `.metadata` from
+  the SLD result (two separate `run()` calls through the `NetworkProxy`,
+  same caveat as NAD) and calls
+  `render_interactive_sld(svg, metadata, height, key)`. On a
+  `sld-vl-click` it updates `st.session_state.selected_vl` and
+  `st.rerun()`s.
+- CI (`.github/workflows/ci.yml`) and Release
+  (`.github/workflows/release.yml`) build both `nad_component` and
+  `sld_component` bundles. `pyproject.toml` excludes both source
+  trees from the wheel and ships only the two `dist/` directories.
 
 ## Upgrade plan — minimal bidirectional component (path to Option 1)
 
@@ -301,17 +327,17 @@ in `package.json` to stay in sync with pypowsybl's SVG/metadata schema.
 These are explicitly preserved so the switch never costs us anything
 elsewhere in the app.
 
-| What | Stage 1 | Stage 2 |
-|---|---|---|
-| **Sidebar `vl_selector`** (`components.py`) | unchanged | unchanged |
-| **Single Line Diagram tab** (`diagrams.render_sld_tab`) | unchanged — still renders pypowsybl's SLD SVG via `render_svg` | unchanged |
-| **Overview tab** (`network_info.render_overview`) | unchanged | unchanged |
-| **Network Map tab** (`network_map.py`) | unchanged | unchanged |
-| **Data Explorer (Components + Extensions)** | unchanged | unchanged |
-| **Reactive Capability Curves / Operational Limits / Pmax** | unchanged | unchanged |
-| **`state.py` / `NetworkProxy` / worker thread model** | unchanged — the frontend receives `svg` and `metadata` as plain strings that were already extracted inside the worker via `nad.svg` / `nad.metadata` | unchanged |
-| **Load Flow button + `run_loadflow` / `lf_parameters`** | unchanged | unchanged |
-| **`st.session_state.selected_vl` as the single source of truth** | preserved — NAD clicks write to it and `st.rerun()`, exactly like the sidebar selectbox does today | preserved |
+| What | Stage 1 | Stage 2 | Stage 3 |
+|---|---|---|---|
+| **Sidebar `vl_selector`** (`components.py`) | unchanged | unchanged | unchanged |
+| **Single Line Diagram tab** (`diagrams.render_sld_tab`) | unchanged — still renders pypowsybl's SLD SVG via `render_svg` | unchanged | now uses `sld_component` (Vite + `SingleLineDiagramViewer`); arrow-click navigates via `st.session_state.selected_vl` + `st.rerun()`, exactly like NAD |
+| **Overview tab** (`network_info.render_overview`) | unchanged | unchanged | unchanged |
+| **Network Map tab** (`network_map.py`) | unchanged | unchanged | unchanged |
+| **Data Explorer (Components + Extensions)** | unchanged | unchanged | unchanged |
+| **Reactive Capability Curves / Operational Limits / Pmax** | unchanged | unchanged | unchanged |
+| **`state.py` / `NetworkProxy` / worker thread model** | unchanged — the frontend receives `svg` and `metadata` as plain strings that were already extracted inside the worker via `nad.svg` / `nad.metadata` | unchanged | unchanged — SLD now also pulls `.svg` and `.metadata` as two separate `run()` calls (same invariant) |
+| **Load Flow button + `run_loadflow` / `lf_parameters`** | unchanged | unchanged | unchanged |
+| **`st.session_state.selected_vl` as the single source of truth** | preserved — NAD clicks write to it and `st.rerun()`, exactly like the sidebar selectbox does today | preserved | preserved — SLD clicks write to it the same way |
 
 Concretely, the diff for Stage 1 is confined to:
 
@@ -326,9 +352,20 @@ Concretely, the diff for Stage 1 is confined to:
 Every other module stays byte-identical. Same for Stage 2, except the
 contents of `iidm_viewer/frontend/nad_component/` change.
 
-If we ever want interactive SLD too (Option 2 also ships an
-`SingleLineDiagramViewer`), it becomes a parallel `sld_component`
-following the exact same pattern — again, no other tab is touched.
+Stage 3 applied the same recipe to the SLD tab: `sld_component/` is a
+sibling Vite project that wraps `SingleLineDiagramViewer`, wired via
+`iidm_viewer/sld_component.py` and `diagrams.render_sld_tab`. No other
+tab was touched.
+
+### Possible next steps
+
+- Forward `onBreakerCallback(breakerId, open, ...)` so clicking a
+  switch in the SLD toggles it through the worker (needs a pypowsybl
+  `network.update_switches(...)` round-trip + optional LF re-run).
+- Forward `onFeederCallback(equipmentId, equipmentType, ...)` to a
+  contextual drawer that shows the clicked equipment's data and limits.
+- Add `onMoveNodeCallback` on NAD to persist manual layout tweaks per
+  network.
 
 ### Why this is the right step even if we later pick Option 2
 

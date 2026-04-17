@@ -1,0 +1,19 @@
+{
+  "name": "iidm-viewer-sld-component",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Streamlit custom component that wraps @powsybl/network-viewer-core to render an interactive Single Line Diagram.",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@powsybl/network-viewer-core": "3.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vite": "^5.4.0"
+  }
+}

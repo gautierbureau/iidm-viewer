@@ -60,7 +60,27 @@ calls. Do not wrap these inside another `run()` — that deadlocks the executor.
 ### Single Line Diagram — `diagrams.render_sld_tab`
 
 Calls `network.get_single_line_diagram(selected_vl, parameters=SldParameters(...))`.
-Result `.svg` is rendered via `render_svg`.
+Returns an SLD result with `.svg` and `.metadata` attributes.
+
+Rendering goes through `sld_component.render_interactive_sld(svg, metadata,
+height, key)` — a custom Streamlit component declared from
+`iidm_viewer/frontend/sld_component/dist/`. The frontend is a Vite-built
+TypeScript wrapper around
+[`@powsybl/network-viewer-core`](https://www.npmjs.com/package/@powsybl/network-viewer-core)'s
+`SingleLineDiagramViewer`: the library renders the SLG, places the
+"next voltage level" navigation arrows on feeders whose `nextVId`
+points to another VL, and hit-tests them; our `src/main.ts` (~90 lines)
+speaks the Streamlit wire protocol directly and forwards
+`onNextVoltageCallback(nextVId)` into
+`{"type": "sld-vl-click", "vl": "<nextVId>", "ts": ...}` via
+`setComponentValue`. The constructor is invoked with `svgType =
+"voltage-level"` so the library applies VL-scoped zoom limits.
+
+`render_sld_tab` writes `vl` into `st.session_state.selected_vl` and
+calls `st.rerun()`; session state survives so the uploaded network and
+NetworkProxy stay intact. Same invariant as NAD: accessing `.svg` and
+`.metadata` issues two separate `run()` calls — don't wrap them inside
+another `run()`.
 
 ### Data Explorer Components — `data_explorer.render_data_explorer`
 
@@ -115,6 +135,8 @@ Two sections:
 `st.session_state.selected_vl`. Returns the selected VL id.
 
 `render_svg(svg_string, height)` — thin wrapper around `st.components.v1.html`.
+(Kept for ad-hoc use; the NAD and SLD tabs now use their dedicated
+custom components instead.)
 
 ## Session-state keys set by the sidebar / app.py
 

@@ -130,8 +130,11 @@ pypowsybl → result wrapped and handed back.
 | `network_info.py` | `COMPONENT_TYPES` registry, Overview tab | [docs/tabs.md](docs/tabs.md) |
 | `diagrams.py` | NAD and SLD tab render functions | [docs/tabs.md](docs/tabs.md) |
 | `nad_component.py` | `declare_component` wrapper for the clickable NAD | [docs/tabs.md](docs/tabs.md) |
-| `frontend/nad_component/src/main.ts` | Vite/TS wrapper around `@powsybl/network-viewer-core` | [frontend/nad_component/README.md](iidm_viewer/frontend/nad_component/README.md) |
+| `frontend/nad_component/src/main.ts` | Vite/TS wrapper around `@powsybl/network-viewer-core` (`NetworkAreaDiagramViewer`) | [frontend/nad_component/README.md](iidm_viewer/frontend/nad_component/README.md) |
 | `frontend/nad_component/dist/` | Built bundle shipped in the wheel (`pyproject.toml` excludes the source tree) | — |
+| `sld_component.py` | `declare_component` wrapper for the clickable SLD | [docs/tabs.md](docs/tabs.md) |
+| `frontend/sld_component/src/main.ts` | Vite/TS wrapper around `@powsybl/network-viewer-core` (`SingleLineDiagramViewer`) | [frontend/sld_component/README.md](iidm_viewer/frontend/sld_component/README.md) |
+| `frontend/sld_component/dist/` | Built bundle shipped in the wheel (`pyproject.toml` excludes the source tree) | — |
 | `data_explorer.py` | Editable component tables, apply + LF flow | [docs/data-explorer.md](docs/data-explorer.md) |
 | `filters.py` | `FILTERS` whitelist, `build_vl_lookup`, `enrich_with_joins`, `render_filters` | [docs/filters.md](docs/filters.md) |
 | `network_map.py` | Leaflet map tab | [docs/network-map.md](docs/network-map.md) |
