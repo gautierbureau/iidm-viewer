@@ -494,6 +494,156 @@ def create_branch_bay(network, component: str, fields: dict):
     )
 
 
+# --- Containers (substations, voltage levels, busbar sections) ---
+
+TOPOLOGY_KINDS = ["NODE_BREAKER", "BUS_BREAKER"]
+
+# Container label -> creation spec. Unlike injections these don't go through a
+# ``_bay`` helper: they call the plain ``create_<type>s`` method on the network.
+# The spec lists the generic fields; anything that depends on existing network
+# state (substation picker, VL picker, auto-node) is handled in the form.
+CREATABLE_CONTAINERS: dict[str, dict] = {
+    "Substations": {
+        "create_function": "create_substations",
+        "fields": [
+            {"name": "id", "label": "ID", "kind": "text", "required": True, "default": ""},
+            {"name": "name", "label": "Name", "kind": "text", "required": False, "default": ""},
+            {"name": "country", "label": "Country (ISO code)", "kind": "text",
+             "required": False, "default": "",
+             "help": "Two-letter ISO country code (e.g. FR, DE, IT). Leave blank if unknown."},
+            {"name": "TSO", "label": "TSO", "kind": "text", "required": False, "default": ""},
+        ],
+    },
+    "Voltage Levels": {
+        "create_function": "create_voltage_levels",
+        "fields": [
+            {"name": "id", "label": "ID", "kind": "text", "required": True, "default": ""},
+            {"name": "name", "label": "Name", "kind": "text", "required": False, "default": ""},
+            {"name": "topology_kind", "label": "Topology kind", "kind": "select",
+             "required": True, "default": "NODE_BREAKER", "options": TOPOLOGY_KINDS},
+            {"name": "nominal_v", "label": "nominal_v (kV)", "kind": "float",
+             "required": True, "default": 400.0, "min_value": 0.0},
+            {"name": "low_voltage_limit", "label": "low_voltage_limit (kV, 0 = unset)",
+             "kind": "float", "required": False, "default": 0.0, "min_value": 0.0},
+            {"name": "high_voltage_limit", "label": "high_voltage_limit (kV, 0 = unset)",
+             "kind": "float", "required": False, "default": 0.0, "min_value": 0.0},
+        ],
+        "validate": "_validate_voltage_level",
+    },
+    "Busbar Sections": {
+        "create_function": "create_busbar_sections",
+        "fields": [
+            {"name": "id", "label": "ID", "kind": "text", "required": True, "default": ""},
+            {"name": "name", "label": "Name", "kind": "text", "required": False, "default": ""},
+            {"name": "node", "label": "Node", "kind": "int", "required": True,
+             "default": 0, "min_value": 0,
+             "help": "Free node index in the target voltage level. "
+                     "Defaults to the next unused node."},
+        ],
+    },
+}
+
+
+def _validate_voltage_level(fields: dict) -> list[str]:
+    errors = []
+    low = fields.get("low_voltage_limit")
+    high = fields.get("high_voltage_limit")
+    if low and high and low > 0 and high > 0 and high < low:
+        errors.append("high_voltage_limit must be >= low_voltage_limit.")
+    return errors
+
+
+_VALIDATORS["_validate_voltage_level"] = _validate_voltage_level
+
+
+def validate_create_container_fields(component: str, fields: dict) -> list[str]:
+    """Check required fields for a container creation spec + component-specific rules."""
+    spec = CREATABLE_CONTAINERS.get(component)
+    if not spec:
+        return [f"{component!r} is not a creatable container"]
+    errors = []
+    for f in spec["fields"]:
+        if f["required"] and (fields.get(f["name"]) is None
+                               or fields.get(f["name"]) == ""):
+            errors.append(f"{f['label']} is required.")
+    if component == "Busbar Sections" and not fields.get("voltage_level_id"):
+        errors.append("Voltage level is required.")
+    hook = spec.get("validate")
+    if hook and hook in _VALIDATORS:
+        errors.extend(_VALIDATORS[hook](fields))
+    return errors
+
+
+def list_substations_df(network):
+    """Return substations as a DataFrame with id/display, sorted by display."""
+    subs = network.get_substations(attributes=["name"]).reset_index()
+    if subs.empty:
+        return pd.DataFrame(columns=["id", "display"])
+    subs["display"] = subs.apply(
+        lambda r: r["name"] if r["name"] else r["id"], axis=1
+    )
+    return subs[["id", "display"]].sort_values("display")
+
+
+def next_free_node(network, voltage_level_id: str) -> int:
+    """Suggest the next unused node index in a node-breaker voltage level.
+
+    Scans busbar section ``node`` and switch ``node1``/``node2`` columns for
+    the VL. Returns ``max(used) + 1``, or 0 when the VL has no elements yet.
+    """
+    used: set[int] = set()
+    try:
+        bbs = network.get_busbar_sections(all_attributes=True)
+    except Exception:
+        bbs = pd.DataFrame()
+    if not bbs.empty and "node" in bbs.columns and "voltage_level_id" in bbs.columns:
+        vl_bbs = bbs[bbs["voltage_level_id"] == voltage_level_id]
+        used.update(int(n) for n in vl_bbs["node"].dropna().tolist())
+    try:
+        sw = network.get_switches(all_attributes=True)
+    except Exception:
+        sw = pd.DataFrame()
+    if not sw.empty and "voltage_level_id" in sw.columns:
+        vl_sw = sw[sw["voltage_level_id"] == voltage_level_id]
+        for col in ("node1", "node2"):
+            if col in vl_sw.columns:
+                used.update(int(n) for n in vl_sw[col].dropna().tolist())
+    return max(used) + 1 if used else 0
+
+
+def create_container(network, component: str, fields: dict):
+    """Create a substation, voltage level, or busbar section on the network.
+
+    Drops empty strings and "unset" sentinels (e.g. ``low_voltage_limit=0``)
+    so pypowsybl treats them as missing rather than literal values.
+    Dispatches through the worker thread like :func:`create_component_bay`.
+    """
+    if component not in CREATABLE_CONTAINERS:
+        raise ValueError(f"{component!r} is not a creatable container")
+
+    errors = validate_create_container_fields(component, fields)
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    spec = CREATABLE_CONTAINERS[component]
+    # Drop blanks + zero-sentinels so pypowsybl treats them as unset.
+    clean = {k: v for k, v in fields.items() if v is not None and v != ""}
+    if component == "Voltage Levels":
+        for key in ("low_voltage_limit", "high_voltage_limit"):
+            if clean.get(key) == 0.0:
+                clean.pop(key, None)
+
+    df = pd.DataFrame([clean]).set_index("id")
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_create():
+        getattr(raw, spec["create_function"])(df)
+
+    run(_do_create)
+    st.session_state.pop("_vl_lookup_cache", None)
+    st.session_state.pop("_map_data_cache", None)
+
+
 def get_voltage_levels_df(network):
     vls = network.get_voltage_levels(attributes=["name", "substation_id", "nominal_v"])
     vls = vls.reset_index()

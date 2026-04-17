@@ -6,13 +6,17 @@ from streamlit.testing.v1 import AppTest
 from iidm_viewer.state import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
+    CREATABLE_CONTAINERS,
     create_branch_bay,
     create_component_bay,
+    create_container,
     filter_voltage_levels,
     get_voltage_levels_df,
     list_busbar_sections,
     list_node_breaker_voltage_levels,
+    list_substations_df,
     load_network,
+    next_free_node,
 )
 
 
@@ -479,3 +483,184 @@ def test_create_branch_bay_surfaces_pypowsybl_errors(node_breaker_network):
     fields["bus_or_busbar_section_id_2"] = "DOES_NOT_EXIST"
     with pytest.raises(Exception, match="not found"):
         create_branch_bay(node_breaker_network, "Lines", fields)
+
+
+# --- Container creation (substations / voltage levels / busbar sections) ---
+
+
+def test_creatable_containers_has_expected_types():
+    expected = {
+        "Substations": "create_substations",
+        "Voltage Levels": "create_voltage_levels",
+        "Busbar Sections": "create_busbar_sections",
+    }
+    for label, fn in expected.items():
+        assert label in CREATABLE_CONTAINERS, label
+        assert CREATABLE_CONTAINERS[label]["create_function"] == fn
+        field_names = {f["name"] for f in CREATABLE_CONTAINERS[label]["fields"]}
+        assert "id" in field_names
+
+
+def test_list_substations_df_returns_sorted_by_display(node_breaker_network):
+    df = list_substations_df(node_breaker_network)
+    assert not df.empty
+    assert {"id", "display"}.issubset(df.columns)
+    assert list(df["display"]) == sorted(df["display"])
+
+
+def test_next_free_node_suggests_unused_index(node_breaker_network):
+    n = next_free_node(node_breaker_network, "S1VL1")
+    bbs = node_breaker_network.get_busbar_sections(all_attributes=True)
+    used_bbs = set(bbs[bbs["voltage_level_id"] == "S1VL1"]["node"].tolist())
+    assert n not in used_bbs
+
+
+def test_next_free_node_returns_zero_for_empty_vl(node_breaker_network):
+    node_breaker_network.get_substations()  # warm up
+    create_container(
+        node_breaker_network,
+        "Substations",
+        {"id": "TEST_SUB_NEXT", "country": "FR"},
+    )
+    create_container(
+        node_breaker_network,
+        "Voltage Levels",
+        {
+            "id": "TEST_VL_EMPTY",
+            "substation_id": "TEST_SUB_NEXT",
+            "topology_kind": "NODE_BREAKER",
+            "nominal_v": 225.0,
+        },
+    )
+    assert next_free_node(node_breaker_network, "TEST_VL_EMPTY") == 0
+
+
+def test_create_container_substation(node_breaker_network):
+    create_container(
+        node_breaker_network,
+        "Substations",
+        {"id": "TEST_SUB", "name": "My Sub", "country": "FR", "TSO": "RTE"},
+    )
+    subs = node_breaker_network.get_substations()
+    assert "TEST_SUB" in subs.index
+    row = subs.loc["TEST_SUB"]
+    assert row["country"] == "FR"
+    assert row["TSO"] == "RTE"
+
+
+def test_create_container_voltage_level_attached_to_substation(node_breaker_network):
+    create_container(
+        node_breaker_network,
+        "Substations",
+        {"id": "TEST_SUB2", "country": "DE"},
+    )
+    create_container(
+        node_breaker_network,
+        "Voltage Levels",
+        {
+            "id": "TEST_VL",
+            "substation_id": "TEST_SUB2",
+            "topology_kind": "NODE_BREAKER",
+            "nominal_v": 380.0,
+            "low_voltage_limit": 360.0,
+            "high_voltage_limit": 420.0,
+        },
+    )
+    vls = node_breaker_network.get_voltage_levels()
+    assert "TEST_VL" in vls.index
+    assert vls.loc["TEST_VL", "nominal_v"] == 380.0
+    assert vls.loc["TEST_VL", "substation_id"] == "TEST_SUB2"
+
+
+def test_create_container_voltage_level_drops_zero_limits(node_breaker_network):
+    """0 is the UI sentinel for 'unset' — it must not be sent as a real limit."""
+    create_container(
+        node_breaker_network,
+        "Substations",
+        {"id": "TEST_SUB_ZERO", "country": "FR"},
+    )
+    create_container(
+        node_breaker_network,
+        "Voltage Levels",
+        {
+            "id": "TEST_VL_ZERO",
+            "substation_id": "TEST_SUB_ZERO",
+            "topology_kind": "NODE_BREAKER",
+            "nominal_v": 225.0,
+            "low_voltage_limit": 0.0,
+            "high_voltage_limit": 0.0,
+        },
+    )
+    vls = node_breaker_network.get_voltage_levels(all_attributes=True)
+    row = vls.loc["TEST_VL_ZERO"]
+    # pypowsybl reports unset limits as NaN, not 0.
+    assert pd.isna(row.get("low_voltage_limit"))
+    assert pd.isna(row.get("high_voltage_limit"))
+
+
+def test_create_container_busbar_section(node_breaker_network):
+    free_node = next_free_node(node_breaker_network, "S1VL1")
+    create_container(
+        node_breaker_network,
+        "Busbar Sections",
+        {
+            "id": "TEST_BBS",
+            "voltage_level_id": "S1VL1",
+            "node": free_node,
+        },
+    )
+    bbs = node_breaker_network.get_busbar_sections()
+    assert "TEST_BBS" in bbs.index
+    assert bbs.loc["TEST_BBS", "voltage_level_id"] == "S1VL1"
+
+
+def test_create_container_rejects_unknown_type(node_breaker_network):
+    with pytest.raises(ValueError, match="not a creatable container"):
+        create_container(node_breaker_network, "Generators", {"id": "x"})
+
+
+def test_create_container_rejects_missing_required(node_breaker_network):
+    with pytest.raises(ValueError, match="required"):
+        create_container(
+            node_breaker_network,
+            "Voltage Levels",
+            {"id": "VL_MISSING_NOMINAL", "topology_kind": "NODE_BREAKER"},
+        )
+
+
+def test_create_container_busbar_requires_voltage_level(node_breaker_network):
+    with pytest.raises(ValueError, match="Voltage level"):
+        create_container(
+            node_breaker_network,
+            "Busbar Sections",
+            {"id": "BBS_NO_VL", "node": 0},
+        )
+
+
+def test_create_container_voltage_level_rejects_inverted_limits(node_breaker_network):
+    with pytest.raises(ValueError, match="high_voltage_limit"):
+        create_container(
+            node_breaker_network,
+            "Voltage Levels",
+            {
+                "id": "VL_BAD_LIMITS",
+                "topology_kind": "NODE_BREAKER",
+                "nominal_v": 225.0,
+                "low_voltage_limit": 250.0,
+                "high_voltage_limit": 200.0,
+            },
+        )
+
+
+def test_create_container_surfaces_pypowsybl_errors(node_breaker_network):
+    """Creating a busbar section on a non-existent VL must raise."""
+    with pytest.raises(Exception):
+        create_container(
+            node_breaker_network,
+            "Busbar Sections",
+            {
+                "id": "BBS_BAD_VL",
+                "voltage_level_id": "DOES_NOT_EXIST",
+                "node": 0,
+            },
+        )
