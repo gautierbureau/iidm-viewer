@@ -123,7 +123,7 @@ pypowsybl → result wrapped and handed back.
 | File | Role | Deep-dive |
 |---|---|---|
 | `powsybl_worker.py` | Single-threaded executor + `NetworkProxy` | [docs/threading.md](docs/threading.md) |
-| `state.py` | Session state init, `load_network`, `run_loadflow`, `update_components`, `EDITABLE_COMPONENTS` | [docs/loadflow.md](docs/loadflow.md) |
+| `state.py` | Session state init, `load_network`, `create_empty_network`, `run_loadflow`, `update_components`, `EDITABLE_COMPONENTS` | [docs/loadflow.md](docs/loadflow.md) |
 | `lf_parameters.py` | Load flow parameter dialog + `get_lf_parameters()` | [docs/loadflow.md](docs/loadflow.md) |
 | `app.py` | Entry point: sidebar + 8 tabs | [docs/tabs.md](docs/tabs.md) |
 | `components.py` | `vl_selector`, `render_svg` | [docs/tabs.md](docs/tabs.md) |

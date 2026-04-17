@@ -38,6 +38,30 @@ def load_network(uploaded_file):
     return network
 
 
+def create_empty_network(network_id: str = "network"):
+    """Create a blank network and install it as the session network.
+
+    Lets users bootstrap a model from scratch without uploading anything —
+    they can then build it up via the Data Explorer's "Create a new …"
+    forms. Like :func:`load_network`, the resulting object is a
+    :class:`NetworkProxy` so every subsequent pypowsybl call runs on the
+    worker thread.
+    """
+    nid = (network_id or "network").strip() or "network"
+
+    def _create():
+        import pypowsybl.network as pn
+        return pn.create_empty(network_id=nid)
+
+    network = NetworkProxy(run(_create))
+    st.session_state.network = network
+    st.session_state.selected_vl = None
+    st.session_state.pop("_map_data_cache", None)
+    st.session_state.pop("_vl_lookup_cache", None)
+    st.session_state.pop("_last_file", None)
+    return network
+
+
 def get_network():
     return st.session_state.get("network")
 

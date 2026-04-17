@@ -10,6 +10,7 @@ from iidm_viewer.state import (
     create_branch_bay,
     create_component_bay,
     create_container,
+    create_empty_network,
     filter_voltage_levels,
     get_voltage_levels_df,
     list_busbar_sections,
@@ -483,6 +484,52 @@ def test_create_branch_bay_surfaces_pypowsybl_errors(node_breaker_network):
     fields["bus_or_busbar_section_id_2"] = "DOES_NOT_EXIST"
     with pytest.raises(Exception, match="not found"):
         create_branch_bay(node_breaker_network, "Lines", fields)
+
+
+# --- Blank network bootstrap ---
+
+
+def test_create_empty_network_returns_proxy_and_installs_session():
+    from iidm_viewer.powsybl_worker import NetworkProxy
+    import streamlit as st
+
+    st.session_state.clear()
+    net = create_empty_network("test_blank")
+    assert isinstance(net, NetworkProxy)
+    assert st.session_state["network"] is net
+    assert st.session_state["selected_vl"] is None
+    assert net.id == "test_blank"
+    assert net.get_voltage_levels().empty
+    assert net.get_substations().empty
+
+
+def test_create_empty_network_supports_full_container_bootstrap():
+    """A fresh blank network must accept the full substation / VL / BBS chain."""
+    net = create_empty_network("bootstrap")
+    create_container(net, "Substations", {"id": "S1", "country": "FR"})
+    create_container(
+        net,
+        "Voltage Levels",
+        {
+            "id": "VL1",
+            "substation_id": "S1",
+            "topology_kind": "NODE_BREAKER",
+            "nominal_v": 225.0,
+        },
+    )
+    create_container(
+        net,
+        "Busbar Sections",
+        {"id": "BBS1", "voltage_level_id": "VL1", "node": 0},
+    )
+    assert "S1" in net.get_substations().index
+    assert "VL1" in net.get_voltage_levels().index
+    assert "BBS1" in net.get_busbar_sections().index
+
+
+def test_create_empty_network_defaults_blank_id_to_network():
+    net = create_empty_network("")
+    assert net.id == "network"
 
 
 # --- Container creation (substations / voltage levels / busbar sections) ---

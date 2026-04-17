@@ -1,5 +1,11 @@
 import streamlit as st
-from iidm_viewer.state import init_state, load_network, get_network, run_loadflow
+from iidm_viewer.state import (
+    create_empty_network,
+    get_network,
+    init_state,
+    load_network,
+    run_loadflow,
+)
 from iidm_viewer.lf_parameters import show_lf_parameters_dialog
 from iidm_viewer.components import vl_selector
 from iidm_viewer.network_info import render_overview
@@ -41,6 +47,16 @@ with st.sidebar:
                 st.session_state["_last_file"] = uploaded.name
             st.rerun()
 
+    # Bootstrap a blank network so users can build a node-breaker model
+    # from scratch via the Data Explorer's "Create a new ..." forms.
+    with st.expander("Or start from a blank network", expanded=False):
+        blank_id = st.text_input(
+            "Network ID", value="network", key="blank_network_id"
+        )
+        if st.button("Create blank network", key="blank_network_btn"):
+            create_empty_network(blank_id)
+            st.rerun()
+
     network = get_network()
 
     selected_vl = None
@@ -65,7 +81,10 @@ with st.sidebar:
 # -- Main area --
 if network is None:
     st.header("IIDM Viewer")
-    st.info("Upload an XIIDM file in the sidebar to get started.")
+    st.info(
+        "Upload an XIIDM file in the sidebar to get started, "
+        "or expand \"Or start from a blank network\" to build one from scratch."
+    )
     st.stop()
 
 tab_overview, tab_map, tab_nad, tab_sld, tab_components, tab_extensions, tab_rcc, tab_limits, tab_pmax = st.tabs(
