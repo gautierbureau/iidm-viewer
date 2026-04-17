@@ -262,7 +262,30 @@ CREATABLE_COMPONENTS: dict[str, dict] = {
              "kind": "float", "required": True, "default": 0.0, "min_value": 0.0},
         ],
     },
+    "Shunt Compensators": {
+        "bay_function": "create_shunt_compensator_bay",
+        "fields": [
+            {"name": "id", "label": "ID", "kind": "text", "required": True, "default": ""},
+            {"name": "section_count", "label": "Initial section count",
+             "kind": "int", "required": True, "default": 1, "min_value": 0},
+            {"name": "max_section_count", "label": "Max section count",
+             "kind": "int", "required": True, "default": 1, "min_value": 1,
+             "help": "Maximum number of connectable sections (linear model)."},
+            {"name": "g_per_section", "label": "g_per_section (S)",
+             "kind": "float", "required": True, "default": 0.0},
+            {"name": "b_per_section", "label": "b_per_section (S)",
+             "kind": "float", "required": True, "default": 1e-5},
+            {"name": "target_v", "label": "target_v (kV, 0 = unset)",
+             "kind": "float", "required": False, "default": 0.0, "min_value": 0.0},
+            {"name": "target_deadband", "label": "target_deadband (kV, 0 = unset)",
+             "kind": "float", "required": False, "default": 0.0, "min_value": 0.0},
+        ],
+        "validate": "_validate_shunt",
+    },
 }
+
+# Fields that go to the linear-model DataFrame (the rest become shunt_df).
+_SHUNT_LINEAR_FIELDS = {"g_per_section", "b_per_section", "max_section_count"}
 
 # Shared locator fields appended to every creation form.
 LOCATOR_FIELDS: list[dict] = [
@@ -309,11 +332,21 @@ def _validate_svc(fields: dict) -> list[str]:
     return errors
 
 
+def _validate_shunt(fields: dict) -> list[str]:
+    errors = []
+    section_count = fields.get("section_count")
+    max_sc = fields.get("max_section_count")
+    if section_count is not None and max_sc is not None and section_count > max_sc:
+        errors.append("Initial section count must be <= max_section_count.")
+    return errors
+
+
 _VALIDATORS = {
     "_validate_generator": _validate_generator,
     "_validate_minmax_p": _validate_minmax_p,
     "_validate_voltage_regulator": _validate_voltage_regulator,
     "_validate_svc": _validate_svc,
+    "_validate_shunt": _validate_shunt,
 }
 
 
@@ -375,6 +408,34 @@ def _dispatch_bay_create(network, bay_fn_name: str, fields: dict):
     st.session_state.pop("_map_data_cache", None)
 
 
+def _dispatch_shunt_bay(network, fields: dict):
+    """Shunt compensator bay creation needs 3 dataframes (shunt + linear + non-linear).
+
+    We only support the LINEAR model for now; non_linear_model_df is empty.
+    Linear-model columns are peeled off the flat ``fields`` dict before
+    building the two input dataframes.
+    """
+    linear_row = {k: fields[k] for k in _SHUNT_LINEAR_FIELDS if k in fields}
+    linear_row["id"] = fields["id"]
+    shunt_row = {
+        k: v for k, v in fields.items()
+        if k not in _SHUNT_LINEAR_FIELDS and v is not None and v != ""
+    }
+    shunt_row["model_type"] = "LINEAR"
+
+    shunt_df = pd.DataFrame([shunt_row]).set_index("id")
+    linear_df = pd.DataFrame([linear_row]).set_index("id")
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_create():
+        import pypowsybl.network as pn
+        pn.create_shunt_compensator_bay(raw, shunt_df, linear_model_df=linear_df)
+
+    run(_do_create)
+    st.session_state.pop("_vl_lookup_cache", None)
+    st.session_state.pop("_map_data_cache", None)
+
+
 def create_component_bay(network, component: str, fields: dict):
     """Create a new injection on a busbar section via a clean feeder bay.
 
@@ -389,6 +450,10 @@ def create_component_bay(network, component: str, fields: dict):
     errors = validate_create_fields(component, fields)
     if errors:
         raise ValueError("; ".join(errors))
+
+    if component == "Shunt Compensators":
+        _dispatch_shunt_bay(network, fields)
+        return
 
     _dispatch_bay_create(
         network,
@@ -688,3 +753,199 @@ def filter_voltage_levels(vls_df, text):
         return vls_df
     mask = vls_df["display"].str.contains(text, case=False, na=False, regex=False)
     return vls_df[mask]
+
+
+# --- Tap changers (ratio + phase) on existing 2-winding transformers ---
+
+PTC_REGULATION_MODES = ["CURRENT_LIMITER", "ACTIVE_POWER_CONTROL"]
+TRANSFORMER_SIDES = ["ONE", "TWO"]
+
+# Ratio/Phase tap changer creation spec. Unlike injections, tap changers are
+# attached to an *existing* transformer — no bay allocation. They need 2
+# dataframes: one for the tap changer attributes, one for the per-tap steps.
+CREATABLE_TAP_CHANGERS: dict[str, dict] = {
+    "Ratio": {
+        "create_method": "create_ratio_tap_changers",
+        "main_fields": [
+            {"name": "tap", "label": "Current tap",
+             "kind": "int", "required": True, "default": 0, "min_value": 0},
+            {"name": "low_tap", "label": "Lowest tap number",
+             "kind": "int", "required": True, "default": 0, "min_value": 0},
+            {"name": "oltc", "label": "On-load tap changing (OLTC)",
+             "kind": "bool", "required": True, "default": False,
+             "help": "Must be true to enable voltage regulation."},
+            {"name": "regulating", "label": "Regulating", "kind": "bool",
+             "required": True, "default": False},
+            {"name": "target_v", "label": "target_v (kV, 0 = unset)",
+             "kind": "float", "required": False, "default": 0.0, "min_value": 0.0},
+            {"name": "target_deadband", "label": "target_deadband (kV, 0 = unset)",
+             "kind": "float", "required": False, "default": 0.0, "min_value": 0.0},
+            {"name": "regulated_side", "label": "Regulated side", "kind": "select",
+             "required": False, "default": "ONE", "options": TRANSFORMER_SIDES},
+        ],
+        "step_columns": ["r", "x", "g", "b", "rho"],
+        "step_defaults": {"r": 0.0, "x": 0.0, "g": 0.0, "b": 0.0, "rho": 1.0},
+    },
+    "Phase": {
+        "create_method": "create_phase_tap_changers",
+        "main_fields": [
+            {"name": "tap", "label": "Current tap",
+             "kind": "int", "required": True, "default": 0, "min_value": 0},
+            {"name": "low_tap", "label": "Lowest tap number",
+             "kind": "int", "required": True, "default": 0, "min_value": 0},
+            {"name": "regulation_mode", "label": "Regulation mode",
+             "kind": "select", "required": True, "default": "CURRENT_LIMITER",
+             "options": PTC_REGULATION_MODES},
+            {"name": "regulating", "label": "Regulating", "kind": "bool",
+             "required": True, "default": False},
+            {"name": "target_deadband", "label": "target_deadband (0 = unset)",
+             "kind": "float", "required": False, "default": 0.0, "min_value": 0.0},
+            {"name": "regulated_side", "label": "Regulated side", "kind": "select",
+             "required": False, "default": "ONE", "options": TRANSFORMER_SIDES},
+        ],
+        "step_columns": ["r", "x", "g", "b", "rho", "alpha"],
+        "step_defaults": {"r": 0.0, "x": 0.0, "g": 0.0, "b": 0.0, "rho": 1.0, "alpha": 0.0},
+    },
+}
+
+
+def list_two_winding_transformers(network):
+    """Return 2WT ids sorted alphabetically (empty list if none)."""
+    try:
+        twts = network.get_2_windings_transformers(attributes=["name"])
+    except Exception:
+        return []
+    return sorted(twts.index.tolist())
+
+
+def validate_create_tap_changer_fields(
+    kind: str, transformer_id: str, main_fields: dict, steps: list[dict]
+) -> list[str]:
+    """Validate a tap-changer creation payload.
+
+    Checks the transformer id, main fields (required + cross-field rules)
+    and that at least one step is provided and spans the current ``tap``
+    position. Returns a list of human-readable errors.
+    """
+    spec = CREATABLE_TAP_CHANGERS.get(kind)
+    if not spec:
+        return [f"{kind!r} tap changer is not creatable"]
+    errors = []
+    if not transformer_id:
+        errors.append("Target 2-winding transformer is required.")
+    for f in spec["main_fields"]:
+        v = main_fields.get(f["name"])
+        if f["required"] and v is None:
+            errors.append(f"{f['label']} is required.")
+    if not steps:
+        errors.append("At least one tap step is required.")
+    if steps:
+        low = main_fields.get("low_tap", 0) or 0
+        tap = main_fields.get("tap", 0) or 0
+        if tap < low or tap >= low + len(steps):
+            errors.append(
+                f"Current tap {tap} must be between {low} and "
+                f"{low + len(steps) - 1} (inclusive)."
+            )
+    if main_fields.get("regulating"):
+        if kind == "Ratio":
+            if not main_fields.get("oltc"):
+                errors.append("OLTC must be enabled to set regulating=True on a ratio tap changer.")
+            if not main_fields.get("target_v") or main_fields["target_v"] <= 0:
+                errors.append("target_v must be > 0 when the ratio tap changer is regulating.")
+    return errors
+
+
+def create_tap_changer(
+    network, kind: str, transformer_id: str, main_fields: dict, steps: list[dict]
+):
+    """Create a ratio or phase tap changer on an existing 2-winding transformer.
+
+    Runs validation on the main thread then dispatches the two dataframes
+    (tap-changer attributes + per-step data) to pypowsybl via the worker.
+    ``steps`` is a list of dicts matching ``CREATABLE_TAP_CHANGERS[kind]``'s
+    ``step_columns``; one row is emitted per entry.
+    """
+    if kind not in CREATABLE_TAP_CHANGERS:
+        raise ValueError(f"{kind!r} tap changer is not creatable")
+
+    errors = validate_create_tap_changer_fields(
+        kind, transformer_id, main_fields, steps
+    )
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    spec = CREATABLE_TAP_CHANGERS[kind]
+    # Drop zero-sentinel target_v / target_deadband so pypowsybl sees them as unset.
+    main_row = {
+        k: v for k, v in main_fields.items()
+        if v is not None and v != "" and not (
+            k in ("target_v", "target_deadband") and v == 0.0
+        )
+    }
+    main_row["id"] = transformer_id
+    main_df = pd.DataFrame([main_row]).set_index("id")
+
+    step_rows = []
+    for step in steps:
+        row = {"id": transformer_id}
+        for col in spec["step_columns"]:
+            row[col] = step.get(col, spec["step_defaults"][col])
+        step_rows.append(row)
+    steps_df = pd.DataFrame(step_rows).set_index("id")
+
+    raw = object.__getattribute__(network, "_obj")
+    method_name = spec["create_method"]
+
+    def _do_create():
+        getattr(raw, method_name)(main_df, steps_df)
+
+    run(_do_create)
+    st.session_state.pop("_vl_lookup_cache", None)
+    st.session_state.pop("_map_data_cache", None)
+
+
+# --- Coupling device (switches tying two busbar sections together) ---
+
+def create_coupling_device(
+    network, bbs1: str, bbs2: str, switch_prefix: str | None = None
+):
+    """Create a coupling device between two busbar sections in the same VL.
+
+    In node-breaker topology pypowsybl inserts a closed breaker plus closed
+    disconnectors on both busbar sections, and open disconnectors on any
+    parallel busbar sections. In bus-breaker topology only a breaker is
+    added. Routed through the worker thread like every other pypowsybl call.
+    """
+    if not bbs1 or not bbs2:
+        raise ValueError("Both busbar sections are required.")
+    if bbs1 == bbs2:
+        raise ValueError("The two busbar sections must differ.")
+
+    bbs = network.get_busbar_sections()
+    if bbs1 not in bbs.index or bbs2 not in bbs.index:
+        raise ValueError("Unknown busbar section id.")
+    vl1 = bbs.loc[bbs1, "voltage_level_id"]
+    vl2 = bbs.loc[bbs2, "voltage_level_id"]
+    if vl1 != vl2:
+        raise ValueError(
+            f"A coupling device must tie busbar sections of the same voltage level "
+            f"(got {vl1!r} and {vl2!r})."
+        )
+
+    kwargs = {
+        "bus_or_busbar_section_id_1": bbs1,
+        "bus_or_busbar_section_id_2": bbs2,
+    }
+    if switch_prefix:
+        kwargs["switch_prefix_id"] = switch_prefix
+
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_create():
+        import pypowsybl.network as pn
+        pn.create_coupling_device(raw, **kwargs)
+
+    run(_do_create)
+    st.session_state.pop("_vl_lookup_cache", None)
+    st.session_state.pop("_map_data_cache", None)
