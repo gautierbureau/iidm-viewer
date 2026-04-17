@@ -17,6 +17,12 @@ dependencies = [
 [project.scripts]
 iidm-viewer = "iidm_viewer.cli:main"
 
+[tool.hatch.build.targets.wheel]
+packages = ["iidm_viewer"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"iidm_viewer/frontend" = "iidm_viewer/frontend"
+
 [tool.pytest.ini_options]
 addopts = "--cov=iidm_viewer --cov-report=term-missing --cov-report=xml"
 

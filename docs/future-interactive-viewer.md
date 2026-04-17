@@ -49,19 +49,21 @@ the component layer for that.
 
 ## Current state (2026-04)
 
-- `iidm_viewer/nad_interactive.py` injects `<style>` + `<script>` into the
-  NAD SVG. Clicks on `.nad-vl-nodes > g` and `.nad-branch-edges > g` fire
-  `window.parent.postMessage({channel: 'iidm-viewer', type: 'nad-vl-click',
-  vl: 'VLx'}, '*')` (and `nad-edge-click` for edges).
-- Verified against pypowsybl 1.14's IEEE_14 NAD SVG: the selector matches
-  the id-bearing `<g>` directly and the metadata svgIds line up. The sender
-  side works.
-- **Missing**: nothing on the Python side receives these messages.
-  `st.components.v1.html` is a one-way iframe with no setComponentValue
-  channel. An earlier `window.top.location.href = '?selected_vl=...'`
-  fallback was removed because (a) the Streamlit component iframe sandbox
-  omits `allow-top-navigation`, and (b) a full page reload would discard
-  `st.session_state` — the user would lose the uploaded network.
+Stage 1 is **implemented**:
+
+- `iidm_viewer/nad_component.py` + `iidm_viewer/frontend/nad_component/index.html`
+  declare a custom Streamlit component. The iframe speaks the Streamlit
+  wire protocol directly (`streamlit:componentReady` / `streamlit:render` /
+  `streamlit:setComponentValue` / `streamlit:setFrameHeight`) — no
+  `streamlit-component-lib` dependency.
+- `diagrams.render_nad_tab` calls `render_interactive_nad(svg, metadata,
+  height, key)`, reads the returned click dict, updates
+  `st.session_state.selected_vl`, and calls `st.rerun()`. No page reload,
+  session state preserved.
+- The obsolete `nad_interactive.py` (server-side SVG injection) and its
+  test are removed; hit-testing runs in the browser against
+  `.nad-vl-nodes > g` and `.nad-branch-edges > g` — the selectors verified
+  against pypowsybl 1.14's IEEE_14 NAD SVG.
 
 ## Upgrade plan — minimal bidirectional component (path to Option 1)
 

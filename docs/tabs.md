@@ -30,18 +30,24 @@ See [network-map.md](network-map.md) for details.
 
 ### Network Area Diagram — `diagrams.render_nad_tab`
 
-Controls: depth slider (0–10), "Enable click-to-select" checkbox.
+Controls: depth slider (0–10).
 
 Calls `network.get_network_area_diagram(voltage_level_ids=[selected_vl], depth=depth, ...)`.
 The result is a `NadResult`-like proxy with `.svg` and `.metadata` attributes.
 
-When interactive mode is on, `nad_interactive.make_interactive_nad_svg` injects
-`<style>` + `<script>` into the SVG before rendering. Clicking a VL node posts
-`{channel: 'iidm-viewer', type: 'nad-vl-click', vl: <equipmentId>}` to
-`window.parent` via `postMessage`. Nothing on the Python side consumes that
-message today — `st.components.v1.html` is a one-way iframe. Wiring it into
-session state requires a custom Streamlit component
-(see [future-interactive-viewer.md](future-interactive-viewer.md)).
+Rendering goes through `nad_component.render_interactive_nad(svg, metadata,
+height, key)` — a custom Streamlit component declared from
+`iidm_viewer/frontend/nad_component/`. The iframe implements the Streamlit
+component wire protocol directly (no `streamlit-component-lib` dep), injects
+the SVG, and attaches click handlers on `.nad-vl-nodes > g` and
+`.nad-branch-edges > g`. Click payloads come back as
+`{"type": "nad-vl-click", "vl": "<equipmentId>", "ts": ...}` or
+`{"type": "nad-edge-click", "edge": {...}, "ts": ...}`.
+
+`render_nad_tab` writes `vl` into `st.session_state.selected_vl` and calls
+`st.rerun()`; session state survives so the uploaded network and NetworkProxy
+stay intact. See [future-interactive-viewer.md](future-interactive-viewer.md)
+for the upgrade path to `@powsybl/network-viewer-core` (drag / pan-zoom).
 
 Note: accessing `.svg` and `.metadata` from the proxy issues two separate `run()`
 calls. Do not wrap these inside another `run()` — that deadlocks the executor.

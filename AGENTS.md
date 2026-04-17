@@ -129,7 +129,8 @@ pypowsybl → result wrapped and handed back.
 | `components.py` | `vl_selector`, `render_svg` | [docs/tabs.md](docs/tabs.md) |
 | `network_info.py` | `COMPONENT_TYPES` registry, Overview tab | [docs/tabs.md](docs/tabs.md) |
 | `diagrams.py` | NAD and SLD tab render functions | [docs/tabs.md](docs/tabs.md) |
-| `nad_interactive.py` | Click-to-select SVG injection for NAD | [docs/tabs.md](docs/tabs.md) |
+| `nad_component.py` | `declare_component` wrapper for the clickable NAD | [docs/tabs.md](docs/tabs.md) |
+| `frontend/nad_component/index.html` | NAD component iframe: hit-testing + Streamlit wire protocol | [docs/tabs.md](docs/tabs.md) |
 | `data_explorer.py` | Editable component tables, apply + LF flow | [docs/data-explorer.md](docs/data-explorer.md) |
 | `filters.py` | `FILTERS` whitelist, `build_vl_lookup`, `enrich_with_joins`, `render_filters` | [docs/filters.md](docs/filters.md) |
 | `network_map.py` | Leaflet map tab | [docs/network-map.md](docs/network-map.md) |
