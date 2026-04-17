@@ -143,6 +143,18 @@ both picked busbar sections belong to the same substation (via
 `_substations_of_bbs`), producing a friendly error before pypowsybl is
 involved.
 
+## Blank-network bootstrap
+
+The sidebar ("Or start from a blank network" expander) calls
+``state.create_empty_network(network_id)`` which routes through the worker
+thread to ``pypowsybl.network.create_empty`` and installs the fresh
+``NetworkProxy`` as ``session_state["network"]``. From there the user can
+drive the full node-breaker build-up — Substation → Voltage Level (with
+``topology_kind="NODE_BREAKER"``) → Busbar Section → injections / branches
+— using the Data Explorer's creation forms without ever uploading a file.
+Bus-breaker creation is deliberately not wired in yet; the forms still
+restrict injection + branch creation to node-breaker VLs.
+
 ## Container creation — `CREATABLE_CONTAINERS`
 
 Substations, Voltage Levels, and Busbar Sections don't have a ``_bay`` helper:
