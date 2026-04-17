@@ -3,21 +3,24 @@
 Strategy
 --------
 pypowsybl emits a `NadResult` with two fields: `.svg` (raw SVG string) and
-`.metadata` (JSON describing the diagram). The SVG itself tags VL nodes
-with opaque integer ids like <g id="0" class="nad-vl120to180">; the mapping
-from those integer ids to VL equipment ids only lives in the metadata.
+`.metadata` (JSON describing the diagram). The SVG wraps each voltage level
+as `<g class="nad-vl-nodes"><g transform="..." id="<svgId>" class="nad-vlXtoY">...</g>...</g>`
+and each branch edge as `<g class="nad-branch-edges"><g id="<svgId>">...</g>...</g>`.
+The mapping from those integer svg ids to equipment ids lives in the metadata.
 
-`make_interactive_nad_svg` parses the metadata, builds the id→VL map, and
-injects:
+`make_interactive_nad_svg` parses the metadata, builds the id→equipment
+maps, and injects:
 
-1. a small `<style>` that puts a pointer cursor on VL nodes;
-2. a `<script>` that wires click handlers onto those nodes, posts a
-   `nad-vl-click` message via `window.parent.postMessage`, and also tries
-   a top-level URL update (`?selected_vl=VLx`) as a no-component fallback.
+1. a small `<style>` that puts a pointer cursor on VL nodes and edges;
+2. a `<script>` that wires click handlers and posts a `nad-vl-click` /
+   `nad-edge-click` message via `window.parent.postMessage` on the agreed
+   `iidm-viewer` channel.
 
-The Python side does not consume the messages yet — that's a next step.
-For now this module just proves the SVG can be augmented without breaking
-pypowsybl's rendering.
+The Python side does not yet consume these messages. `st.components.v1.html`
+is a one-way iframe, so to turn the post into a `st.session_state` update
+plus a rerun we need a custom Streamlit component (declare_component) that
+can respond with `Streamlit.setComponentValue`. See
+`docs/future-interactive-viewer.md` for the plan.
 """
 from __future__ import annotations
 
@@ -66,17 +69,6 @@ _INJECTION_TEMPLATE = """
     try {{
       window.parent.postMessage(Object.assign({{channel: 'iidm-viewer'}}, payload), '*');
     }} catch (e) {{}}
-    // Simple receiver: rewrite the top window's URL and let Streamlit rerun
-    // via st.query_params. If the iframe sandbox forbids top navigation,
-    // this silently fails and we still have the postMessage above.
-    if (payload.type === 'nad-vl-click' && payload.vl) {{
-      try {{
-        var top = window.top;
-        var url = new URL(top.location.href);
-        url.searchParams.set('selected_vl', payload.vl);
-        top.location.href = url.toString();
-      }} catch (e) {{}}
-    }}
   }}
 
   function onVlClick(evt) {{

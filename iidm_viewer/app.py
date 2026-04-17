@@ -71,13 +71,6 @@ def _show_save_network_dialog():
         key="export_download_btn",
     )
 
-# The NAD's click-to-select injection rewrites the top window URL with
-# ?selected_vl=VLx. Promote that into session state so the sidebar picks
-# it up on the subsequent rerun.
-_qp_vl = st.query_params.get("selected_vl")
-if _qp_vl and st.session_state.get("selected_vl") != _qp_vl:
-    st.session_state["selected_vl"] = _qp_vl
-
 # -- Sidebar --
 with st.sidebar:
     st.title("IIDM Viewer")
