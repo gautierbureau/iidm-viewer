@@ -3,7 +3,11 @@ import pandas as pd
 import pypowsybl.loadflow as lf
 
 from iidm_viewer.state import load_network, run_loadflow
-from iidm_viewer.operational_limits import _compute_loading, _get_current_flows
+from iidm_viewer.operational_limits import (
+    _compute_loading,
+    _get_branch_losses,
+    _get_current_flows,
+)
 
 
 def _load_and_run_lf(xiidm_upload):
@@ -63,6 +67,29 @@ def test_get_current_flows_returns_both_sides(xiidm_upload):
     for eid, flow in flows.items():
         assert "i1" in flow
         assert "i2" in flow
+
+
+def test_branch_losses_populated_after_loadflow(xiidm_upload):
+    """After LF, losses (p1+p2) must be finite and non-negative on IEEE14."""
+    network = _load_and_run_lf(xiidm_upload)
+    losses = _get_branch_losses(network)
+
+    assert losses  # non-empty
+    finite = [v for v in losses.values() if pd.notna(v)]
+    assert finite, "expected at least one branch with finite losses after LF"
+    # Physical sanity: losses on a passive branch can't be meaningfully negative.
+    # Allow tiny numerical noise.
+    assert all(v > -1e-3 for v in finite)
+
+
+def test_compute_loading_includes_losses_column(xiidm_upload):
+    network = _load_and_run_lf(xiidm_upload)
+    limits = network.get_operational_limits().reset_index()
+    loading = _compute_loading(network, limits)
+
+    assert "losses" in loading.columns
+    # At least some branches should have finite losses post-LF.
+    assert loading["losses"].notna().any()
 
 
 def test_loading_l1_2_1_is_near_80_percent(xiidm_upload):
