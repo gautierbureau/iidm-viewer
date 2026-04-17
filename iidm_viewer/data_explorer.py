@@ -5,15 +5,19 @@ from iidm_viewer.state import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
     CREATABLE_CONTAINERS,
+    CREATABLE_TAP_CHANGERS,
     EDITABLE_COMPONENTS,
     LOCATOR_FIELDS,
     branch_side_locator_fields,
     create_branch_bay,
     create_component_bay,
     create_container,
+    create_coupling_device,
+    create_tap_changer,
     list_busbar_sections,
     list_node_breaker_voltage_levels,
     list_substations_df,
+    list_two_winding_transformers,
     next_free_node,
     run_loadflow,
     update_components,
@@ -418,6 +422,142 @@ def _render_create_container_form(network, component: str):
         st.rerun()
 
 
+def _render_create_tap_changer_form(network):
+    """Collapsible form to add a ratio or phase tap changer to an existing 2WT.
+
+    Renders a 2WT picker, a kind picker (Ratio / Phase), the main fields from
+    :data:`CREATABLE_TAP_CHANGERS`, and a variable-row data-editor for the
+    per-tap steps. Steps are seeded with the spec's ``step_defaults``.
+    """
+    twts = list_two_winding_transformers(network)
+    if not twts:
+        return
+
+    with st.expander("Create a new tap changer", expanded=False):
+        col_twt, col_kind = st.columns([3, 1])
+        with col_twt:
+            twt_id = st.selectbox(
+                "Target 2-winding transformer", twts,
+                key="new_tc_twt",
+            )
+        with col_kind:
+            kind = st.selectbox(
+                "Tap changer kind", list(CREATABLE_TAP_CHANGERS.keys()),
+                key="new_tc_kind",
+            )
+
+        spec = CREATABLE_TAP_CHANGERS[kind]
+        prefix = f"new_tc_{kind.lower()}"
+
+        with st.form(key=f"{prefix}_form", clear_on_submit=False):
+            raw_main = _render_generic_field_grid(spec["main_fields"], prefix)
+
+            st.markdown("**Tap steps**")
+            st.caption(
+                "One row per tap position (order matters). The current tap is "
+                "the index `low_tap + N` where `N` is the 0-based row number."
+            )
+            initial_steps = pd.DataFrame(
+                [spec["step_defaults"].copy() for _ in range(3)],
+                columns=spec["step_columns"],
+            )
+            steps_edited = st.data_editor(
+                initial_steps,
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"{prefix}_steps",
+            )
+            submit = st.form_submit_button(f"Create {kind.lower()} tap changer")
+
+        if not submit:
+            return
+
+        main_fields = _coerce_field_values(spec["main_fields"], raw_main)
+        steps_df = pd.DataFrame(steps_edited).dropna(how="all")
+        steps = [
+            {col: row[col] for col in spec["step_columns"] if col in row}
+            for _, row in steps_df.iterrows()
+        ]
+
+        try:
+            create_tap_changer(network, kind, twt_id, main_fields, steps)
+        except Exception as e:
+            st.error(f"Create failed: {e}")
+            return
+
+        st.success(
+            f"Created {kind.lower()} tap changer on {twt_id} ({len(steps)} steps)."
+        )
+        st.rerun()
+
+
+def _render_create_coupling_device_form(network):
+    """Collapsible form to create a coupling device (switches tying two BBS).
+
+    Picks a node-breaker VL, then two distinct busbar sections inside it.
+    pypowsybl inserts the breaker + disconnectors automatically.
+    """
+    with st.expander("Create a coupling device", expanded=False):
+        nb_vls = list_node_breaker_voltage_levels(network)
+        if nb_vls.empty:
+            st.info(
+                "Coupling device creation is currently limited to node-breaker "
+                "voltage levels; none were found in this network."
+            )
+            return
+
+        vl_labels = {
+            r["id"]: f"{r['display']} ({r['nominal_v']:.0f} kV)"
+            for _, r in nb_vls.iterrows()
+        }
+        vl_id = st.selectbox(
+            "Voltage level",
+            nb_vls["id"].tolist(),
+            format_func=lambda i: vl_labels.get(i, i),
+            key="new_cpl_vl",
+        )
+
+        bbs_options = list_busbar_sections(network, vl_id)
+        if len(bbs_options) < 2:
+            st.warning(
+                f"At least two busbar sections are needed in {vl_id} to add a "
+                "coupling device (found "
+                f"{len(bbs_options)})."
+            )
+            return
+
+        with st.form(key="new_cpl_form", clear_on_submit=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                bbs1 = st.selectbox(
+                    "Busbar section 1", bbs_options, index=0, key="new_cpl_bbs1"
+                )
+            with col2:
+                bbs2 = st.selectbox(
+                    "Busbar section 2", bbs_options, index=1, key="new_cpl_bbs2"
+                )
+            switch_prefix = st.text_input(
+                "Switch prefix (optional)", value="",
+                key="new_cpl_prefix",
+                help="Prefix applied to the created breaker + disconnector ids.",
+            )
+            submit = st.form_submit_button("Create coupling device")
+
+        if not submit:
+            return
+
+        try:
+            create_coupling_device(
+                network, bbs1, bbs2, switch_prefix.strip() or None
+            )
+        except Exception as e:
+            st.error(f"Create failed: {e}")
+            return
+
+        st.success(f"Created coupling device between {bbs1} and {bbs2}.")
+        st.rerun()
+
+
 def render_data_explorer(network, selected_vl):
     lf_status = st.session_state.pop("_lf_status_message", None)
     if lf_status:
@@ -441,8 +581,13 @@ def render_data_explorer(network, selected_vl):
         _render_create_component_form(network, component)
     elif component in CREATABLE_BRANCHES:
         _render_create_branch_form(network, component)
+        if component == "2-Winding Transformers":
+            _render_create_tap_changer_form(network)
     elif component in CREATABLE_CONTAINERS:
         _render_create_container_form(network, component)
+
+    if component == "Switches":
+        _render_create_coupling_device_form(network)
 
     filter_by_vl = False
     if component in VL_FILTERABLE and selected_vl:

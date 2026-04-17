@@ -7,15 +7,19 @@ from iidm_viewer.state import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
     CREATABLE_CONTAINERS,
+    CREATABLE_TAP_CHANGERS,
     create_branch_bay,
     create_component_bay,
     create_container,
+    create_coupling_device,
     create_empty_network,
+    create_tap_changer,
     filter_voltage_levels,
     get_voltage_levels_df,
     list_busbar_sections,
     list_node_breaker_voltage_levels,
     list_substations_df,
+    list_two_winding_transformers,
     load_network,
     next_free_node,
 )
@@ -710,4 +714,225 @@ def test_create_container_surfaces_pypowsybl_errors(node_breaker_network):
                 "voltage_level_id": "DOES_NOT_EXIST",
                 "node": 0,
             },
+        )
+
+
+# --- Shunt compensator creation ---
+
+
+def _base_shunt_fields(shunt_id="TEST_SHUNT"):
+    return {
+        "id": shunt_id,
+        "bus_or_busbar_section_id": "S1VL1_BBS",
+        "section_count": 1,
+        "max_section_count": 1,
+        "g_per_section": 0.0,
+        "b_per_section": 1e-5,
+        "target_v": 0.0,
+        "target_deadband": 0.0,
+        "position_order": 300,
+        "direction": "BOTTOM",
+    }
+
+
+def test_creatable_components_has_shunt_compensators():
+    assert "Shunt Compensators" in CREATABLE_COMPONENTS
+    spec = CREATABLE_COMPONENTS["Shunt Compensators"]
+    assert spec["bay_function"] == "create_shunt_compensator_bay"
+    field_names = {f["name"] for f in spec["fields"]}
+    assert {
+        "id", "section_count", "max_section_count",
+        "g_per_section", "b_per_section",
+    }.issubset(field_names)
+
+
+def test_create_component_bay_creates_shunt_compensator(node_breaker_network):
+    create_component_bay(
+        node_breaker_network, "Shunt Compensators", _base_shunt_fields()
+    )
+    shunts = node_breaker_network.get_shunt_compensators()
+    assert "TEST_SHUNT" in shunts.index
+    row = shunts.loc["TEST_SHUNT"]
+    assert row["voltage_level_id"] == "S1VL1"
+    assert row["max_section_count"] == 1
+
+
+def test_create_component_bay_shunt_rejects_oversized_initial_section(node_breaker_network):
+    fields = _base_shunt_fields(shunt_id="BAD_SHUNT")
+    fields["section_count"] = 5
+    fields["max_section_count"] = 2
+    with pytest.raises(ValueError, match="<= max_section_count"):
+        create_component_bay(
+            node_breaker_network, "Shunt Compensators", fields
+        )
+
+
+# --- Tap changer creation ---
+
+
+def _fresh_2wt_no_tapchangers(network, twt_id="NEW_2WT_TC"):
+    """Create a 2WT inside S1 so tap-changer tests can attach changers to it."""
+    create_branch_bay(
+        network,
+        "2-Winding Transformers",
+        {
+            "id": twt_id,
+            "r": 0.5, "x": 10.0, "g": 0.0, "b": 1e-6,
+            "rated_u1": 400.0, "rated_u2": 225.0,
+            "bus_or_busbar_section_id_1": "S1VL2_BBS1",
+            "position_order_1": 400, "direction_1": "TOP",
+            "bus_or_busbar_section_id_2": "S1VL1_BBS",
+            "position_order_2": 400, "direction_2": "BOTTOM",
+        },
+    )
+    return twt_id
+
+
+def test_creatable_tap_changers_has_ratio_and_phase():
+    assert set(CREATABLE_TAP_CHANGERS.keys()) == {"Ratio", "Phase"}
+    assert (
+        CREATABLE_TAP_CHANGERS["Ratio"]["create_method"]
+        == "create_ratio_tap_changers"
+    )
+    assert (
+        CREATABLE_TAP_CHANGERS["Phase"]["create_method"]
+        == "create_phase_tap_changers"
+    )
+
+
+def test_list_two_winding_transformers_returns_ids(node_breaker_network):
+    ids = list_two_winding_transformers(node_breaker_network)
+    assert ids == sorted(ids)
+    assert "TWT" in ids
+
+
+def test_create_ratio_tap_changer(node_breaker_network):
+    twt_id = _fresh_2wt_no_tapchangers(node_breaker_network)
+    steps = [
+        {"r": 0.0, "x": 0.0, "g": 0.0, "b": 0.0, "rho": 0.95},
+        {"r": 0.0, "x": 0.0, "g": 0.0, "b": 0.0, "rho": 1.00},
+        {"r": 0.0, "x": 0.0, "g": 0.0, "b": 0.0, "rho": 1.05},
+    ]
+    create_tap_changer(
+        node_breaker_network,
+        "Ratio",
+        twt_id,
+        {
+            "tap": 1,
+            "low_tap": 0,
+            "oltc": True,
+            "regulating": True,
+            "target_v": 225.0,
+            "target_deadband": 2.0,
+            "regulated_side": "ONE",
+        },
+        steps,
+    )
+    rtc = node_breaker_network.get_ratio_tap_changers()
+    assert twt_id in rtc.index
+    assert rtc.loc[twt_id, "tap"] == 1
+
+
+def test_create_phase_tap_changer(node_breaker_network):
+    twt_id = _fresh_2wt_no_tapchangers(node_breaker_network, "NEW_2WT_PTC")
+    steps = [
+        {"r": 0.0, "x": 0.0, "g": 0.0, "b": 0.0, "rho": 1.0, "alpha": -2.0},
+        {"r": 0.0, "x": 0.0, "g": 0.0, "b": 0.0, "rho": 1.0, "alpha": 0.0},
+        {"r": 0.0, "x": 0.0, "g": 0.0, "b": 0.0, "rho": 1.0, "alpha": 2.0},
+    ]
+    create_tap_changer(
+        node_breaker_network,
+        "Phase",
+        twt_id,
+        {
+            "tap": 1,
+            "low_tap": 0,
+            "regulation_mode": "CURRENT_LIMITER",
+            "regulating": False,
+            "target_deadband": 0.0,
+        },
+        steps,
+    )
+    ptc = node_breaker_network.get_phase_tap_changers()
+    assert twt_id in ptc.index
+    assert ptc.loc[twt_id, "tap"] == 1
+
+
+def test_create_tap_changer_rejects_unknown_kind(node_breaker_network):
+    with pytest.raises(ValueError, match="not creatable"):
+        create_tap_changer(
+            node_breaker_network, "Linear", "TWT", {"tap": 0, "low_tap": 0}, [{}]
+        )
+
+
+def test_create_tap_changer_rejects_empty_steps(node_breaker_network):
+    twt_id = _fresh_2wt_no_tapchangers(node_breaker_network, "NEW_2WT_EMPTY")
+    with pytest.raises(ValueError, match="At least one tap step"):
+        create_tap_changer(
+            node_breaker_network,
+            "Ratio",
+            twt_id,
+            {"tap": 0, "low_tap": 0, "oltc": False, "regulating": False},
+            [],
+        )
+
+
+def test_create_tap_changer_rejects_tap_out_of_range(node_breaker_network):
+    twt_id = _fresh_2wt_no_tapchangers(node_breaker_network, "NEW_2WT_OOR")
+    with pytest.raises(ValueError, match="Current tap"):
+        create_tap_changer(
+            node_breaker_network,
+            "Ratio",
+            twt_id,
+            {"tap": 5, "low_tap": 0, "oltc": False, "regulating": False},
+            [{"rho": 1.0}, {"rho": 1.0}],
+        )
+
+
+def test_create_tap_changer_ratio_regulating_needs_oltc(node_breaker_network):
+    twt_id = _fresh_2wt_no_tapchangers(node_breaker_network, "NEW_2WT_NO_OLTC")
+    with pytest.raises(ValueError, match="OLTC must be enabled"):
+        create_tap_changer(
+            node_breaker_network,
+            "Ratio",
+            twt_id,
+            {
+                "tap": 0, "low_tap": 0, "oltc": False, "regulating": True,
+                "target_v": 225.0,
+            },
+            [{"rho": 1.0}],
+        )
+
+
+# --- Coupling device ---
+
+
+def test_create_coupling_device_between_two_busbar_sections(node_breaker_network):
+    before = set(node_breaker_network.get_switches().index)
+    create_coupling_device(
+        node_breaker_network, "S1VL2_BBS1", "S1VL2_BBS2", switch_prefix="cpl"
+    )
+    after = set(node_breaker_network.get_switches().index)
+    # pypowsybl creates at least one new switch (a breaker) linking them.
+    assert after - before, "expected new switches from coupling device"
+
+
+def test_create_coupling_device_rejects_different_voltage_levels(node_breaker_network):
+    with pytest.raises(ValueError, match="same voltage level"):
+        create_coupling_device(
+            node_breaker_network, "S1VL1_BBS", "S2VL1_BBS"
+        )
+
+
+def test_create_coupling_device_rejects_same_busbar_section(node_breaker_network):
+    with pytest.raises(ValueError, match="must differ"):
+        create_coupling_device(
+            node_breaker_network, "S1VL2_BBS1", "S1VL2_BBS1"
+        )
+
+
+def test_create_coupling_device_rejects_unknown_busbar_section(node_breaker_network):
+    with pytest.raises(ValueError, match="Unknown busbar section"):
+        create_coupling_device(
+            node_breaker_network, "S1VL2_BBS1", "DOES_NOT_EXIST"
         )

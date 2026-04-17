@@ -70,8 +70,16 @@ has:
   checks (e.g. `max_p >= min_p`, `target_v > 0` when regulating).
 
 Currently creatable: Generators, Loads, Batteries, Static VAR Compensators,
-VSC Converter Stations, LCC Converter Stations. Each maps to its
-matching `create_*_bay` helper in pypowsybl 1.14.
+VSC Converter Stations, LCC Converter Stations, Shunt Compensators. Each
+maps to its matching `create_*_bay` helper in pypowsybl 1.14.
+
+Shunt compensators are a special case because pypowsybl's
+`create_shunt_compensator_bay` takes **three** dataframes (main shunt,
+linear model, non-linear model) rather than the single dataframe every
+other injection uses. `_dispatch_shunt_bay` in `state.py` splits the flat
+field dict into the shunt row + a linear-model row (columns
+`g_per_section`, `b_per_section`, `max_section_count`). Only the
+**LINEAR** model is exposed in the UI for v1.
 
 Shared locator fields (`position_order`, `direction`) live in
 `LOCATOR_FIELDS` and are appended to every form. The `bus_or_busbar_section_id`
@@ -154,6 +162,59 @@ drive the full node-breaker build-up — Substation → Voltage Level (with
 — using the Data Explorer's creation forms without ever uploading a file.
 Bus-breaker creation is deliberately not wired in yet; the forms still
 restrict injection + branch creation to node-breaker VLs.
+
+## Tap changer creation — `CREATABLE_TAP_CHANGERS`
+
+Ratio and phase tap changers attach to an *existing* 2-winding transformer
+rather than to a busbar, so they don't use a `_bay` helper: they call
+`raw.create_ratio_tap_changers(rtc_df, steps_df)` or
+`raw.create_phase_tap_changers(ptc_df, steps_df)` on the network via the
+worker thread.
+
+The registry (`CREATABLE_TAP_CHANGERS` in `state.py`) lists the two kinds:
+
+```python
+"Ratio": {"create_method": "create_ratio_tap_changers",
+          "main_fields": [tap, low_tap, oltc, regulating, target_v,
+                          target_deadband, regulated_side],
+          "step_columns": ["r", "x", "g", "b", "rho"]}
+"Phase": {"create_method": "create_phase_tap_changers",
+          "main_fields": [tap, low_tap, regulation_mode, regulating,
+                          target_deadband, regulated_side],
+          "step_columns": ["r", "x", "g", "b", "rho", "alpha"]}
+```
+
+Form (`_render_create_tap_changer_form`) appears alongside the
+2-Winding Transformer creation form and renders only when at least one
+2WT already exists. It shows a 2WT picker, a kind picker, a generic field
+grid for the main tap-changer attributes, and an `st.data_editor` with
+`num_rows="dynamic"` for the per-tap steps. `create_tap_changer(network,
+kind, transformer_id, main_fields, steps)` builds the two dataframes and
+dispatches them through the worker.
+
+`validate_create_tap_changer_fields` enforces required main fields,
+at-least-one step, and that the current `tap` sits within
+`[low_tap, low_tap + len(steps))`. Ratio tap changers additionally need
+`oltc=True` + `target_v > 0` when `regulating=True`.
+
+## Coupling device — `create_coupling_device`
+
+Switches tying two busbar sections inside the same voltage level are
+created via `pn.create_coupling_device(network, bus_or_busbar_section_id_1,
+bus_or_busbar_section_id_2, switch_prefix_id=...)`. In node-breaker VLs
+pypowsybl inserts a closed breaker plus closed disconnectors on each
+busbar section automatically; in bus-breaker VLs it inserts a plain
+breaker.
+
+Form (`_render_create_coupling_device_form`) appears when the component
+type is **Switches** (coupling devices create switches under the hood,
+so this is where the form logically belongs). It picks a node-breaker
+VL, then two distinct busbar sections inside it, and accepts an optional
+switch id prefix.
+
+`create_coupling_device(network, bbs1, bbs2, switch_prefix)` validates
+that both busbar sections exist, differ, and share the same voltage
+level before dispatching to pypowsybl via the worker thread.
 
 ## Container creation — `CREATABLE_CONTAINERS`
 
