@@ -1,80 +1,91 @@
-"""Tests for iidm_viewer.network_map."""
+"""Tests for iidm_viewer.network_map.
+
+``_extract_map_data`` now returns a 3-tuple matching the shape the
+``@powsybl/network-map-layers`` deck.gl component consumes:
+
+    (substations, substation_positions, lines)
+"""
 import json
 
-from iidm_viewer.state import load_network
 from iidm_viewer.network_map import _extract_map_data
+from iidm_viewer.state import load_network
 
 
-def test_extract_map_data_returns_substations(xiidm_upload):
+def test_extract_map_data_returns_expected_counts(xiidm_upload):
     network = load_network(xiidm_upload)
-    result = _extract_map_data(network)
-    spos, smap, lmap = result[0], result[1], result[2]
+    substations, positions, lines = _extract_map_data(network)
 
-    assert len(spos) == 11  # 11 substations in IEEE14
-    assert len(smap) == 11
-    assert all("id" in s and "coordinate" in s for s in spos)
-
-
-def test_extract_map_data_returns_branches(xiidm_upload):
-    network = load_network(xiidm_upload)
-    result = _extract_map_data(network)
-    lmap = result[2]
-
+    assert len(positions) == 11  # 11 substations in IEEE14
+    assert len(substations) == 11
     # 17 lines + 3 transformers = 20 branches
-    assert len(lmap) == 20
-    assert all("voltageLevelId1" in l and "voltageLevelId2" in l for l in lmap)
+    assert len(lines) == 20
 
 
-def test_extract_map_data_returns_vl_coords_and_nv(xiidm_upload):
+def test_extract_map_data_substation_shape(xiidm_upload):
     network = load_network(xiidm_upload)
-    result = _extract_map_data(network)
-    vl_coords = result[3]
-    vl_nv = result[4]
+    substations, _, _ = _extract_map_data(network)
 
-    assert len(vl_coords) == 14  # 14 voltage levels
-    assert len(vl_nv) == 14
-    # Check a known VL
-    assert "VL1" in vl_coords
-    assert vl_coords["VL1"]["lat"] == 48.86
-    assert "VL1" in vl_nv
-    assert vl_nv["VL1"] == 135.0
+    for s in substations:
+        assert "id" in s
+        assert "name" in s
+        assert "voltageLevels" in s
+        for vl in s["voltageLevels"]:
+            assert "id" in vl
+            assert "substationId" in vl and vl["substationId"] == s["id"]
+            assert "nominalV" in vl and vl["nominalV"] > 0
 
 
-def test_extract_map_data_substations_have_voltage_levels(xiidm_upload):
+def test_extract_map_data_position_shape(xiidm_upload):
     network = load_network(xiidm_upload)
-    result = _extract_map_data(network)
-    smap = result[1]
+    _, positions, _ = _extract_map_data(network)
 
-    # S4 has 3 VLs: VL4, VL7, VL9
-    s4 = next(s for s in smap if s["id"] == "S4")
+    # Each position carries a {lon, lat} coordinate (GeoDataSubstation shape).
+    for p in positions:
+        assert "id" in p
+        assert "coordinate" in p
+        coord = p["coordinate"]
+        assert "lon" in coord and "lat" in coord
+        assert -180 <= coord["lon"] <= 180
+        assert -90 <= coord["lat"] <= 90
+
+
+def test_extract_map_data_line_shape(xiidm_upload):
+    network = load_network(xiidm_upload)
+    _, _, lines = _extract_map_data(network)
+
+    for l in lines:
+        assert "id" in l
+        assert "voltageLevelId1" in l and "voltageLevelId2" in l
+        # Booleans, not pandas bool — the frontend relies on native JSON types.
+        assert isinstance(l["terminal1Connected"], bool)
+        assert isinstance(l["terminal2Connected"], bool)
+        assert isinstance(l["p1"], float) and isinstance(l["p2"], float)
+
+
+def test_s4_has_three_voltage_levels(xiidm_upload):
+    """S4 is a known multi-VL substation in the IEEE14 fixture."""
+    network = load_network(xiidm_upload)
+    substations, _, _ = _extract_map_data(network)
+
+    s4 = next(s for s in substations if s["id"] == "S4")
     vl_ids = {vl["id"] for vl in s4["voltageLevels"]}
     assert vl_ids == {"VL4", "VL7", "VL9"}
 
 
-def test_extract_map_data_multi_vl_substations(xiidm_upload):
-    """Substations with multiple VLs provide data for concentric circles."""
+def test_multi_vl_substations(xiidm_upload):
+    """Multiple VLs on one substation drive the concentric-rings rendering."""
     network = load_network(xiidm_upload)
-    result = _extract_map_data(network)
-    smap = result[1]
+    substations, _, _ = _extract_map_data(network)
 
-    multi_vl = [s for s in smap if len(s["voltageLevels"]) > 1]
+    multi_vl = [s for s in substations if len(s["voltageLevels"]) > 1]
     assert len(multi_vl) == 2  # S4 (3 VLs) and S5 (2 VLs)
-
-    for sub in multi_vl:
-        for vl in sub["voltageLevels"]:
-            assert "nominalV" in vl
-            assert vl["nominalV"] > 0
 
 
 def test_map_data_is_json_serializable(xiidm_upload):
-    """All map data must be JSON-serializable for the Leaflet template."""
+    """All map data travels through Streamlit's JSON wire; must round-trip."""
     network = load_network(xiidm_upload)
-    result = _extract_map_data(network)
-    spos, smap, lmap, vl_coords, vl_nv = result[0], result[1], result[2], result[3], result[4]
+    substations, positions, lines = _extract_map_data(network)
 
-    # Should not raise
-    json.dumps(spos)
-    json.dumps(smap)
-    json.dumps(lmap)
-    json.dumps(vl_coords)
-    json.dumps(vl_nv)
+    json.dumps(substations)
+    json.dumps(positions)
+    json.dumps(lines)

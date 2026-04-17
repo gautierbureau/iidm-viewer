@@ -23,8 +23,10 @@ element counts from `COMPONENT_TYPES`. Counts are fetched with `network.<method>
 
 ### Network Map — `network_map.render_network_map`
 
-Renders a Leaflet map inside `st.components.v1.html`. Only works when the network
-has a `substationPosition` extension; otherwise shows an info message.
+Renders an interactive geographical map through the
+`map_component` custom Streamlit component (MapLibre + deck.gl +
+`@powsybl/network-map-layers`). Only works when the network has a
+`substationPosition` extension; otherwise shows an info message.
 
 See [network-map.md](network-map.md) for details.
 

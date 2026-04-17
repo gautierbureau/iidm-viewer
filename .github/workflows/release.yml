@@ -20,6 +20,7 @@ jobs:
           cache-dependency-path: |
             iidm_viewer/frontend/nad_component/package-lock.json
             iidm_viewer/frontend/sld_component/package-lock.json
+            iidm_viewer/frontend/map_component/package-lock.json
 
       - name: Build NAD component bundle
         working-directory: iidm_viewer/frontend/nad_component
@@ -29,6 +30,12 @@ jobs:
 
       - name: Build SLD component bundle
         working-directory: iidm_viewer/frontend/sld_component
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Map component bundle
+        working-directory: iidm_viewer/frontend/map_component
         run: |
           npm ci
           npm run build

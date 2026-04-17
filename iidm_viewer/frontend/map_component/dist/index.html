@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IIDM Network Map</title>
+<link
+  rel="stylesheet"
+  href="https://unpkg.com/maplibre-gl@5.0.0/dist/maplibre-gl.css"
+/>
+<style>
+  html, body { margin: 0; padding: 0; background: white; font-family: sans-serif; }
+  #map { width: 100%; box-sizing: border-box; position: relative; }
+  #map canvas { outline: none; }
+  .maplibregl-ctrl-attrib { font-size: 10px; }
+  .map-legend {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: rgba(255,255,255,0.95);
+    padding: 8px 12px;
+    border-radius: 5px;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.3);
+    font-size: 12px;
+    line-height: 1.6;
+    z-index: 1;
+    pointer-events: none;
+  }
+  .map-legend b { display: block; margin-bottom: 4px; }
+  .map-legend .swatch {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .map-tooltip {
+    position: absolute;
+    background: rgba(0,0,0,0.85);
+    color: white;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    pointer-events: none;
+    max-width: 320px;
+    z-index: 2;
+    white-space: nowrap;
+  }
+</style>
+  <script type="module" crossorigin src="./assets/map-component.js"></script>
+</head>
+<body>
+<div id="map"></div>
+</body>
+</html>
