@@ -19,9 +19,19 @@ iidm-viewer = "iidm_viewer.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["iidm_viewer"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"iidm_viewer/frontend" = "iidm_viewer/frontend"
+# Only the built JS bundle needs to ship; keep npm source artefacts
+# (src/, node_modules/, package.json, vite.config.ts, tsconfig.json,
+# the pre-build index.html) out of the wheel.
+exclude = [
+    "iidm_viewer/frontend/nad_component/src",
+    "iidm_viewer/frontend/nad_component/node_modules",
+    "iidm_viewer/frontend/nad_component/package.json",
+    "iidm_viewer/frontend/nad_component/package-lock.json",
+    "iidm_viewer/frontend/nad_component/vite.config.ts",
+    "iidm_viewer/frontend/nad_component/tsconfig.json",
+    "iidm_viewer/frontend/nad_component/.gitignore",
+    "iidm_viewer/frontend/nad_component/index.html",
+]
 
 [tool.pytest.ini_options]
 addopts = "--cov=iidm_viewer --cov-report=term-missing --cov-report=xml"

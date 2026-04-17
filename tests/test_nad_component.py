@@ -4,11 +4,26 @@ import os
 from unittest import mock
 
 
-def test_component_path_points_to_shipped_index_html():
+def test_component_path_points_to_built_dist_with_index_html():
     import iidm_viewer.nad_component as m
 
-    assert os.path.isdir(m._COMPONENT_DIR)
+    assert os.path.isdir(m._COMPONENT_DIR), (
+        f"{m._COMPONENT_DIR} not found — run "
+        "`npm install && npm run build` in iidm_viewer/frontend/nad_component/."
+    )
     assert os.path.isfile(os.path.join(m._COMPONENT_DIR, "index.html"))
+
+
+def test_built_index_html_loads_bundled_asset():
+    """The Vite-built index.html must reference the bundled JS under assets/."""
+    import iidm_viewer.nad_component as m
+    index = os.path.join(m._COMPONENT_DIR, "index.html")
+    with open(index, "r", encoding="utf-8") as f:
+        html = f.read()
+    assert 'type="module"' in html
+    assert "assets/nad-component.js" in html
+    # Container div the TS entry point looks up by id.
+    assert 'id="nad"' in html
 
 
 def test_declare_component_registered_with_expected_name_and_path():
@@ -23,6 +38,7 @@ def test_declare_component_registered_with_expected_name_and_path():
     assert args[0] == "iidm_nad"
     path = kwargs.get("path") or (args[1] if len(args) > 1 else None)
     assert path is not None
+    assert path.endswith(os.path.join("frontend", "nad_component", "dist"))
     assert os.path.isfile(os.path.join(path, "index.html"))
 
 
@@ -44,18 +60,29 @@ def test_render_interactive_nad_forwards_args_and_returns_component_value():
     assert kwargs["default"] is None
 
 
-def test_index_html_exposes_vl_and_edge_click_payload_types():
-    """Sanity-check the frontend contract we rely on from Python."""
+def test_bundle_wires_streamlit_protocol_and_library_callback():
+    """Smoke-check that the shipped JS bundle carries the contract strings.
+
+    The Streamlit message names (`streamlit:componentReady`,
+    `streamlit:render`, `streamlit:setComponentValue`,
+    `streamlit:setFrameHeight`), the `nad-vl-click` payload type, and
+    the library's `onSelectNodeCallback` binding must all survive
+    minification. If any go missing, Python ↔ JS communication silently
+    breaks.
+    """
     import iidm_viewer.nad_component as m
-    path = os.path.join(m._COMPONENT_DIR, "index.html")
-    with open(path, "r", encoding="utf-8") as f:
-        html = f.read()
-    assert "streamlit:componentReady" in html
-    assert "streamlit:render" in html
-    assert "streamlit:setComponentValue" in html
-    assert "streamlit:setFrameHeight" in html
-    assert "nad-vl-click" in html
-    assert "nad-edge-click" in html
-    # The click handlers must target the real pypowsybl NAD SVG classes.
-    assert ".nad-vl-nodes > g" in html
-    assert ".nad-branch-edges > g" in html
+    bundle = os.path.join(m._COMPONENT_DIR, "assets", "nad-component.js")
+    assert os.path.isfile(bundle), (
+        f"Bundle missing at {bundle} — rebuild the frontend."
+    )
+    with open(bundle, "r", encoding="utf-8") as f:
+        js = f.read()
+    for needle in (
+        "streamlit:componentReady",
+        "streamlit:render",
+        "streamlit:setComponentValue",
+        "streamlit:setFrameHeight",
+        "nad-vl-click",
+        "onSelectNodeCallback",
+    ):
+        assert needle in js, f"missing from bundle: {needle!r}"
