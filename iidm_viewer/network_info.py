@@ -72,44 +72,122 @@ def _build_vl_country_map(network) -> pd.DataFrame:
     ]
 
 
-def _country_totals(network) -> pd.DataFrame:
-    """Return per-country totals of generation and consumption in MW.
+def _losses_by_country(network) -> pd.Series:
+    """Return per-country active-power losses (MW) for lines + 2WT.
 
-    Columns: ``country``, ``generation_mw``, ``consumption_mw``. Generation
-    uses generator ``target_p`` and consumption uses load ``p0``. Voltage
-    levels whose substation has no country fall back to ``"—"``.
+    A branch contributes its full ``p1 + p2`` to its country when both ends
+    live in the same country; cross-border branches are split 50/50 between
+    the two countries. VLs without a country fall back to ``"—"``.
+    Returns an empty Series when no branch has finite p1/p2 (no load flow).
     """
     vl_country = _build_vl_country_map(network)
     if vl_country.empty:
-        return pd.DataFrame(columns=["country", "generation_mw", "consumption_mw"])
+        return pd.Series(dtype=float)
+    country_by_vl = dict(zip(vl_country["voltage_level_id"], vl_country["country"]))
+
+    def _country(vl_id: str) -> str:
+        c = country_by_vl.get(vl_id)
+        if c is None or (isinstance(c, float) and pd.isna(c)) or c == "":
+            return "—"
+        return c
+
+    totals: dict[str, float] = {}
+    for method in ("get_lines", "get_2_windings_transformers"):
+        try:
+            df = getattr(network, method)(
+                attributes=["voltage_level1_id", "voltage_level2_id", "p1", "p2"]
+            )
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        for _, row in df.iterrows():
+            p1, p2 = row["p1"], row["p2"]
+            if pd.isna(p1) or pd.isna(p2):
+                continue
+            loss = float(p1) + float(p2)
+            c1 = _country(row["voltage_level1_id"])
+            c2 = _country(row["voltage_level2_id"])
+            if c1 == c2:
+                totals[c1] = totals.get(c1, 0.0) + loss
+            else:
+                half = loss / 2.0
+                totals[c1] = totals.get(c1, 0.0) + half
+                totals[c2] = totals.get(c2, 0.0) + half
+
+    if not totals:
+        return pd.Series(dtype=float)
+    return pd.Series(totals).sort_index()
+
+
+def _country_totals(network) -> pd.DataFrame:
+    """Return per-country target and actual generation/consumption in MW.
+
+    Columns: ``country``, ``generation_target_mw``, ``generation_actual_mw``,
+    ``consumption_target_mw``, ``consumption_actual_mw``. Target values come
+    from generator ``target_p`` and load ``p0`` (always populated). Actual
+    values come from generator ``-p`` and load ``p`` (NaN before any load
+    flow). Voltage levels whose substation has no country fall back to ``"—"``.
+    """
+    vl_country = _build_vl_country_map(network)
+    cols = ["country", "generation_target_mw", "generation_actual_mw",
+            "consumption_target_mw", "consumption_actual_mw"]
+    if vl_country.empty:
+        return pd.DataFrame(columns=cols)
 
     def _aggregate(df: pd.DataFrame, value_col: str) -> pd.Series:
         if df.empty or value_col not in df.columns:
             return pd.Series(dtype=float)
         merged = df.reset_index().merge(vl_country, on="voltage_level_id", how="left")
         merged["country"] = merged["country"].fillna("—").replace("", "—")
-        return merged.groupby("country")[value_col].sum()
+        series = merged[value_col].dropna()
+        if series.empty:
+            return pd.Series(dtype=float)
+        return merged.loc[series.index].groupby("country")[value_col].sum()
 
     try:
-        gens = network.get_generators(attributes=["voltage_level_id", "target_p"])
+        gens = network.get_generators(
+            attributes=["voltage_level_id", "target_p", "p"]
+        )
     except Exception:
         gens = pd.DataFrame()
     try:
-        loads = network.get_loads(attributes=["voltage_level_id", "p0"])
+        loads = network.get_loads(
+            attributes=["voltage_level_id", "p0", "p"]
+        )
     except Exception:
         loads = pd.DataFrame()
 
-    gen_by_country = _aggregate(gens, "target_p")
-    load_by_country = _aggregate(loads, "p0")
+    # Actual generation is ``-p`` (pypowsybl load-convention sign).
+    gens_actual = gens.copy()
+    if not gens_actual.empty and "p" in gens_actual.columns:
+        gens_actual["p"] = -gens_actual["p"]
 
-    countries = sorted(set(gen_by_country.index) | set(load_by_country.index))
+    gen_target = _aggregate(gens, "target_p")
+    gen_actual = _aggregate(gens_actual, "p")
+    cons_target = _aggregate(loads, "p0")
+    cons_actual = _aggregate(loads, "p")
+
+    countries = sorted(
+        set(gen_target.index)
+        | set(gen_actual.index)
+        | set(cons_target.index)
+        | set(cons_actual.index)
+    )
     if not countries:
-        return pd.DataFrame(columns=["country", "generation_mw", "consumption_mw"])
+        return pd.DataFrame(columns=cols)
+
+    def _pick(series: pd.Series, c: str):
+        if c in series.index:
+            return float(series.loc[c])
+        return float("nan")
 
     out = pd.DataFrame({
         "country": countries,
-        "generation_mw": [float(gen_by_country.get(c, 0.0)) for c in countries],
-        "consumption_mw": [float(load_by_country.get(c, 0.0)) for c in countries],
+        "generation_target_mw": [_pick(gen_target, c) for c in countries],
+        "generation_actual_mw": [_pick(gen_actual, c) for c in countries],
+        "consumption_target_mw": [_pick(cons_target, c) for c in countries],
+        "consumption_actual_mw": [_pick(cons_actual, c) for c in countries],
     })
     return out
 
@@ -150,17 +228,27 @@ def render_overview(network):
         lc2.metric("Line losses", f"{losses['lines']:.2f} MW")
         lc3.metric("Transformer losses", f"{losses['transformers']:.2f} MW")
 
+        by_country = _losses_by_country(network)
+        if not by_country.empty:
+            losses_df = by_country.round(2).reset_index()
+            losses_df.columns = ["Country", "Losses (MW)"]
+            st.caption("Losses by country — cross-border branches split 50/50.")
+            st.dataframe(losses_df, use_container_width=True, hide_index=True)
+
     st.subheader("Generation and Consumption by Country")
     country_df = _country_totals(network)
     if country_df.empty:
         st.info("No generation or consumption data available.")
     else:
         display = country_df.copy()
-        display["generation_mw"] = display["generation_mw"].round(2)
-        display["consumption_mw"] = display["consumption_mw"].round(2)
-        display["balance_mw"] = (
-            display["generation_mw"] - display["consumption_mw"]
-        ).round(2)
-        display.columns = ["Country", "Generation (MW)", "Consumption (MW)",
-                           "Balance (MW)"]
+        for col in ("generation_target_mw", "generation_actual_mw",
+                    "consumption_target_mw", "consumption_actual_mw"):
+            display[col] = display[col].round(2)
+        display.columns = [
+            "Country",
+            "Gen target (MW)", "Gen actual (MW)",
+            "Load target (MW)", "Load actual (MW)",
+        ]
+        if display[["Gen actual (MW)", "Load actual (MW)"]].isna().all(axis=None):
+            st.caption("Actual values populate once a load flow has run.")
         st.dataframe(display, use_container_width=True, hide_index=True)
