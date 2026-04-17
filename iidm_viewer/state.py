@@ -949,3 +949,268 @@ def create_coupling_device(
     run(_do_create)
     st.session_state.pop("_vl_lookup_cache", None)
     st.session_state.pop("_map_data_cache", None)
+
+
+# --- HVDC lines (attach to two existing converter stations) ---
+
+CONVERTERS_MODES = [
+    "SIDE_1_RECTIFIER_SIDE_2_INVERTER",
+    "SIDE_1_INVERTER_SIDE_2_RECTIFIER",
+]
+
+# HVDC lines are created directly via network.create_hvdc_lines — no _bay.
+# The two endpoints are *existing* VSC/LCC converter stations (not busbars).
+CREATABLE_HVDC_LINES: dict = {
+    "create_function": "create_hvdc_lines",
+    "fields": [
+        {"name": "id", "label": "ID", "kind": "text", "required": True, "default": ""},
+        {"name": "name", "label": "Name", "kind": "text", "required": False, "default": ""},
+        {"name": "r", "label": "r (Ω)", "kind": "float", "required": True, "default": 1.0},
+        {"name": "nominal_v", "label": "nominal_v (kV)", "kind": "float",
+         "required": True, "default": 400.0},
+        {"name": "max_p", "label": "max_p (MW)", "kind": "float",
+         "required": True, "default": 1000.0, "min_value": 0.0},
+        {"name": "target_p", "label": "target_p (MW)", "kind": "float",
+         "required": True, "default": 0.0},
+        {"name": "converters_mode", "label": "Converters mode", "kind": "select",
+         "required": True, "default": CONVERTERS_MODES[0],
+         "options": CONVERTERS_MODES},
+    ],
+}
+
+
+def list_converter_stations(network):
+    """Return ``[(id, kind)]`` for every VSC and LCC converter station."""
+    stations: list[tuple[str, str]] = []
+    try:
+        for sid in network.get_vsc_converter_stations().index.tolist():
+            stations.append((sid, "VSC"))
+    except Exception:
+        pass
+    try:
+        for sid in network.get_lcc_converter_stations().index.tolist():
+            stations.append((sid, "LCC"))
+    except Exception:
+        pass
+    return sorted(stations)
+
+
+def validate_create_hvdc_line_fields(fields: dict) -> list[str]:
+    """Required fields + distinct endpoints; all other checks go to pypowsybl."""
+    errors = []
+    for f in CREATABLE_HVDC_LINES["fields"]:
+        if f["required"] and (fields.get(f["name"]) is None
+                               or fields.get(f["name"]) == ""):
+            errors.append(f"{f['label']} is required.")
+    if not fields.get("converter_station1_id"):
+        errors.append("Converter station 1 is required.")
+    if not fields.get("converter_station2_id"):
+        errors.append("Converter station 2 is required.")
+    if (
+        fields.get("converter_station1_id")
+        and fields.get("converter_station2_id")
+        and fields["converter_station1_id"] == fields["converter_station2_id"]
+    ):
+        errors.append("The two converter stations must differ.")
+    if (
+        fields.get("target_p") is not None
+        and fields.get("max_p") is not None
+        and abs(fields["target_p"]) > fields["max_p"]
+    ):
+        errors.append("|target_p| must be <= max_p.")
+    return errors
+
+
+def create_hvdc_line(network, fields: dict):
+    """Create an HVDC line between two existing converter stations.
+
+    Validates the endpoints and electrical attributes on the main thread,
+    then dispatches ``network.create_hvdc_lines`` via the worker. The two
+    stations must already exist and must not already be connected to an
+    HVDC line.
+    """
+    errors = validate_create_hvdc_line_fields(fields)
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    row = {k: v for k, v in fields.items() if v is not None and v != ""}
+    df = pd.DataFrame([row]).set_index("id")
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_create():
+        raw.create_hvdc_lines(df)
+
+    run(_do_create)
+    st.session_state.pop("_vl_lookup_cache", None)
+    st.session_state.pop("_map_data_cache", None)
+
+
+# --- Reactive limits (min/max or per-P curve) on generators / VSC / batteries ---
+
+REACTIVE_LIMITS_TARGETS = {
+    "Generators": "get_generators",
+    "Batteries": "get_batteries",
+    "VSC Converter Stations": "get_vsc_converter_stations",
+}
+
+
+def list_reactive_limit_candidates(network, component: str) -> list[str]:
+    """Return ids of elements that can carry reactive limits for the given component."""
+    getter = REACTIVE_LIMITS_TARGETS.get(component)
+    if not getter:
+        return []
+    try:
+        df = getattr(network, getter)()
+    except Exception:
+        return []
+    return sorted(df.index.tolist())
+
+
+def create_reactive_limits(
+    network, element_id: str, mode: str, payload: list[dict]
+):
+    """Attach reactive limits (min/max or per-P curve) to an existing element.
+
+    ``mode`` is ``"minmax"`` (one row with ``min_q``/``max_q``) or
+    ``"curve"`` (>=2 rows of ``p``/``min_q``/``max_q``). pypowsybl replaces
+    any existing reactive limits on the target. Routed via the worker.
+    """
+    if mode not in ("minmax", "curve"):
+        raise ValueError(f"Unknown reactive-limits mode: {mode!r}")
+    if not element_id:
+        raise ValueError("Target element id is required.")
+    if not payload:
+        raise ValueError("At least one row is required.")
+
+    if mode == "minmax":
+        row = payload[0]
+        if row.get("min_q") is None or row.get("max_q") is None:
+            raise ValueError("min_q and max_q are required.")
+        if row["max_q"] < row["min_q"]:
+            raise ValueError("max_q must be >= min_q.")
+        df = pd.DataFrame(
+            [{"id": element_id, "min_q": row["min_q"], "max_q": row["max_q"]}]
+        ).set_index("id")
+
+        raw = object.__getattribute__(network, "_obj")
+
+        def _do_create():
+            raw.create_minmax_reactive_limits(df)
+    else:
+        rows = []
+        for row in payload:
+            for k in ("p", "min_q", "max_q"):
+                if row.get(k) is None:
+                    raise ValueError(f"Curve rows need non-null {k}.")
+            if row["max_q"] < row["min_q"]:
+                raise ValueError("max_q must be >= min_q at every active power point.")
+            rows.append({
+                "id": element_id, "p": row["p"],
+                "min_q": row["min_q"], "max_q": row["max_q"],
+            })
+        if len({r["p"] for r in rows}) < 2:
+            raise ValueError("A reactive capability curve needs at least 2 distinct p points.")
+        df = pd.DataFrame(rows).set_index("id")
+
+        raw = object.__getattribute__(network, "_obj")
+
+        def _do_create():
+            raw.create_curve_reactive_limits(df)
+
+    run(_do_create)
+    st.session_state.pop("_vl_lookup_cache", None)
+
+
+# --- Operational limits (CURRENT / APPARENT_POWER / ACTIVE_POWER) ---
+
+OPERATIONAL_LIMIT_TYPES = ["CURRENT", "APPARENT_POWER", "ACTIVE_POWER"]
+OPERATIONAL_LIMIT_SIDES = ["ONE", "TWO"]
+
+# Component label → getter method, to enumerate target elements.
+OPERATIONAL_LIMITS_TARGETS = {
+    "Lines": "get_lines",
+    "2-Winding Transformers": "get_2_windings_transformers",
+    "Dangling Lines": "get_dangling_lines",
+}
+
+# Permanent limit's acceptable_duration is -1; data-editor-friendly sentinel.
+PERMANENT_DURATION = -1
+
+
+def list_operational_limit_candidates(network, component: str) -> list[str]:
+    getter = OPERATIONAL_LIMITS_TARGETS.get(component)
+    if not getter:
+        return []
+    try:
+        df = getattr(network, getter)()
+    except Exception:
+        return []
+    return sorted(df.index.tolist())
+
+
+def create_operational_limits(
+    network,
+    element_id: str,
+    side: str,
+    limit_type: str,
+    limits: list[dict],
+    group_name: str = "DEFAULT",
+):
+    """Create a group of operational limits on one side of an element.
+
+    ``limits`` is a list of dicts with ``name``, ``value``, and
+    ``acceptable_duration`` (use ``-1`` for the permanent limit). Exactly
+    one permanent limit is allowed per (element, side, group). pypowsybl
+    replaces any existing limits in the target group.
+    """
+    if element_id is None or element_id == "":
+        raise ValueError("Target element id is required.")
+    if side not in OPERATIONAL_LIMIT_SIDES:
+        raise ValueError(f"Side must be one of {OPERATIONAL_LIMIT_SIDES}.")
+    if limit_type not in OPERATIONAL_LIMIT_TYPES:
+        raise ValueError(f"Type must be one of {OPERATIONAL_LIMIT_TYPES}.")
+    if not limits:
+        raise ValueError("At least one limit row is required.")
+
+    rows = []
+    permanent = 0
+    for lim in limits:
+        if lim.get("value") is None:
+            raise ValueError("Every limit needs a value.")
+        if lim["value"] < 0:
+            raise ValueError("Limit values must be non-negative.")
+        duration = lim.get("acceptable_duration")
+        if duration is None:
+            raise ValueError("Every limit needs an acceptable_duration (-1 for permanent).")
+        duration = int(duration)
+        if duration == -1:
+            permanent += 1
+        elif duration < 0:
+            raise ValueError("acceptable_duration must be -1 (permanent) or >= 0.")
+        name = lim.get("name") or (
+            "permanent" if duration == -1 else f"TATL_{duration}"
+        )
+        rows.append({
+            "element_id": element_id,
+            "side": side,
+            "name": name,
+            "type": limit_type,
+            "value": float(lim["value"]),
+            "acceptable_duration": duration,
+            "fictitious": bool(lim.get("fictitious", False)),
+            "group_name": group_name,
+        })
+    if permanent != 1:
+        raise ValueError(
+            "Exactly one permanent limit (acceptable_duration = -1) is required."
+        )
+
+    # pypowsybl's create_operational_limits expects element_id as the df index.
+    df = pd.DataFrame(rows).set_index("element_id")
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_create():
+        raw.create_operational_limits(df)
+
+    run(_do_create)
+    st.session_state.pop("_vl_lookup_cache", None)

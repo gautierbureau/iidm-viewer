@@ -5,17 +5,28 @@ from iidm_viewer.state import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
     CREATABLE_CONTAINERS,
+    CREATABLE_HVDC_LINES,
     CREATABLE_TAP_CHANGERS,
     EDITABLE_COMPONENTS,
     LOCATOR_FIELDS,
+    OPERATIONAL_LIMITS_TARGETS,
+    OPERATIONAL_LIMIT_SIDES,
+    OPERATIONAL_LIMIT_TYPES,
+    REACTIVE_LIMITS_TARGETS,
     branch_side_locator_fields,
     create_branch_bay,
     create_component_bay,
     create_container,
     create_coupling_device,
+    create_hvdc_line,
+    create_operational_limits,
+    create_reactive_limits,
     create_tap_changer,
     list_busbar_sections,
+    list_converter_stations,
     list_node_breaker_voltage_levels,
+    list_operational_limit_candidates,
+    list_reactive_limit_candidates,
     list_substations_df,
     list_two_winding_transformers,
     next_free_node,
@@ -558,6 +569,240 @@ def _render_create_coupling_device_form(network):
         st.rerun()
 
 
+def _render_create_hvdc_line_form(network):
+    """Collapsible form to create an HVDC line between two converter stations.
+
+    The two endpoints are picked from the existing VSC + LCC stations.
+    pypowsybl rejects stations already connected to another HVDC line; that
+    error surfaces unchanged as an st.error. Matches other creation forms'
+    validate-on-main-thread-then-dispatch pattern.
+    """
+    stations = list_converter_stations(network)
+    spec = CREATABLE_HVDC_LINES
+    prefix = "new_hvdc"
+
+    with st.expander("Create a new HVDC line", expanded=False):
+        if len(stations) < 2:
+            st.info(
+                "HVDC line creation needs at least two existing converter "
+                "stations (VSC or LCC). Create stations first via their "
+                "respective component views."
+            )
+            return
+
+        station_ids = [sid for sid, _ in stations]
+        station_labels = {sid: f"{sid} ({kind})" for sid, kind in stations}
+
+        col1, col2 = st.columns(2)
+        with col1:
+            cs1 = st.selectbox(
+                "Converter station 1", station_ids,
+                format_func=lambda i: station_labels.get(i, i),
+                key=f"{prefix}_cs1",
+            )
+        with col2:
+            default_idx = 1 if len(station_ids) > 1 else 0
+            cs2 = st.selectbox(
+                "Converter station 2", station_ids, index=default_idx,
+                format_func=lambda i: station_labels.get(i, i),
+                key=f"{prefix}_cs2",
+            )
+
+        with st.form(key=f"{prefix}_form", clear_on_submit=False):
+            raw_fields = _render_generic_field_grid(spec["fields"], prefix)
+            submit = st.form_submit_button("Create HVDC line")
+
+        if not submit:
+            return
+
+        fields = _coerce_field_values(spec["fields"], raw_fields)
+        fields["converter_station1_id"] = cs1
+        fields["converter_station2_id"] = cs2
+
+        try:
+            create_hvdc_line(network, fields)
+        except Exception as e:
+            st.error(f"Create failed: {e}")
+            return
+
+        st.success(f"Created HVDC line {fields['id']} between {cs1} and {cs2}.")
+        st.rerun()
+
+
+def _render_create_reactive_limits_form(network, component: str):
+    """Collapsible form to attach reactive limits to a generator/VSC/battery.
+
+    Two modes share one form (``st.radio``):
+
+    - **min/max**: single ``min_q``/``max_q`` pair.
+    - **curve**: variable-row editor of ``(p, min_q, max_q)`` points; at
+      least two distinct ``p`` values are required.
+
+    pypowsybl replaces any existing reactive limits on the target.
+    """
+    targets = list_reactive_limit_candidates(network, component)
+    prefix = f"new_rl_{component.replace(' ', '_').lower()}"
+
+    with st.expander("Attach reactive limits", expanded=False):
+        if not targets:
+            st.info(
+                f"No {component.lower()} found — create one first to attach "
+                "reactive limits."
+            )
+            return
+
+        col_target, col_mode = st.columns([3, 2])
+        with col_target:
+            target_id = st.selectbox(
+                "Target", targets, key=f"{prefix}_target"
+            )
+        with col_mode:
+            mode = st.radio(
+                "Kind", ["min/max", "curve"], horizontal=True,
+                key=f"{prefix}_mode",
+            )
+
+        with st.form(key=f"{prefix}_form", clear_on_submit=False):
+            if mode == "min/max":
+                col_min, col_max = st.columns(2)
+                with col_min:
+                    min_q = st.number_input(
+                        "min_q (MVar)", value=-100.0, key=f"{prefix}_min_q"
+                    )
+                with col_max:
+                    max_q = st.number_input(
+                        "max_q (MVar)", value=100.0, key=f"{prefix}_max_q"
+                    )
+                payload_preview = [{"min_q": min_q, "max_q": max_q}]
+            else:
+                initial_points = pd.DataFrame(
+                    [
+                        {"p": 0.0, "min_q": -100.0, "max_q": 100.0},
+                        {"p": 100.0, "min_q": -80.0, "max_q": 80.0},
+                    ]
+                )
+                st.caption(
+                    "One row per active-power point (need at least two "
+                    "distinct p values)."
+                )
+                points = st.data_editor(
+                    initial_points,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key=f"{prefix}_points",
+                )
+                payload_preview = pd.DataFrame(points).dropna(how="all").to_dict(
+                    orient="records"
+                )
+
+            submit = st.form_submit_button("Save reactive limits")
+
+        if not submit:
+            return
+
+        try:
+            create_reactive_limits(
+                network,
+                target_id,
+                "minmax" if mode == "min/max" else "curve",
+                payload_preview,
+            )
+        except Exception as e:
+            st.error(f"Save failed: {e}")
+            return
+
+        st.success(
+            f"Saved {mode} reactive limits on {target_id} ({component.lower()})."
+        )
+        st.rerun()
+
+
+def _render_create_operational_limits_form(network, component: str):
+    """Collapsible form to attach operational limits to a line/2WT/dangling line.
+
+    Creates a whole group of limits at once (pypowsybl replaces the group on
+    write). The form takes a target element, a side, a limit type, a group
+    name, and a dynamic-row editor for the rows. Each row needs a
+    ``value`` and an ``acceptable_duration`` (use ``-1`` for the permanent
+    limit — exactly one of those is required).
+    """
+    targets = list_operational_limit_candidates(network, component)
+    prefix = f"new_ol_{component.replace(' ', '_').replace('-', '_').lower()}"
+
+    with st.expander("Attach operational limits", expanded=False):
+        if not targets:
+            st.info(
+                f"No {component.lower()} found — create one first to attach "
+                "operational limits."
+            )
+            return
+
+        col_t, col_side, col_type = st.columns([3, 1, 2])
+        with col_t:
+            target_id = st.selectbox(
+                "Target", targets, key=f"{prefix}_target"
+            )
+        with col_side:
+            side = st.selectbox(
+                "Side", OPERATIONAL_LIMIT_SIDES, key=f"{prefix}_side"
+            )
+        with col_type:
+            limit_type = st.selectbox(
+                "Type", OPERATIONAL_LIMIT_TYPES, key=f"{prefix}_type"
+            )
+
+        with st.form(key=f"{prefix}_form", clear_on_submit=False):
+            group_name = st.text_input(
+                "Group name", value="DEFAULT", key=f"{prefix}_group"
+            )
+            st.caption(
+                "Use `acceptable_duration = -1` for the permanent limit "
+                "(exactly one per group). Any positive value is a TATL "
+                "(temporary admissible transmission loading), in seconds."
+            )
+            initial = pd.DataFrame(
+                [
+                    {"name": "permanent", "value": 1000.0,
+                     "acceptable_duration": -1, "fictitious": False},
+                    {"name": "TATL_60", "value": 1200.0,
+                     "acceptable_duration": 60, "fictitious": False},
+                ]
+            )
+            edited = st.data_editor(
+                initial,
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"{prefix}_rows",
+            )
+            submit = st.form_submit_button("Save operational limits")
+
+        if not submit:
+            return
+
+        rows = pd.DataFrame(edited).dropna(subset=["value"]).to_dict(
+            orient="records"
+        )
+
+        try:
+            create_operational_limits(
+                network,
+                target_id,
+                side,
+                limit_type,
+                rows,
+                group_name=group_name or "DEFAULT",
+            )
+        except Exception as e:
+            st.error(f"Save failed: {e}")
+            return
+
+        st.success(
+            f"Saved {len(rows)} {limit_type.lower()} limit(s) on "
+            f"{target_id} (side {side}, group {group_name or 'DEFAULT'})."
+        )
+        st.rerun()
+
+
 def render_data_explorer(network, selected_vl):
     lf_status = st.session_state.pop("_lf_status_message", None)
     if lf_status:
@@ -588,6 +833,15 @@ def render_data_explorer(network, selected_vl):
 
     if component == "Switches":
         _render_create_coupling_device_form(network)
+
+    if component == "HVDC Lines":
+        _render_create_hvdc_line_form(network)
+
+    if component in REACTIVE_LIMITS_TARGETS:
+        _render_create_reactive_limits_form(network, component)
+
+    if component in OPERATIONAL_LIMITS_TARGETS:
+        _render_create_operational_limits_form(network, component)
 
     filter_by_vl = False
     if component in VL_FILTERABLE and selected_vl:
