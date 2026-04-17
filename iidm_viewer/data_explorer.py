@@ -4,13 +4,17 @@ from iidm_viewer.network_info import COMPONENT_TYPES
 from iidm_viewer.state import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
+    CREATABLE_CONTAINERS,
     EDITABLE_COMPONENTS,
     LOCATOR_FIELDS,
     branch_side_locator_fields,
     create_branch_bay,
     create_component_bay,
+    create_container,
     list_busbar_sections,
     list_node_breaker_voltage_levels,
+    list_substations_df,
+    next_free_node,
     run_loadflow,
     update_components,
 )
@@ -324,6 +328,96 @@ def _render_create_branch_form(network, component: str):
         st.rerun()
 
 
+def _render_create_container_form(network, component: str):
+    """Collapsible form to create a new substation, voltage level, or busbar section.
+
+    Unlike injections/branches these don't use a ``_bay`` helper: they call
+    the plain ``create_<type>s`` method. For Voltage Levels the user can
+    optionally attach the VL to an existing substation; for Busbar Sections
+    the user must pick a target node-breaker VL and the form suggests the
+    next free node index.
+    """
+    spec = CREATABLE_CONTAINERS[component]
+    singular = {
+        "Substations": "substation",
+        "Voltage Levels": "voltage level",
+        "Busbar Sections": "busbar section",
+    }[component]
+    prefix = f"new_{spec['create_function']}"
+
+    with st.expander(f"Create a new {singular}", expanded=False):
+        context: dict = {}
+
+        if component == "Voltage Levels":
+            subs = list_substations_df(network)
+            if subs.empty:
+                st.info(
+                    "No existing substations — the voltage level will be created "
+                    "without a substation. Create a substation first if you want "
+                    "to attach it."
+                )
+                context["substation_id"] = None
+            else:
+                options = ["(none — no substation)"] + subs["id"].tolist()
+                labels = {r["id"]: r["display"] for _, r in subs.iterrows()}
+                chosen = st.selectbox(
+                    "Substation (optional)",
+                    options,
+                    format_func=lambda i: labels.get(i, i),
+                    key=f"{prefix}_sub",
+                )
+                context["substation_id"] = None if chosen == options[0] else chosen
+
+        if component == "Busbar Sections":
+            nb_vls = list_node_breaker_voltage_levels(network)
+            if nb_vls.empty:
+                st.info(
+                    "Busbar sections can only be created in node-breaker voltage "
+                    "levels; none were found in this network."
+                )
+                return
+            vl_labels = {
+                r["id"]: f"{r['display']} ({r['nominal_v']:.0f} kV)"
+                for _, r in nb_vls.iterrows()
+            }
+            vl_id = st.selectbox(
+                "Voltage level",
+                nb_vls["id"].tolist(),
+                format_func=lambda i: vl_labels.get(i, i),
+                key=f"{prefix}_vl",
+            )
+            context["voltage_level_id"] = vl_id
+            # Dynamic default for the node field based on the chosen VL.
+            suggested = next_free_node(network, vl_id)
+            fields_spec = []
+            for f in spec["fields"]:
+                if f["name"] == "node":
+                    fields_spec.append({**f, "default": suggested})
+                else:
+                    fields_spec.append(f)
+        else:
+            fields_spec = spec["fields"]
+
+        with st.form(key=f"{prefix}_form", clear_on_submit=False):
+            raw_fields = _render_generic_field_grid(fields_spec, prefix)
+            submit = st.form_submit_button(f"Create {singular}")
+
+        if not submit:
+            return
+
+        fields = _coerce_field_values(fields_spec, raw_fields)
+        fields.update(context)
+
+        try:
+            create_container(network, component, fields)
+        except Exception as e:
+            st.error(f"Create failed: {e}")
+            return
+
+        st.success(f"Created {singular} {fields['id']}.")
+        st.rerun()
+
+
 def render_data_explorer(network, selected_vl):
     lf_status = st.session_state.pop("_lf_status_message", None)
     if lf_status:
@@ -347,6 +441,8 @@ def render_data_explorer(network, selected_vl):
         _render_create_component_form(network, component)
     elif component in CREATABLE_BRANCHES:
         _render_create_branch_form(network, component)
+    elif component in CREATABLE_CONTAINERS:
+        _render_create_container_form(network, component)
 
     filter_by_vl = False
     if component in VL_FILTERABLE and selected_vl:

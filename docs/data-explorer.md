@@ -143,6 +143,37 @@ both picked busbar sections belong to the same substation (via
 `_substations_of_bbs`), producing a friendly error before pypowsybl is
 involved.
 
+## Container creation — `CREATABLE_CONTAINERS`
+
+Substations, Voltage Levels, and Busbar Sections don't have a ``_bay`` helper:
+they are created directly via the plain ``create_<type>s`` methods on
+``pypowsybl.network.Network``. Their registry (in `state.py`) mirrors
+`CREATABLE_COMPONENTS` but each spec has a ``create_function`` key instead of
+``bay_function``:
+
+```python
+"Substations":     {"create_function": "create_substations",     ...}
+"Voltage Levels":  {"create_function": "create_voltage_levels",  ...}
+"Busbar Sections": {"create_function": "create_busbar_sections", ...}
+```
+
+Form behaviour (`_render_create_container_form`):
+
+- **Substations**: plain field grid — id, name, country (ISO code), TSO. No
+  context fields.
+- **Voltage Levels**: optional `substation_id` picker rendered above the
+  form (empty network ⇒ the VL is created unattached). Field grid covers id,
+  name, topology_kind, nominal_v, low/high voltage limits. ``0`` is the
+  "unset" sentinel for the voltage limits (dropped before dispatch).
+- **Busbar Sections**: `voltage_level_id` picker restricted to node-breaker
+  VLs (same helper as the injection form). The `node` field's default is
+  set to `next_free_node(network, vl_id)` — the first integer not already
+  used by a busbar section or switch in that VL.
+
+All dispatch runs through `create_container(network, component, fields)` on
+the worker thread, with `_vl_lookup_cache` + `_map_data_cache` invalidated
+afterwards so follow-up tabs reload with the new container.
+
 ## Column priority — `PRIORITY_COLUMNS`
 
 For Generators and Loads, certain columns are moved to sit right after `name`
