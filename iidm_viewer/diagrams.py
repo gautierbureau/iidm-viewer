@@ -1,6 +1,6 @@
 import streamlit as st
-from iidm_viewer.components import render_svg
 from iidm_viewer.nad_component import render_interactive_nad
+from iidm_viewer.sld_component import render_interactive_sld
 
 
 def render_nad_tab(network, selected_vl):
@@ -48,10 +48,25 @@ def render_sld_tab(network, selected_vl):
     with st.spinner("Generating Single Line Diagram..."):
         try:
             sld_params = SldParameters(use_name=True, tooltip_enabled=True)
-            svg = network.get_single_line_diagram(
+            sld = network.get_single_line_diagram(
                 selected_vl,
                 parameters=sld_params,
             )
-            render_svg(svg.svg, height=700)
+            svg = sld.svg
+            metadata = sld.metadata
         except Exception as e:
             st.error(f"Error generating SLD: {e}")
+            return
+
+    click = render_interactive_sld(
+        svg=svg,
+        metadata=metadata,
+        height=700,
+        key=f"sld_{selected_vl}",
+    )
+
+    if click and click.get("type") == "sld-vl-click":
+        vl = click.get("vl")
+        if vl and vl != st.session_state.get("selected_vl"):
+            st.session_state.selected_vl = vl
+            st.rerun()

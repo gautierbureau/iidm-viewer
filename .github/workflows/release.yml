@@ -17,10 +17,18 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: iidm_viewer/frontend/nad_component/package-lock.json
+          cache-dependency-path: |
+            iidm_viewer/frontend/nad_component/package-lock.json
+            iidm_viewer/frontend/sld_component/package-lock.json
 
       - name: Build NAD component bundle
         working-directory: iidm_viewer/frontend/nad_component
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build SLD component bundle
+        working-directory: iidm_viewer/frontend/sld_component
         run: |
           npm ci
           npm run build
