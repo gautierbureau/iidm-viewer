@@ -200,8 +200,116 @@ _SHALLOW_REMOVE_METHODS: dict[str, str] = {
 }
 
 REMOVABLE_COMPONENTS: frozenset[str] = (
-    _FEEDER_BAY_TYPES | _HVDC_TYPES | frozenset(_SHALLOW_REMOVE_METHODS)
+    _FEEDER_BAY_TYPES | _HVDC_TYPES | frozenset(_SHALLOW_REMOVE_METHODS) | {"Voltage Levels"}
 )
+
+
+def _resolve_vl_contents(network, vl_ids: list[str]) -> dict:
+    """Collect every element that must be removed before a voltage level can be deleted.
+
+    Queries the network once on the worker thread and returns a plain dict of id
+    lists — no native pypowsybl objects cross the thread boundary.
+
+    Returned keys:
+      plain_injection_ids  – generators/loads/batteries/shunts/SVCs → remove_feeder_bays
+      hvdc_station_ids     – both converter stations of any touched HVDC line
+      hvdc_line_ids        – the HVDC lines themselves (removed before their stations)
+      line_ids             – AC lines with at least one end in the VL set
+      trafo2_ids           – 2-winding transformers with at least one end in the VL set
+      trafo3_ids           – 3-winding transformers with at least one end in the VL set
+      dangling_line_ids    – dangling lines in the VL set
+    """
+    raw = object.__getattribute__(network, "_obj")
+
+    def _gather():
+        vl_set = set(vl_ids)
+
+        plain_injection_ids: set[str] = set()
+        hvdc_station_ids: set[str] = set()
+        hvdc_line_ids: set[str] = set()
+        line_ids: set[str] = set()
+        trafo2_ids: set[str] = set()
+        trafo3_ids: set[str] = set()
+        dangling_line_ids: set[str] = set()
+
+        # --- Plain injections ---
+        for getter in ("get_generators", "get_loads", "get_batteries",
+                       "get_shunt_compensators", "get_static_var_compensators"):
+            df = getattr(raw, getter)(all_attributes=True)
+            if not df.empty and "voltage_level_id" in df.columns:
+                plain_injection_ids.update(
+                    df[df["voltage_level_id"].isin(vl_set)].index
+                )
+
+        # --- HVDC converter stations (cascade to line + both stations) ---
+        hvdc_df = raw.get_hvdc_lines()
+        hvdc_to_stations: dict[str, tuple[str, str]] = {}
+        station_to_hvdc: dict[str, str] = {}
+        for hvdc_id in hvdc_df.index:
+            cs1 = hvdc_df.at[hvdc_id, "converter_station1_id"]
+            cs2 = hvdc_df.at[hvdc_id, "converter_station2_id"]
+            hvdc_to_stations[hvdc_id] = (cs1, cs2)
+            station_to_hvdc[cs1] = hvdc_id
+            station_to_hvdc[cs2] = hvdc_id
+
+        for getter in ("get_vsc_converter_stations", "get_lcc_converter_stations"):
+            df = getattr(raw, getter)(all_attributes=True)
+            if not df.empty and "voltage_level_id" in df.columns:
+                for station_id in df[df["voltage_level_id"].isin(vl_set)].index:
+                    hvdc_id = station_to_hvdc.get(station_id)
+                    if hvdc_id:
+                        hvdc_line_ids.add(hvdc_id)
+                        cs1, cs2 = hvdc_to_stations[hvdc_id]
+                        hvdc_station_ids.add(cs1)
+                        hvdc_station_ids.add(cs2)
+
+        # --- Branches: any endpoint in the removed VL set ---
+        def _collect_branches(getter, target_set, *vl_cols):
+            try:
+                df = getattr(raw, getter)(all_attributes=True)
+            except Exception:
+                return
+            if df.empty:
+                return
+            cols = [c for c in vl_cols if c in df.columns]
+            if not cols:
+                return
+            mask = df[cols[0]].isin(vl_set)
+            for c in cols[1:]:
+                mask = mask | df[c].isin(vl_set)
+            target_set.update(df[mask].index)
+
+        _collect_branches("get_lines",
+                          line_ids,
+                          "voltage_level1_id", "voltage_level2_id")
+        _collect_branches("get_2_windings_transformers",
+                          trafo2_ids,
+                          "voltage_level1_id", "voltage_level2_id")
+        _collect_branches("get_3_windings_transformers",
+                          trafo3_ids,
+                          "voltage_level1_id", "voltage_level2_id", "voltage_level3_id")
+
+        # --- Dangling lines ---
+        try:
+            dl_df = raw.get_dangling_lines(all_attributes=True)
+            if not dl_df.empty and "voltage_level_id" in dl_df.columns:
+                dangling_line_ids.update(
+                    dl_df[dl_df["voltage_level_id"].isin(vl_set)].index
+                )
+        except Exception:
+            pass
+
+        return {
+            "plain_injection_ids": list(plain_injection_ids),
+            "hvdc_station_ids":    list(hvdc_station_ids),
+            "hvdc_line_ids":       list(hvdc_line_ids),
+            "line_ids":            list(line_ids),
+            "trafo2_ids":          list(trafo2_ids),
+            "trafo3_ids":          list(trafo3_ids),
+            "dangling_line_ids":   list(dangling_line_ids),
+        }
+
+    return run(_gather)
 
 
 def _resolve_hvdc_removal(
@@ -253,10 +361,11 @@ def remove_components(network, component: str, ids: list[str]) -> list[str]:
     """Remove elements from the network on the worker thread.
 
     Returns the complete list of element ids that were actually removed,
-    which may be larger than *ids* for HVDC cascades.
+    which may be larger than *ids* for HVDC and Voltage Level cascades.
 
     - Plain injections: pn.remove_feeder_bays for deep (bay-switch) removal.
     - HVDC triples: line removed first, then both station bays cleaned up.
+    - Voltage Levels: full cascade — HVDC triples, injections, branches, then the VL shell.
     - Branches: individual shallow remove_* methods.
     """
     raw = object.__getattribute__(network, "_obj")
@@ -282,6 +391,45 @@ def remove_components(network, component: str, ids: list[str]) -> list[str]:
         run(_do_remove)
         st.session_state.pop("_vl_lookup_cache", None)
         return station_ids + hvdc_line_ids
+
+    if component == "Voltage Levels":
+        contents = _resolve_vl_contents(network, ids)
+
+        def _do_remove():
+            import pypowsybl.network as pn
+            # 1. HVDC lines first so stations are detached
+            for hvdc_id in contents["hvdc_line_ids"]:
+                raw.remove_hvdc_line(hvdc_id)
+            # 2. All station bays + plain injection bays
+            all_injection_ids = contents["hvdc_station_ids"] + contents["plain_injection_ids"]
+            if all_injection_ids:
+                pn.remove_feeder_bays(raw, all_injection_ids)
+            # 3. Branches — each type has its own remove method
+            for eid in contents["line_ids"]:
+                raw.remove_line(eid)
+            for eid in contents["trafo2_ids"]:
+                raw.remove_2_windings_transformer(eid)
+            for eid in contents["trafo3_ids"]:
+                raw.remove_3_windings_transformer(eid)
+            for eid in contents["dangling_line_ids"]:
+                raw.remove_dangling_line(eid)
+            # 4. The now-empty VL shells (busbar sections + switches go with them)
+            for vl_id in ids:
+                raw.remove_voltage_level(vl_id)
+
+        run(_do_remove)
+        st.session_state.pop("_vl_lookup_cache", None)
+        all_removed = (
+            ids
+            + contents["hvdc_line_ids"]
+            + contents["hvdc_station_ids"]
+            + contents["plain_injection_ids"]
+            + contents["line_ids"]
+            + contents["trafo2_ids"]
+            + contents["trafo3_ids"]
+            + contents["dangling_line_ids"]
+        )
+        return all_removed
 
     # Shallow branch removal
     remove_method_name = _SHALLOW_REMOVE_METHODS[component]
