@@ -61,10 +61,17 @@ extension is listed in `state.EDITABLE_EXTENSIONS`, the rows are rendered in a
 columns read-only; an **Apply N changes** button calls `update_extension`,
 which groups rows by their non-null column set and dispatches one
 `raw.update_extensions(name, subset)` per group through the worker thread.
-Extensions whose attributes pypowsybl flags as "not modifiable" (e.g.
-`substationPosition`, `position`, `slackTerminal`) are omitted from
-`EDITABLE_EXTENSIONS` and stay in the read-only `st.dataframe` view.
-Download-as-CSV button included in both cases.
+Extensions omitted from `EDITABLE_EXTENSIONS` stay in the read-only
+`st.dataframe` view. Download-as-CSV button included in both cases.
+
+Non-editable extensions and why:
+
+| Extension | Reason |
+|---|---|
+| `substationPosition` | `latitude` and `longitude` are not modifiable on the Java side — `update_extensions` raises "Series 'latitude' is not modifiable". Remove + recreate via the Data Explorer Components tab instead. |
+| `position` | `order`, `feeder_name`, and `direction` are all not modifiable. Same workaround (remove + recreate). |
+| `slackTerminal` | `update_extensions` rejects it with "id is missing": its index is `voltage_level_id` but the updater expects a differently-shaped key. Use remove + recreate. |
+| `secondaryVoltageControl` | Network-level, two-dataframe (zones + units) shape that pypowsybl only supports as a full replace via `create_extensions`; pypowsybl 1.14 also has no read-back adapter, so there is nothing to show in the table view. Create / replace via the dedicated form in the Data Explorer Components tab (Voltage Levels). |
 
 ### Reactive Capability Curves — `reactive_curves.render_reactive_curves`
 
