@@ -127,12 +127,17 @@ def run_loadflow(network):
 
     def _run_ac():
         import pypowsybl.loadflow as lf
+        import pypowsybl.report as r
         params = lf.Parameters(**generic)
         if provider:
             params.provider_parameters = {k: str(v) for k, v in provider.items()}
-        return lf.run_ac(raw, parameters=params)
+        rn = r.ReportNode(task_key="loadFlowTask", default_name="Load Flow")
+        results = lf.run_ac(raw, parameters=params, report_node=rn)
+        # Extract JSON string inside worker thread before the handle escapes
+        return results, rn.to_json()
 
-    results = run(_run_ac)
+    results, report_json = run(_run_ac)
+    st.session_state["_lf_report_json"] = report_json
     # Invalidate cached lookups so tabs reload fresh data
     st.session_state.pop("_vl_lookup_cache", None)
     return results
