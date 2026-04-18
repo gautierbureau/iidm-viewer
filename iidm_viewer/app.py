@@ -1,6 +1,7 @@
 import streamlit as st
 from iidm_viewer.state import (
     create_empty_network,
+    get_import_extensions,
     get_network,
     init_state,
     load_network,
@@ -34,7 +35,7 @@ with st.sidebar:
 
     uploaded = st.file_uploader(
         "Load a network file",
-        type=["xiidm", "iidm"],
+        type=get_import_extensions(),
         key="file_uploader",
     )
 
@@ -82,7 +83,7 @@ with st.sidebar:
 if network is None:
     st.header("IIDM Viewer")
     st.info(
-        "Upload an XIIDM file in the sidebar to get started, "
+        "Upload a network file in the sidebar to get started, "
         "or expand \"Or start from a blank network\" to build one from scratch."
     )
     st.stop()
