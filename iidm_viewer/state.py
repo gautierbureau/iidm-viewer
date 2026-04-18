@@ -16,6 +16,30 @@ def init_state():
             st.session_state[key] = value
 
 
+def get_import_extensions() -> list[str]:
+    """Return file extensions accepted by pypowsybl, discovered at runtime.
+
+    Result is cached in session state so the worker is only hit once per
+    browser session. ``zip`` is always included for pre-zipped archives.
+    """
+    if "import_extensions" not in st.session_state:
+        def _get():
+            import pypowsybl.network as pn
+            return pn.get_import_supported_extensions()
+        raw = run(_get)
+        seen: set[str] = set()
+        exts: list[str] = []
+        for e in raw:
+            e_lower = e.lower()
+            if e_lower not in seen:
+                seen.add(e_lower)
+                exts.append(e_lower)
+        if "zip" not in seen:
+            exts.append("zip")
+        st.session_state["import_extensions"] = exts
+    return st.session_state["import_extensions"]
+
+
 def load_network(uploaded_file):
     from io import BytesIO
     if uploaded_file.name.lower().endswith(".zip"):
