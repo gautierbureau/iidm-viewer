@@ -386,6 +386,83 @@ SVC definition on each write — so the form always submits the full
 list. pypowsybl 1.14 has no view adapter for reading it back via
 `get_extensions`, but the data persists in the XIIDM export.
 
+## Remove components — `REMOVABLE_COMPONENTS`
+
+### Which components are removable
+
+`REMOVABLE_COMPONENTS` (defined in `state.py`) is the frozenset that controls
+which component labels show the `_remove` checkbox column:
+
+| Group | Members | Removal API |
+|---|---|---|
+| `_FEEDER_BAY_TYPES` | Loads, Generators, Batteries, Shunt Compensators, Static VAR Compensators | `pn.remove_feeder_bays` |
+| `_HVDC_TYPES` | HVDC Lines, VSC Converter Stations, LCC Converter Stations | `pn.remove_hvdc_lines` |
+| `_SHALLOW_REMOVE_TYPES` | Lines, 2-Winding Transformers, Dangling Lines | `network.remove_elements` |
+| containers | Voltage Levels, Substations | `pn.remove_voltage_levels` |
+
+### UI interaction (`data_explorer.py`)
+
+When `component in REMOVABLE_COMPONENTS`, a `_remove` boolean column is
+prepended to the `st.data_editor` display. The user checks rows, then clicks
+the **Remove N elements** primary button that appears.
+
+- The `_remove` column is stripped before change-detection so checked rows
+  are never fed to `update_components`.
+- Rows marked for removal are also excluded from change-detection: the
+  `df_for_changes` slice drops them via `df.drop(index=ids_to_remove)`.
+- Removal and property-edit actions are independent buttons; only the
+  relevant one is shown (removal button only appears when `n_remove > 0`,
+  edit buttons only when `n_changes > 0`).
+
+### Dispatch — `remove_components` (`state.py`)
+
+All removal runs on the worker thread via `run()`. The function returns the
+full list of ids actually removed (may be larger than the input for cascades).
+
+**Feeder-bay types** (`_FEEDER_BAY_TYPES`):  
+`pn.remove_feeder_bays(raw, ids)` — removes the injection *and* its bay
+switches (breaker + disconnectors). Correct deep-removal for node-breaker
+topology; a no-op for the breaker/disconnector pair in bus-breaker networks.
+
+**HVDC triples** (`_HVDC_TYPES`):  
+`_resolve_hvdc_removal(network, component, ids)` expands any selection
+(line *or* either converter station) to the full triple: HVDC line id and
+both converter station ids. `pn.remove_hvdc_lines(raw, hvdc_line_ids)` then
+removes the line and both stations in one call. The returned id list
+includes all three elements so the removal log reflects the cascade.
+
+**Voltage Levels**:  
+`pn.remove_voltage_levels(raw, ids)` — cascades to all connectables inside
+each VL (injections, branches terminated in that VL, HVDC lines).
+
+**Substations**:  
+`_find_vl_ids_for_substations(network, ids)` collects all voltage level ids
+whose `substation_id` column matches, then calls
+`pn.remove_voltage_levels(raw, vl_ids)`. The returned id list includes the
+substation ids *and* the contained VL ids so both appear in the removal log.
+
+**Shallow branch types** (`_SHALLOW_REMOVE_TYPES`):  
+`network.remove_elements(ids)` — the generic pypowsybl method that removes
+any identifiable object by id. Used for Lines, 2-Winding Transformers, and
+Dangling Lines because pypowsybl exposes no dedicated per-type removal
+functions for these elements.
+
+### Removal log — `_removal_log_<component>`
+
+After a successful removal `_add_to_removal_log(component, actually_removed, df)`
+stores a session-state list under the key `_removal_log_<component>`.
+Each entry is `{"element_id": str, "snapshot": dict}` — the snapshot is
+the row from the pre-removal DataFrame, preserved so the user can see what
+was removed.
+
+`_render_removal_log(component)` renders a red-bold heading and one
+`st.caption` bullet per removed id immediately below the data editor.
+There is no revert path; the log is visual only.
+
+The log accumulates across reruns within the session and is cleared only when
+the file is reloaded (`load_network` in `state.py` explicitly drops every
+`_removal_log_*` key from session state alongside `_change_log_*` keys).
+
 ## Column priority — `PRIORITY_COLUMNS`
 
 For Generators and Loads, certain columns are moved to sit right after `name`
