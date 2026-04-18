@@ -7,6 +7,7 @@ from iidm_viewer.state import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
     CREATABLE_CONTAINERS,
+    CREATABLE_EXTENSIONS,
     CREATABLE_HVDC_LINES,
     CREATABLE_TAP_CHANGERS,
     OPERATIONAL_LIMITS_TARGETS,
@@ -16,6 +17,7 @@ from iidm_viewer.state import (
     create_container,
     create_coupling_device,
     create_empty_network,
+    create_extension,
     create_hvdc_line,
     create_operational_limits,
     create_reactive_limits,
@@ -24,6 +26,8 @@ from iidm_viewer.state import (
     get_voltage_levels_df,
     list_busbar_sections,
     list_converter_stations,
+    list_extension_candidates,
+    list_extensions_for_component,
     list_node_breaker_voltage_levels,
     list_operational_limit_candidates,
     list_reactive_limit_candidates,
@@ -31,6 +35,7 @@ from iidm_viewer.state import (
     list_two_winding_transformers,
     load_network,
     next_free_node,
+    validate_create_extension_fields,
 )
 
 
@@ -1211,4 +1216,206 @@ def test_create_operational_limits_rejects_negative_value(node_breaker_network):
         create_operational_limits(
             node_breaker_network, "LINE_S3S4", "ONE", "CURRENT",
             [{"name": "p", "value": -1.0, "acceptable_duration": -1}],
+        )
+
+
+# --- Extensions (first-phase write support) ---
+
+
+def test_creatable_extensions_registry_has_expected_entries():
+    expected = {
+        "substationPosition", "entsoeArea", "busbarSectionPosition", "position",
+        "slackTerminal", "activePowerControl", "voltageRegulation",
+        "voltagePerReactivePowerControl", "standbyAutomaton",
+        "hvdcAngleDroopActivePowerControl", "hvdcOperatorActivePowerRange",
+        "entsoeCategory",
+    }
+    assert expected <= set(CREATABLE_EXTENSIONS)
+    for name, schema in CREATABLE_EXTENSIONS.items():
+        assert "label" in schema and "index" in schema
+        assert schema["targets"], f"{name} has empty targets"
+        assert schema["fields"], f"{name} has no fields"
+
+
+def test_list_extensions_for_component_includes_positions_for_injections():
+    gen_exts = set(list_extensions_for_component("Generators"))
+    assert {"activePowerControl", "entsoeCategory", "position"} <= gen_exts
+    sub_exts = set(list_extensions_for_component("Substations"))
+    assert {"substationPosition", "entsoeArea"} <= sub_exts
+
+
+def test_list_extension_candidates_returns_ids(node_breaker_network):
+    ids = list_extension_candidates(
+        node_breaker_network, "substationPosition", "Substations"
+    )
+    assert "S1" in ids
+
+
+def test_list_extension_candidates_unknown_component_returns_empty(node_breaker_network):
+    assert list_extension_candidates(
+        node_breaker_network, "substationPosition", "Loads"
+    ) == []
+
+
+def test_create_extension_substation_position(node_breaker_network):
+    create_extension(
+        node_breaker_network, "substationPosition", "S1",
+        {"latitude": 48.85, "longitude": 2.35},
+    )
+    df = node_breaker_network.get_extensions("substationPosition")
+    assert "S1" in df.index
+    row = df.loc["S1"]
+    assert abs(row["latitude"] - 48.85) < 1e-6
+    assert abs(row["longitude"] - 2.35) < 1e-6
+
+
+def test_create_extension_entsoe_area(node_breaker_network):
+    create_extension(
+        node_breaker_network, "entsoeArea", "S2", {"code": "FR"},
+    )
+    df = node_breaker_network.get_extensions("entsoeArea")
+    assert df.loc["S2", "code"] == "FR"
+
+
+def test_create_extension_active_power_control_on_generator(node_breaker_network):
+    gen = node_breaker_network.get_generators().index[0]
+    create_extension(
+        node_breaker_network, "activePowerControl", gen,
+        {"participate": True, "droop": 4.0, "participation_factor": 1.0,
+         "min_target_p": None, "max_target_p": None},
+    )
+    df = node_breaker_network.get_extensions("activePowerControl")
+    assert bool(df.loc[gen, "participate"]) is True
+    assert abs(float(df.loc[gen, "droop"]) - 4.0) < 1e-6
+
+
+def test_create_extension_slack_terminal_with_bus(node_breaker_network):
+    bus = node_breaker_network.get_buses().index[0]
+    vl = node_breaker_network.get_buses().loc[bus, "voltage_level_id"]
+    create_extension(
+        node_breaker_network, "slackTerminal", vl,
+        {"bus_id": bus, "element_id": ""},
+    )
+    df = node_breaker_network.get_extensions("slackTerminal")
+    assert vl in df.index
+
+
+def test_create_extension_slack_terminal_requires_exactly_one_target(node_breaker_network):
+    with pytest.raises(ValueError, match="Exactly one of bus_id or element_id"):
+        create_extension(
+            node_breaker_network, "slackTerminal", "S1VL1",
+            {"bus_id": "", "element_id": ""},
+        )
+    with pytest.raises(ValueError, match="Exactly one of bus_id or element_id"):
+        create_extension(
+            node_breaker_network, "slackTerminal", "S1VL1",
+            {"bus_id": "X", "element_id": "Y"},
+        )
+
+
+def test_create_extension_busbar_section_position(node_breaker_network):
+    # NB: pypowsybl 1.14 has a quirk where writes to busbarSectionPosition
+    # reflect the same int into both columns on read-back. We only assert
+    # that the row is created.
+    bbs = node_breaker_network.get_busbar_sections().index[0]
+    create_extension(
+        node_breaker_network, "busbarSectionPosition", bbs,
+        {"busbar_index": 2, "section_index": 3},
+    )
+    df = node_breaker_network.get_extensions("busbarSectionPosition")
+    assert bbs in df.index
+
+
+def test_create_extension_hvdc_droop_control(node_breaker_network):
+    hvdc = node_breaker_network.get_hvdc_lines().index[0]
+    create_extension(
+        node_breaker_network, "hvdcAngleDroopActivePowerControl", hvdc,
+        {"droop": 0.5, "p0": 10.0, "enabled": True},
+    )
+    df = node_breaker_network.get_extensions("hvdcAngleDroopActivePowerControl")
+    assert abs(float(df.loc[hvdc, "p0"]) - 10.0) < 1e-6
+
+
+def test_create_extension_hvdc_operator_range(node_breaker_network):
+    hvdc = node_breaker_network.get_hvdc_lines().index[0]
+    create_extension(
+        node_breaker_network, "hvdcOperatorActivePowerRange", hvdc,
+        {"opr_from_cs1_to_cs2": 100.0, "opr_from_cs2_to_cs1": 80.0},
+    )
+    df = node_breaker_network.get_extensions("hvdcOperatorActivePowerRange")
+    assert abs(float(df.loc[hvdc, "opr_from_cs1_to_cs2"]) - 100.0) < 1e-6
+
+
+def test_create_extension_svc_slope_and_standby(node_breaker_network):
+    svc = node_breaker_network.get_static_var_compensators().index[0]
+    create_extension(
+        node_breaker_network, "voltagePerReactivePowerControl", svc,
+        {"slope": 0.02},
+    )
+    df = node_breaker_network.get_extensions("voltagePerReactivePowerControl")
+    assert abs(float(df.loc[svc, "slope"]) - 0.02) < 1e-6
+
+    create_extension(
+        node_breaker_network, "standbyAutomaton", svc,
+        {"standby": False, "b0": 0.0,
+         "low_voltage_threshold": 390.0, "low_voltage_setpoint": 395.0,
+         "high_voltage_threshold": 410.0, "high_voltage_setpoint": 405.0},
+    )
+    df = node_breaker_network.get_extensions("standbyAutomaton")
+    assert bool(df.loc[svc, "standby"]) is False
+
+
+def test_create_extension_position_on_generator(node_breaker_network):
+    gen = node_breaker_network.get_generators().index[0]
+    create_extension(
+        node_breaker_network, "position", gen,
+        {"order": 42, "feeder_name": "my_feeder",
+         "direction": "BOTTOM", "side": ""},
+    )
+    df = node_breaker_network.get_extensions("position")
+    row = df.loc[gen]
+    if hasattr(row, "iloc"):
+        # When a position already exists from the bundled sample, there may be
+        # multiple rows; scan for the one we just inserted.
+        rows = row if row.ndim == 2 else row.to_frame().T
+        assert any(int(r["order"]) == 42 for _, r in rows.iterrows())
+    else:
+        assert int(row["order"]) == 42
+
+
+def test_create_extension_entsoe_category_on_generator(node_breaker_network):
+    gen = node_breaker_network.get_generators().index[0]
+    create_extension(
+        node_breaker_network, "entsoeCategory", gen, {"code": 3},
+    )
+    df = node_breaker_network.get_extensions("entsoeCategory")
+    assert int(df.loc[gen, "code"]) == 3
+
+
+def test_validate_create_extension_fields_flags_missing_required():
+    errs = validate_create_extension_fields(
+        "substationPosition", {"latitude": 48.85}
+    )
+    assert any("longitude" in e for e in errs)
+
+
+def test_validate_create_extension_fields_active_power_bounds():
+    errs = validate_create_extension_fields(
+        "activePowerControl",
+        {"participate": True, "droop": 1.0,
+         "min_target_p": 10.0, "max_target_p": 5.0},
+    )
+    assert any("max_target_p" in e for e in errs)
+
+
+def test_create_extension_unknown_name_raises():
+    with pytest.raises(ValueError, match="Unknown extension"):
+        create_extension(None, "no_such_ext", "id", {})
+
+
+def test_create_extension_empty_target_raises(node_breaker_network):
+    with pytest.raises(ValueError, match="Target id is required"):
+        create_extension(
+            node_breaker_network, "substationPosition", "",
+            {"latitude": 0.0, "longitude": 0.0},
         )

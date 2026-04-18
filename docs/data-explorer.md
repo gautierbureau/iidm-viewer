@@ -310,6 +310,58 @@ All dispatch runs through `create_container(network, component, fields)` on
 the worker thread, with `_vl_lookup_cache` + `_map_data_cache` invalidated
 afterwards so follow-up tabs reload with the new container.
 
+## Extension creation — `CREATABLE_EXTENSIONS`
+
+Attaches an extension row to an existing element (first-phase set: 12 of
+pypowsybl's 27 extensions). Read-only browsing of every extension lives
+in `extensions_explorer.py`; this form adds write support for the
+extensions that pair with equipment the app can already create.
+
+The form (`_render_create_extension_form`) is rendered for every
+component whose label appears in at least one extension's ``targets``
+mapping. It shows a dropdown of applicable extensions, a target-id
+picker (from the component's getter), and a dynamic field grid driven
+by the extension's schema.
+
+Registered extensions and their targets:
+
+| Extension | Component |
+| --- | --- |
+| `substationPosition` | Substations |
+| `entsoeArea` | Substations |
+| `busbarSectionPosition` | Busbar Sections |
+| `position` | Generators, Loads, Batteries, Shunt/Static VAR Compensators, VSC/LCC Stations |
+| `slackTerminal` | Voltage Levels |
+| `activePowerControl` | Generators, Batteries |
+| `voltageRegulation` | Batteries |
+| `voltagePerReactivePowerControl` | Static VAR Compensators |
+| `standbyAutomaton` | Static VAR Compensators |
+| `hvdcAngleDroopActivePowerControl` | HVDC Lines |
+| `hvdcOperatorActivePowerRange` | HVDC Lines |
+| `entsoeCategory` | Generators |
+
+Each registry entry carries a ``label``, ``detail`` caption, the
+``index`` column used to build the single-row DataFrame (usually
+``id``; ``voltage_level_id`` for `slackTerminal`), a ``targets`` map of
+component-label to getter, and a ``fields`` list. Each field declares
+``kind`` (``float``/``int``/``bool``/``str``/``choice``), ``required``,
+``default``, ``help``, and optionally ``options`` (for ``choice``) or
+``optional_fill`` — the latter drops the column from the dispatched
+DataFrame when left blank.
+
+`create_extension(network, extension_name, target_id, fields)`
+validates against the registry, coerces types, drops ``optional_fill``
+blanks, and routes `network.create_extensions(name, df)` through the
+worker thread. `validate_create_extension_fields` is extracted so the
+form can preview errors without a dispatch, and carries per-extension
+invariants (e.g. ``slackTerminal`` requires exactly one of ``bus_id``
+or ``element_id``; ``activePowerControl`` requires
+``max_target_p >= min_target_p``).
+
+`linePosition` is intentionally absent from the first phase: pypowsybl
+1.14's writer raises an internal error when populating its multi-row
+``(id, num)`` layout. The read-only viewer continues to expose it.
+
 ## Column priority — `PRIORITY_COLUMNS`
 
 For Generators and Loads, certain columns are moved to sit right after `name`

@@ -5,6 +5,7 @@ from iidm_viewer.state import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
     CREATABLE_CONTAINERS,
+    CREATABLE_EXTENSIONS,
     CREATABLE_HVDC_LINES,
     CREATABLE_TAP_CHANGERS,
     EDITABLE_COMPONENTS,
@@ -18,12 +19,15 @@ from iidm_viewer.state import (
     create_component_bay,
     create_container,
     create_coupling_device,
+    create_extension,
     create_hvdc_line,
     create_operational_limits,
     create_reactive_limits,
     create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
+    list_extension_candidates,
+    list_extensions_for_component,
     list_node_breaker_voltage_levels,
     list_operational_limit_candidates,
     list_reactive_limit_candidates,
@@ -803,6 +807,100 @@ def _render_create_operational_limits_form(network, component: str):
         st.rerun()
 
 
+def _render_create_extension_form(network, component: str):
+    """Collapsible form to attach an extension row to an existing element.
+
+    The extension dropdown is filtered to the ones whose ``targets`` include
+    the current component. Each extension's registered fields are rendered
+    dynamically — text, number, bool, or choice.
+    """
+    ext_names = list_extensions_for_component(component)
+    if not ext_names:
+        return
+
+    prefix = f"new_ext_{component.replace(' ', '_').replace('-', '_').lower()}"
+
+    with st.expander("Attach extension", expanded=False):
+        labels = {
+            name: CREATABLE_EXTENSIONS[name]["label"] for name in ext_names
+        }
+        ext_name = st.selectbox(
+            "Extension",
+            options=ext_names,
+            format_func=lambda n: f"{n} — {labels[n]}",
+            key=f"{prefix}_ext",
+        )
+        schema = CREATABLE_EXTENSIONS[ext_name]
+        detail = schema.get("detail")
+        if detail:
+            st.caption(detail)
+
+        candidates = list_extension_candidates(network, ext_name, component)
+        if not candidates:
+            st.info(
+                f"No {component.lower()} in the network — create one first."
+            )
+            return
+
+        target_id = st.selectbox(
+            "Target", candidates, key=f"{prefix}_{ext_name}_target"
+        )
+
+        with st.form(key=f"{prefix}_{ext_name}_form", clear_on_submit=False):
+            values: dict = {}
+            cols = st.columns(min(len(schema["fields"]), 3) or 1)
+            for i, fdef in enumerate(schema["fields"]):
+                col = cols[i % len(cols)]
+                with col:
+                    k = f"{prefix}_{ext_name}_{fdef['name']}"
+                    label = fdef["name"] + (" *" if fdef.get("required") else "")
+                    help_txt = fdef.get("help")
+                    kind = fdef["kind"]
+                    default = fdef.get("default")
+                    if kind == "bool":
+                        values[fdef["name"]] = st.checkbox(
+                            label, value=bool(default), key=k, help=help_txt,
+                        )
+                    elif kind == "choice":
+                        opts = fdef.get("options", [])
+                        idx = opts.index(default) if default in opts else 0
+                        values[fdef["name"]] = st.selectbox(
+                            label, options=opts, index=idx, key=k, help=help_txt,
+                        )
+                    elif kind in ("float", "int"):
+                        step = 1 if kind == "int" else 0.01
+                        raw = st.number_input(
+                            label,
+                            value=(default if default is not None else 0.0)
+                            if kind == "float"
+                            else int(default if default is not None else 0),
+                            step=step,
+                            key=k,
+                            help=help_txt,
+                        )
+                        values[fdef["name"]] = raw
+                    else:
+                        values[fdef["name"]] = st.text_input(
+                            label,
+                            value=str(default) if default else "",
+                            key=k,
+                            help=help_txt,
+                        )
+            submit = st.form_submit_button(f"Attach {ext_name}")
+
+        if not submit:
+            return
+
+        try:
+            create_extension(network, ext_name, target_id, values)
+        except Exception as e:
+            st.error(f"Attach failed: {e}")
+            return
+
+        st.success(f"Attached {ext_name} to {target_id}.")
+        st.rerun()
+
+
 def render_data_explorer(network, selected_vl):
     lf_status = st.session_state.pop("_lf_status_message", None)
     if lf_status:
@@ -842,6 +940,8 @@ def render_data_explorer(network, selected_vl):
 
     if component in OPERATIONAL_LIMITS_TARGETS:
         _render_create_operational_limits_form(network, component)
+
+    _render_create_extension_form(network, component)
 
     filter_by_vl = False
     if component in VL_FILTERABLE and selected_vl:
