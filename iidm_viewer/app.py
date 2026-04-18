@@ -1,6 +1,8 @@
 import streamlit as st
 from iidm_viewer.state import (
     create_empty_network,
+    export_network,
+    get_export_formats,
     get_import_extensions,
     get_network,
     init_state,
@@ -78,6 +80,32 @@ with st.sidebar:
         with col_params:
             if st.button("\u2699\ufe0f", key="lf_params_btn", help="Load Flow Parameters"):
                 show_lf_parameters_dialog()
+
+        st.divider()
+        with st.expander("Save network", expanded=False):
+            fmt = st.selectbox(
+                "Export format",
+                get_export_formats(),
+                key="export_format_select",
+            )
+            if st.button("Prepare download", key="export_prepare_btn"):
+                with st.spinner("Exporting..."):
+                    try:
+                        data = export_network(network, fmt)
+                        st.session_state["_export_bytes"] = data
+                        st.session_state["_export_fmt"] = fmt
+                    except Exception as exc:
+                        st.error(f"Export failed: {exc}")
+            cached_fmt = st.session_state.get("_export_fmt")
+            cached_bytes = st.session_state.get("_export_bytes")
+            if cached_bytes and cached_fmt == fmt:
+                st.download_button(
+                    label=f"Download ({fmt})",
+                    data=cached_bytes,
+                    file_name=f"network.{fmt.lower()}",
+                    mime="application/octet-stream",
+                    key="export_download_btn",
+                )
 
 # -- Main area --
 if network is None:

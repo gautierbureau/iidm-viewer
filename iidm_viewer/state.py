@@ -40,6 +40,26 @@ def get_import_extensions() -> list[str]:
     return st.session_state["import_extensions"]
 
 
+def get_export_formats() -> list[str]:
+    """Return export format names supported by pypowsybl, cached per session."""
+    if "export_formats" not in st.session_state:
+        def _get():
+            import pypowsybl.network as pn
+            return pn.get_export_formats()
+        st.session_state["export_formats"] = run(_get)
+    return st.session_state["export_formats"]
+
+
+def export_network(network, format_name: str) -> bytes:
+    """Export the network to bytes using the given format name."""
+    raw = object.__getattribute__(network, "_obj")
+
+    def _export():
+        return raw.save_to_binary_buffer(format_name).getvalue()
+
+    return run(_export)
+
+
 def load_network(uploaded_file):
     from io import BytesIO
     if uploaded_file.name.lower().endswith(".zip"):
@@ -59,6 +79,8 @@ def load_network(uploaded_file):
     st.session_state.network = network
     st.session_state.selected_vl = None
     st.session_state.pop("_map_data_cache", None)
+    st.session_state.pop("_export_bytes", None)
+    st.session_state.pop("_export_fmt", None)
     for k in [k for k in st.session_state if k.startswith("_change_log_")]:
         del st.session_state[k]
     return network
@@ -85,6 +107,8 @@ def create_empty_network(network_id: str = "network"):
     st.session_state.pop("_map_data_cache", None)
     st.session_state.pop("_vl_lookup_cache", None)
     st.session_state.pop("_last_file", None)
+    st.session_state.pop("_export_bytes", None)
+    st.session_state.pop("_export_fmt", None)
     for k in [k for k in st.session_state if k.startswith("_change_log_")]:
         del st.session_state[k]
     return network
