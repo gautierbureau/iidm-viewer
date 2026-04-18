@@ -181,6 +181,13 @@ _FEEDER_BAY_TYPES: frozenset[str] = frozenset({
     "Batteries",
     "Shunt Compensators",
     "Static VAR Compensators",
+})
+
+# HVDC triples: removing any one of the three elements (line or either station)
+# must cascade to remove all three — the line is removed first so the stations
+# are no longer attached to it, then the station bays are cleaned up.
+_HVDC_TYPES: frozenset[str] = frozenset({
+    "HVDC Lines",
     "VSC Converter Stations",
     "LCC Converter Stations",
 })
@@ -192,15 +199,65 @@ _SHALLOW_REMOVE_METHODS: dict[str, str] = {
     "Dangling Lines":         "remove_dangling_line",
 }
 
-REMOVABLE_COMPONENTS: frozenset[str] = _FEEDER_BAY_TYPES | frozenset(_SHALLOW_REMOVE_METHODS)
+REMOVABLE_COMPONENTS: frozenset[str] = (
+    _FEEDER_BAY_TYPES | _HVDC_TYPES | frozenset(_SHALLOW_REMOVE_METHODS)
+)
 
 
-def remove_components(network, component: str, ids: list[str]):
+def _resolve_hvdc_removal(
+    network, component: str, ids: list[str]
+) -> tuple[list[str], list[str]]:
+    """Expand an HVDC removal request to the full triple: stations + line.
+
+    In IIDM an HVDC set is always exactly one line and two converter stations.
+    Removing any element in the set triggers removal of all three, so this
+    function returns (station_ids, hvdc_line_ids) for the caller to act on.
+    """
+    raw = object.__getattribute__(network, "_obj")
+
+    def _gather():
+        hvdc_df = raw.get_hvdc_lines()
+        hvdc_to_stations: dict[str, tuple[str, str]] = {}
+        station_to_hvdc: dict[str, str] = {}
+        for hvdc_id in hvdc_df.index:
+            cs1 = hvdc_df.at[hvdc_id, "converter_station1_id"]
+            cs2 = hvdc_df.at[hvdc_id, "converter_station2_id"]
+            hvdc_to_stations[hvdc_id] = (cs1, cs2)
+            station_to_hvdc[cs1] = hvdc_id
+            station_to_hvdc[cs2] = hvdc_id
+        return hvdc_to_stations, station_to_hvdc
+
+    hvdc_to_stations, station_to_hvdc = run(_gather)
+
+    hvdc_ids: set[str] = set()
+    for eid in ids:
+        if component == "HVDC Lines":
+            hvdc_ids.add(eid)
+        else:
+            hvdc_id = station_to_hvdc.get(eid)
+            if hvdc_id:
+                hvdc_ids.add(hvdc_id)
+
+    station_ids: set[str] = set()
+    for hvdc_id in hvdc_ids:
+        cs1, cs2 = hvdc_to_stations.get(hvdc_id, (None, None))
+        if cs1:
+            station_ids.add(cs1)
+        if cs2:
+            station_ids.add(cs2)
+
+    return list(station_ids), list(hvdc_ids)
+
+
+def remove_components(network, component: str, ids: list[str]) -> list[str]:
     """Remove elements from the network on the worker thread.
 
-    Injection types use pn.remove_feeder_bays so the entire bay (breaker +
-    disconnectors) is cleaned up in node-breaker topologies.  Branch types fall
-    back to their individual remove_* methods.
+    Returns the complete list of element ids that were actually removed,
+    which may be larger than *ids* for HVDC cascades.
+
+    - Plain injections: pn.remove_feeder_bays for deep (bay-switch) removal.
+    - HVDC triples: line removed first, then both station bays cleaned up.
+    - Branches: individual shallow remove_* methods.
     """
     raw = object.__getattribute__(network, "_obj")
 
@@ -208,15 +265,35 @@ def remove_components(network, component: str, ids: list[str]):
         def _do_remove():
             import pypowsybl.network as pn
             pn.remove_feeder_bays(raw, ids)
-    else:
-        remove_method_name = _SHALLOW_REMOVE_METHODS[component]
+        run(_do_remove)
+        st.session_state.pop("_vl_lookup_cache", None)
+        return ids
+
+    if component in _HVDC_TYPES:
+        station_ids, hvdc_line_ids = _resolve_hvdc_removal(network, component, ids)
+
         def _do_remove():
-            method = getattr(raw, remove_method_name)
-            for eid in ids:
-                method(eid)
+            import pypowsybl.network as pn
+            for hvdc_id in hvdc_line_ids:
+                raw.remove_hvdc_line(hvdc_id)
+            if station_ids:
+                pn.remove_feeder_bays(raw, station_ids)
+
+        run(_do_remove)
+        st.session_state.pop("_vl_lookup_cache", None)
+        return station_ids + hvdc_line_ids
+
+    # Shallow branch removal
+    remove_method_name = _SHALLOW_REMOVE_METHODS[component]
+
+    def _do_remove():
+        method = getattr(raw, remove_method_name)
+        for eid in ids:
+            method(eid)
 
     run(_do_remove)
     st.session_state.pop("_vl_lookup_cache", None)
+    return ids
 
 
 def update_components(network, component: str, changes_df):
