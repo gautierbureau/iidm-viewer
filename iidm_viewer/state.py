@@ -1518,3 +1518,120 @@ def create_extension(
 
     run(_do_create)
     st.session_state.pop("_vl_lookup_cache", None)
+
+
+# --- Secondary voltage control (network-level, two dataframes) ---
+#
+# Unlike the per-element extensions above, `secondaryVoltageControl` is
+# defined on the whole network as a list of control zones plus a list of
+# control units. pypowsybl takes two DataFrames:
+#
+#   zones  (index: name)       — target_v (kV), bus_ids (pilot points,
+#                                space-separated if several)
+#   units  (index: unit_id)    — zone_name, participate (bool)
+#
+# `network.create_extensions('secondaryVoltageControl', [zones, units])`
+# *replaces* the whole SVC definition on write (no append). pypowsybl 1.14
+# has no view adapter for reading it back via `get_extensions` — the data
+# persists in the XIIDM export only.
+
+
+def list_bus_ids(network) -> list[str]:
+    """Return all bus ids in the bus view. Used to populate pilot-point pickers."""
+    try:
+        return sorted(network.get_buses().index.tolist())
+    except Exception:
+        return []
+
+
+def list_unit_candidates(network) -> list[str]:
+    """Candidate control units: generators, batteries, and SVCs."""
+    out: list[str] = []
+    for getter in (
+        "get_generators", "get_batteries", "get_static_var_compensators",
+    ):
+        try:
+            out.extend(getattr(network, getter)().index.tolist())
+        except Exception:
+            pass
+    return sorted(out)
+
+
+def validate_secondary_voltage_control(
+    zones: list[dict], units: list[dict]
+) -> list[str]:
+    errors: list[str] = []
+    if not zones:
+        errors.append("At least one zone is required.")
+        return errors
+    names: list[str] = []
+    for zi, z in enumerate(zones):
+        name = (z.get("name") or "").strip()
+        if not name:
+            errors.append(f"Zone #{zi + 1}: name is required.")
+            continue
+        if name in names:
+            errors.append(f"Zone name {name!r} is duplicated.")
+        names.append(name)
+        if z.get("target_v") in (None, ""):
+            errors.append(f"Zone {name!r}: target_v is required.")
+        elif float(z["target_v"]) <= 0:
+            errors.append(f"Zone {name!r}: target_v must be > 0.")
+        bus_ids = (z.get("bus_ids") or "").strip()
+        if not bus_ids:
+            errors.append(f"Zone {name!r}: at least one pilot bus id is required.")
+
+    unit_ids: list[str] = []
+    for ui, u in enumerate(units):
+        uid = (u.get("unit_id") or "").strip()
+        if not uid:
+            errors.append(f"Unit #{ui + 1}: unit_id is required.")
+            continue
+        if uid in unit_ids:
+            errors.append(f"Unit id {uid!r} is duplicated.")
+        unit_ids.append(uid)
+        zn = (u.get("zone_name") or "").strip()
+        if not zn:
+            errors.append(f"Unit {uid!r}: zone_name is required.")
+        elif zn not in names:
+            errors.append(
+                f"Unit {uid!r}: zone_name {zn!r} is not one of the defined zones."
+            )
+    return errors
+
+
+def create_secondary_voltage_control(
+    network, zones: list[dict], units: list[dict]
+):
+    """Replace the secondaryVoltageControl extension with the given zones + units.
+
+    ``zones`` entries: ``{name, target_v, bus_ids}`` (``bus_ids`` is a single
+    bus id or a space-separated list of pilot-point bus ids).
+    ``units`` entries: ``{unit_id, zone_name, participate}``.
+    """
+    errors = validate_secondary_voltage_control(zones, units)
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    zones_df = pd.DataFrame(
+        {
+            "target_v": [float(z["target_v"]) for z in zones],
+            "bus_ids": [(z.get("bus_ids") or "").strip() for z in zones],
+        },
+        index=pd.Index([z["name"].strip() for z in zones], name="name"),
+    )
+    units_df = pd.DataFrame(
+        {
+            "zone_name": [u["zone_name"].strip() for u in units],
+            "participate": [bool(u.get("participate", True)) for u in units],
+        },
+        index=pd.Index([u["unit_id"].strip() for u in units], name="unit_id"),
+    )
+
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_create():
+        raw.create_extensions("secondaryVoltageControl", [zones_df, units_df])
+
+    run(_do_create)
+    st.session_state.pop("_vl_lookup_cache", None)

@@ -23,6 +23,7 @@ from iidm_viewer.state import (
     create_hvdc_line,
     create_operational_limits,
     create_reactive_limits,
+    create_secondary_voltage_control,
     create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
@@ -807,6 +808,72 @@ def _render_create_operational_limits_form(network, component: str):
         st.rerun()
 
 
+def _render_secondary_voltage_control_form(network):
+    """Collapsible two-dataframe form for the secondaryVoltageControl extension.
+
+    Unlike the per-element extensions, secondaryVoltageControl is a
+    network-level definition: a list of zones (name, target_v, pilot
+    bus ids) plus a list of control units (unit_id, zone_name,
+    participate). pypowsybl replaces the whole SVC definition on each
+    write, so the form submits both lists together.
+    """
+    prefix = "new_svc_ext"
+    with st.expander("Configure secondary voltage control", expanded=False):
+        st.caption(
+            "Define control zones and the units that participate in each. "
+            "Pypowsybl replaces the whole secondaryVoltageControl "
+            "extension on submit. `bus_ids` is space-separated if a zone "
+            "has several pilot points."
+        )
+
+        zones_initial = pd.DataFrame(
+            [{"name": "ZONE_1", "target_v": 400.0, "bus_ids": ""}]
+        )
+        units_initial = pd.DataFrame(
+            [{"unit_id": "", "zone_name": "ZONE_1", "participate": True}]
+        )
+
+        with st.form(key=f"{prefix}_form", clear_on_submit=False):
+            st.markdown("**Zones**")
+            zones_edit = st.data_editor(
+                zones_initial,
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"{prefix}_zones",
+            )
+            st.markdown("**Control units**")
+            units_edit = st.data_editor(
+                units_initial,
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"{prefix}_units",
+            )
+            submit = st.form_submit_button("Save secondary voltage control")
+
+        if not submit:
+            return
+
+        zones = pd.DataFrame(zones_edit).dropna(
+            subset=["name", "target_v"]
+        ).to_dict(orient="records")
+        units = pd.DataFrame(units_edit).dropna(
+            subset=["unit_id", "zone_name"]
+        ).to_dict(orient="records")
+
+        try:
+            create_secondary_voltage_control(network, zones, units)
+        except Exception as e:
+            st.error(f"Save failed: {e}")
+            return
+
+        st.success(
+            f"Saved {len(zones)} zone(s) and {len(units)} unit(s). "
+            "Note: pypowsybl 1.14 has no read-back for secondaryVoltageControl; "
+            "the data persists in the XIIDM export."
+        )
+        st.rerun()
+
+
 def _render_create_extension_form(network, component: str):
     """Collapsible form to attach an extension row to an existing element.
 
@@ -942,6 +1009,9 @@ def render_data_explorer(network, selected_vl):
         _render_create_operational_limits_form(network, component)
 
     _render_create_extension_form(network, component)
+
+    if component == "Voltage Levels":
+        _render_secondary_voltage_control_form(network)
 
     filter_by_vl = False
     if component in VL_FILTERABLE and selected_vl:
