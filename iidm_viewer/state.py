@@ -192,15 +192,15 @@ _HVDC_TYPES: frozenset[str] = frozenset({
     "LCC Converter Stations",
 })
 
-# Branch/other types: individual remove_* methods (shallow; no bay-switch cascade).
-_SHALLOW_REMOVE_METHODS: dict[str, str] = {
-    "Lines":                  "remove_line",
-    "2-Winding Transformers": "remove_2_windings_transformer",
-    "Dangling Lines":         "remove_dangling_line",
-}
+# Branch/link types removed via the generic remove_elements API.
+_SHALLOW_REMOVE_TYPES: frozenset[str] = frozenset({
+    "Lines",
+    "2-Winding Transformers",
+    "Dangling Lines",
+})
 
 REMOVABLE_COMPONENTS: frozenset[str] = (
-    _FEEDER_BAY_TYPES | _HVDC_TYPES | frozenset(_SHALLOW_REMOVE_METHODS)
+    _FEEDER_BAY_TYPES | _HVDC_TYPES | _SHALLOW_REMOVE_TYPES
     | {"Voltage Levels", "Substations"}
 )
 
@@ -319,13 +319,9 @@ def remove_components(network, component: str, ids: list[str]) -> list[str]:
         st.session_state.pop("_vl_lookup_cache", None)
         return ids + vl_ids
 
-    # Shallow branch removal
-    remove_method_name = _SHALLOW_REMOVE_METHODS[component]
-
+    # Shallow branch removal via generic remove_elements
     def _do_remove():
-        method = getattr(raw, remove_method_name)
-        for eid in ids:
-            method(eid)
+        raw.remove_elements(ids)
 
     run(_do_remove)
     st.session_state.pop("_vl_lookup_cache", None)
