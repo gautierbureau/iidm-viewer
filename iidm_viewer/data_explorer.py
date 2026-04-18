@@ -1250,8 +1250,8 @@ def render_data_explorer(network, selected_vl):
                         type="primary",
                     ):
                         try:
-                            remove_components(network, component, ids_to_remove)
-                            _add_to_removal_log(component, ids_to_remove, df)
+                            actually_removed = remove_components(network, component, ids_to_remove)
+                            _add_to_removal_log(component, actually_removed, df)
                             st.rerun()
                         except Exception as e:
                             st.error(f"Remove failed: {e}")
