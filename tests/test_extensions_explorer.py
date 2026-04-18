@@ -2,7 +2,7 @@
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from iidm_viewer.state import load_network
+from iidm_viewer.state import create_extension, load_network
 
 
 def _prepare(xiidm_upload):
@@ -65,6 +65,43 @@ def test_extension_detail_caption_rendered(xiidm_upload):
     captions = [c.value for c in at.caption]
     # The 'position' extension description mentions connectable position.
     assert any("position" in c.lower() for c in captions)
+
+
+def _dataframe_ids(at):
+    """Return the widget id on each rendered dataframe/data_editor.
+
+    AppTest reports ``st.data_editor`` as a ``Dataframe`` element; the key
+    (if any) is encoded in the proto's ``id`` field as
+    ``$$ID-<hash>-<key>``.
+    """
+    return [d.proto.id for d in at.dataframe]
+
+
+def test_editable_extension_shows_data_editor(xiidm_upload):
+    """Selecting an editable extension (activePowerControl) must render a data_editor."""
+    at = _prepare(xiidm_upload)
+    # Seed the network with an activePowerControl row on B1-G.
+    create_extension(
+        at.session_state["network"], "activePowerControl", "B1-G",
+        {"participate": True, "droop": 4.0},
+    )
+    at.selectbox(key="extension_type_select").select(
+        "activePowerControl"
+    ).run(timeout=30)
+    assert not at.exception
+    ids = _dataframe_ids(at)
+    assert any("ext_editor_activePowerControl" in pid for pid in ids)
+
+
+def test_readonly_extension_falls_back_to_dataframe(xiidm_upload):
+    """Non-editable extensions (e.g. slackTerminal) keep the static dataframe view."""
+    at = _prepare(xiidm_upload)
+    at.selectbox(key="extension_type_select").select(
+        "slackTerminal"
+    ).run(timeout=30)
+    assert not at.exception
+    ids = _dataframe_ids(at)
+    assert all("ext_editor_slackTerminal" not in pid for pid in ids)
 
 
 def test_extensions_tab_present_and_components_renamed(xiidm_upload):
