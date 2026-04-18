@@ -14,6 +14,7 @@ from iidm_viewer.state import (
     OPERATIONAL_LIMIT_SIDES,
     OPERATIONAL_LIMIT_TYPES,
     REACTIVE_LIMITS_TARGETS,
+    REMOVABLE_COMPONENTS,
     branch_side_locator_fields,
     create_branch_bay,
     create_component_bay,
@@ -35,6 +36,7 @@ from iidm_viewer.state import (
     list_substations_df,
     list_two_winding_transformers,
     next_free_node,
+    remove_components,
     run_loadflow,
     update_components,
 )
@@ -203,6 +205,30 @@ def _render_change_log(network, component: str, method_name: str):
                     st.rerun()
                 except Exception as e:
                     st.error(f"Revert failed: {e}")
+
+
+def _add_to_removal_log(component: str, ids: list[str], snapshot_df: pd.DataFrame):
+    """Record removed element ids (with full snapshot) in a per-component session-state log."""
+    key = f"_removal_log_{component}"
+    log: list[dict] = list(st.session_state.get(key, []))
+    existing_ids = {e["element_id"] for e in log}
+    for eid in ids:
+        if eid not in existing_ids:
+            snapshot = snapshot_df.loc[eid].to_dict() if eid in snapshot_df.index else {}
+            log.append({"element_id": eid, "snapshot": snapshot})
+    st.session_state[key] = log
+
+
+def _render_removal_log(component: str):
+    """Display removed element ids in a visually distinct section (no revert for now)."""
+    key = f"_removal_log_{component}"
+    log: list[dict] = st.session_state.get(key, [])
+    if not log:
+        return
+    n = len(log)
+    st.markdown(f"**:red[Removed {component.lower()} ({n})]**")
+    for entry in log:
+        st.caption(f"• {entry['element_id']}")
 
 
 def _render_field(field: dict, key: str):
@@ -1141,17 +1167,47 @@ def render_data_explorer(network, selected_vl):
                 _, editable_cols = EDITABLE_COMPONENTS[component]
                 editable_cols = [c for c in editable_cols if c in df.columns]
 
-            if editable_cols:
-                col_config = _column_config(df, set(editable_cols))
+            is_removable = component in REMOVABLE_COMPONENTS
+
+            if editable_cols or is_removable:
+                # Prepend a _remove checkbox column for removable components
+                if is_removable:
+                    df_display = df.copy()
+                    df_display.insert(0, "_remove", False)
+                else:
+                    df_display = df
+
+                col_config = _column_config(df_display, set(editable_cols))
+                if is_removable:
+                    col_config["_remove"] = st.column_config.CheckboxColumn(
+                        "Remove", default=False
+                    )
+
                 edited_df = st.data_editor(
-                    df,
+                    df_display,
                     use_container_width=True,
                     column_config=col_config,
                     key=f"editor_{method_name}",
                 )
 
-                changes = _compute_changes(df, edited_df, editable_cols)
+                # Separate removal selection from property edits
+                if is_removable:
+                    ids_to_remove = edited_df[edited_df["_remove"] == True].index.tolist()
+                    edited_df_clean = edited_df.drop(columns=["_remove"])
+                else:
+                    ids_to_remove = []
+                    edited_df_clean = edited_df
+
+                # Exclude rows marked for removal from change detection
+                if editable_cols:
+                    df_for_changes = df.drop(index=ids_to_remove, errors="ignore")
+                    edited_for_changes = edited_df_clean.loc[df_for_changes.index]
+                    changes = _compute_changes(df_for_changes, edited_for_changes, editable_cols)
+                else:
+                    changes = pd.DataFrame()
                 n_changes = len(changes)
+                n_remove = len(ids_to_remove)
+
                 if n_changes:
                     label = f"change{'s' if n_changes > 1 else ''}"
                     col_apply, col_apply_lf, _ = st.columns([1, 2, 5], gap="small")
@@ -1185,7 +1241,23 @@ def render_data_explorer(network, selected_vl):
                             st.rerun()
                         except Exception as e:
                             st.error(f"Update failed: {e}")
+
+                if n_remove:
+                    label = f"element{'s' if n_remove > 1 else ''}"
+                    if st.button(
+                        f"Remove {n_remove} {label}",
+                        key=f"remove_{method_name}",
+                        type="primary",
+                    ):
+                        try:
+                            remove_components(network, component, ids_to_remove)
+                            _add_to_removal_log(component, ids_to_remove, df)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Remove failed: {e}")
+
                 _render_change_log(network, component, method_name)
+                _render_removal_log(component)
             else:
                 st.dataframe(df, use_container_width=True)
 
