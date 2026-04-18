@@ -463,6 +463,44 @@ The log accumulates across reruns within the session and is cleared only when
 the file is reloaded (`load_network` in `state.py` explicitly drops every
 `_removal_log_*` key from session state alongside `_change_log_*` keys).
 
+### Future work — remove pattern
+
+**Missing component types.** Five types visible in the Data Explorer are not
+yet in `REMOVABLE_COMPONENTS` and show no `_remove` column:
+
+| Component | Gap | Notes |
+|---|---|---|
+| `3-Winding Transformers` | Not in `REMOVABLE_COMPONENTS` | pypowsybl's `remove_elements` can remove 3WTs by id — just needs adding to `_SHALLOW_REMOVE_TYPES` and a test fixture (no standard test network contains 3WTs). |
+| `Tie Lines` | Not in `REMOVABLE_COMPONENTS` | `remove_elements` works on tie lines (verified). Needs adding to `_SHALLOW_REMOVE_TYPES`. |
+| `Busbar Sections` | Not in `REMOVABLE_COMPONENTS` | `remove_elements` works. The risk is that removing a BBS that still has connected switches or injections leaves dangling references — pypowsybl raises on this, but the UI gives no pre-flight warning. |
+| `Switches` | Not in `REMOVABLE_COMPONENTS` | `remove_elements` works for individual switches. Typically only meaningful after the equipment it protects has been removed; no cascade logic implemented. |
+| `Buses` | Not removable via API | pypowsybl's `remove_elements` does **not** recognise calculated-bus ids (bus-breaker `VL_0` style ids). Buses are implicitly removed when their voltage level is removed; there is no per-bus removal. |
+
+**No confirmation step.** The **Remove N elements** button fires immediately
+on click. For destructive container removals (Substations, Voltage Levels)
+that silently cascade to many child elements, a confirmation dialog
+(`st.dialog`) would prevent accidental data loss.
+
+**No undo / revert.** The removal log stores a pre-removal snapshot, but
+there is no "restore" button. pypowsybl's variant mechanism
+(`clone_variant` / `set_working_variant`) does **not** provide structural
+undo — variants share topology, so topology mutations (add/remove elements)
+affect all variants simultaneously. True undo would require re-serialising
+the network to XIIDM before each destructive operation and reloading from
+that byte string on demand.
+
+**Cascade summary missing.** For Substation and Voltage Level removals the
+returned `actually_removed` list includes the cascaded VL ids, but the UI
+calls `st.rerun()` immediately without displaying which child elements were
+removed as a side effect. Showing a brief cascade summary before the rerun
+(or logging it prominently in the removal log) would improve transparency.
+
+**Bus-breaker feeder-bay removal.** `pn.remove_feeder_bays` runs successfully
+on bus-breaker networks but the semantics differ: there are no bay switches
+to remove, so the function only removes the injection itself. This is correct
+behaviour but is not documented to the user, and the component table gives no
+visual indication that the topology type affects what gets deleted.
+
 ## Column priority — `PRIORITY_COLUMNS`
 
 For Generators and Loads, certain columns are moved to sit right after `name`
