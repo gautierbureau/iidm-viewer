@@ -35,6 +35,8 @@ def load_network(uploaded_file):
     st.session_state.network = network
     st.session_state.selected_vl = None
     st.session_state.pop("_map_data_cache", None)
+    for k in [k for k in st.session_state if k.startswith("_change_log_")]:
+        del st.session_state[k]
     return network
 
 
@@ -59,6 +61,8 @@ def create_empty_network(network_id: str = "network"):
     st.session_state.pop("_map_data_cache", None)
     st.session_state.pop("_vl_lookup_cache", None)
     st.session_state.pop("_last_file", None)
+    for k in [k for k in st.session_state if k.startswith("_change_log_")]:
+        del st.session_state[k]
     return network
 
 
