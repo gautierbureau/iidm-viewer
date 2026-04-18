@@ -10,6 +10,7 @@ from iidm_viewer.state import (
     run_loadflow,
 )
 from iidm_viewer.lf_parameters import show_lf_parameters_dialog
+from iidm_viewer.lf_report_dialog import show_lf_report_dialog
 from iidm_viewer.network_reduction import show_network_reduction_dialog
 from iidm_viewer.components import vl_selector
 from iidm_viewer.network_info import render_overview
@@ -84,6 +85,9 @@ with st.sidebar:
         with col_params:
             if st.button("\u2699\ufe0f", key="lf_params_btn", help="Load Flow Parameters"):
                 show_lf_parameters_dialog()
+        if st.session_state.get("_lf_report_json"):
+            if st.button("View Logs", key="lf_logs_btn", help="Load Flow Logs"):
+                show_lf_report_dialog()
 
         st.divider()
         with st.expander("Save network", expanded=False):
