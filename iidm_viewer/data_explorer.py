@@ -129,6 +129,82 @@ def _compute_changes(original: pd.DataFrame, edited: pd.DataFrame,
     return pd.DataFrame(rows)
 
 
+def _add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: pd.DataFrame):
+    """Accumulate successfully-applied cell changes into a per-component session-state log."""
+    key = f"_change_log_{method_name}"
+    log: list[dict] = list(st.session_state.get(key, []))
+
+    for element_id in changes_df.index:
+        for col in changes_df.columns:
+            new_val = changes_df.at[element_id, col]
+            try:
+                if pd.isna(new_val):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            existing = next(
+                (e for e in log if e["element_id"] == element_id and e["property"] == col),
+                None,
+            )
+            if existing is None:
+                before_val = original_df.at[element_id, col] if col in original_df.columns else None
+                log.append({
+                    "element_id": element_id,
+                    "property": col,
+                    "before": before_val,
+                    "after": new_val,
+                })
+            else:
+                existing["after"] = new_val
+                try:
+                    if existing["before"] == existing["after"]:
+                        log.remove(existing)
+                except Exception:
+                    pass
+
+    st.session_state[key] = log
+
+
+def _render_change_log(network, component: str, method_name: str):
+    """Display applied changes with individual Revert buttons below the data editor."""
+    key = f"_change_log_{method_name}"
+    log: list[dict] = st.session_state.get(key, [])
+    if not log:
+        return
+
+    n = len(log)
+    st.markdown(f"**Applied changes ({n})**")
+    hdr = st.columns([3, 2, 2, 2, 1])
+    for widget, label in zip(hdr, ["Element", "Property", "Before", "After", ""]):
+        widget.caption(label)
+
+    for i, entry in enumerate(list(log)):
+        row = st.columns([3, 2, 2, 2, 1])
+        row[0].text(str(entry["element_id"]))
+        row[1].text(entry["property"])
+        row[2].text(str(entry["before"]))
+        row[3].text(str(entry["after"]))
+        if row[4].button("Revert", key=f"revert_{method_name}_{i}"):
+            before = entry["before"]
+            if before is None or (isinstance(before, float) and pd.isna(before)):
+                st.error(
+                    f"Cannot revert {entry['property']} on {entry['element_id']}: "
+                    "original value is unavailable."
+                )
+            else:
+                revert_df = pd.DataFrame(
+                    {entry["property"]: [before]},
+                    index=pd.Index([entry["element_id"]]),
+                )
+                try:
+                    update_components(network, component, revert_df)
+                    log.pop(i)
+                    st.session_state[key] = log
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Revert failed: {e}")
+
+
 def _render_field(field: dict, key: str):
     """Render one form widget from a field spec and return its value."""
     kind = field["kind"]
@@ -1092,6 +1168,7 @@ def render_data_explorer(network, selected_vl):
                     if apply_only or apply_and_lf:
                         try:
                             update_components(network, component, changes)
+                            _add_to_change_log(method_name, changes, df)
                             st.success(
                                 f"Updated {n_changes} "
                                 f"{component.lower().rstrip('s') if n_changes == 1 else component.lower()}: "
@@ -1108,6 +1185,7 @@ def render_data_explorer(network, selected_vl):
                             st.rerun()
                         except Exception as e:
                             st.error(f"Update failed: {e}")
+                _render_change_log(network, component, method_name)
             else:
                 st.dataframe(df, use_container_width=True)
 
