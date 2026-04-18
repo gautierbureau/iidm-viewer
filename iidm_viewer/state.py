@@ -178,6 +178,65 @@ def update_components(network, component: str, changes_df):
     st.session_state.pop("_vl_lookup_cache", None)
 
 
+# Extension name -> list of columns that pypowsybl's update_extensions accepts.
+#
+# Extensions not listed here (substationPosition, position, slackTerminal, ...)
+# have immutable columns on the Java side and can only be changed by
+# remove_extensions + create_extensions. We keep those read-only for now; users
+# can still remove + recreate them via the Data Explorer Components tab.
+EDITABLE_EXTENSIONS: dict[str, list[str]] = {
+    "activePowerControl": [
+        "participate", "droop", "participation_factor",
+        "min_target_p", "max_target_p",
+    ],
+    "busbarSectionPosition": ["busbar_index", "section_index"],
+    "entsoeArea": ["code"],
+    "entsoeCategory": ["code"],
+    "hvdcAngleDroopActivePowerControl": ["droop", "p0", "enabled"],
+    "hvdcOperatorActivePowerRange": [
+        "opr_from_cs1_to_cs2", "opr_from_cs2_to_cs1",
+    ],
+    "standbyAutomaton": [
+        "standby", "b0",
+        "low_voltage_threshold", "low_voltage_setpoint",
+        "high_voltage_threshold", "high_voltage_setpoint",
+    ],
+    "voltagePerReactivePowerControl": ["slope"],
+    "voltageRegulation": [
+        "voltage_regulator_on", "target_v", "regulated_element_id",
+    ],
+}
+
+
+def update_extension(network, extension_name: str, changes_df):
+    """Apply a DataFrame of changes to an extension via ``update_extensions``.
+
+    *changes_df* is indexed by the extension's native index (usually the
+    element id) and may contain NaN for cells that didn't change. pypowsybl
+    rejects NaN values, so we group rows by their non-null column set and
+    issue one update call per group — same shape as :func:`update_components`.
+    """
+    if changes_df.empty:
+        return
+    if extension_name not in EDITABLE_EXTENSIONS:
+        raise ValueError(f"Extension {extension_name!r} is not editable.")
+    raw = object.__getattribute__(network, "_obj")
+
+    groups: dict[tuple[str, ...], list] = {}
+    for idx in changes_df.index:
+        row = changes_df.loc[idx]
+        cols = tuple(row.dropna().index.tolist())
+        groups.setdefault(cols, []).append(idx)
+
+    def _do_update():
+        for cols, ids in groups.items():
+            subset = changes_df.loc[ids, list(cols)]
+            raw.update_extensions(extension_name, subset)
+
+    run(_do_update)
+    st.session_state.pop("_vl_lookup_cache", None)
+
+
 # Component label -> creation spec. For now only node-breaker feeder-bay
 # creation is exposed; the backend handles the disconnector + breaker switches
 # internally so the user only has to pick a busbar section.

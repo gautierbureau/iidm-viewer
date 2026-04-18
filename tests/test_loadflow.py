@@ -1,7 +1,13 @@
 """Tests for load flow execution and component updates."""
 import pandas as pd
 
-from iidm_viewer.state import load_network, run_loadflow, update_components
+from iidm_viewer.state import (
+    create_extension,
+    load_network,
+    run_loadflow,
+    update_components,
+    update_extension,
+)
 
 
 def test_run_loadflow_converges(xiidm_upload):
@@ -52,3 +58,47 @@ def test_update_with_nan_columns(xiidm_upload):
     loads = network.get_loads(attributes=["p0", "q0"])
     assert loads.loc["B2-L", "p0"] == 30.0
     assert loads.loc["B3-L", "q0"] == 5.0
+
+
+def test_update_extension_changes_active_power_control(xiidm_upload):
+    """activePowerControl is one of the editable extensions; droop is updatable."""
+    network = load_network(xiidm_upload)
+    create_extension(
+        network, "activePowerControl", "B1-G",
+        {"participate": True, "droop": 4.0},
+    )
+
+    changes = pd.DataFrame(
+        {"droop": [7.5]}, index=pd.Index(["B1-G"], name="id")
+    )
+    update_extension(network, "activePowerControl", changes)
+
+    apc = network.get_extensions("activePowerControl")
+    assert apc.loc["B1-G", "droop"] == 7.5
+    # Other fields should be unchanged
+    assert bool(apc.loc["B1-G", "participate"]) is True
+
+
+def test_update_extension_ignores_nan_cells(xiidm_upload):
+    """NaN cells should be skipped so unchanged fields stay intact."""
+    network = load_network(xiidm_upload)
+    create_extension(
+        network, "activePowerControl", "B1-G",
+        {"participate": True, "droop": 4.0},
+    )
+    create_extension(
+        network, "activePowerControl", "B2-G",
+        {"participate": True, "droop": 4.0},
+    )
+
+    changes = pd.DataFrame(
+        {"droop": [10.0, float("nan")], "participate": [float("nan"), False]},
+        index=pd.Index(["B1-G", "B2-G"], name="id"),
+    )
+    update_extension(network, "activePowerControl", changes)
+
+    apc = network.get_extensions("activePowerControl")
+    assert apc.loc["B1-G", "droop"] == 10.0
+    assert bool(apc.loc["B1-G", "participate"]) is True
+    assert apc.loc["B2-G", "droop"] == 4.0
+    assert bool(apc.loc["B2-G", "participate"]) is False

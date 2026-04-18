@@ -55,8 +55,16 @@ See [data-explorer.md](data-explorer.md).
 ### Data Explorer Extensions — `extensions_explorer.render_extensions_explorer`
 
 Selectbox of all extension names (from `pn.get_extensions_names()`, cached via
-`@st.cache_data`). Shows `network.get_extensions(extension)` as a dataframe.
-Download-as-CSV button included.
+`@st.cache_data`). Shows `network.get_extensions(extension)`. When the selected
+extension is listed in `state.EDITABLE_EXTENSIONS`, the rows are rendered in a
+`st.data_editor` with the editable columns unlocked and the index / index-like
+columns read-only; an **Apply N changes** button calls `update_extension`,
+which groups rows by their non-null column set and dispatches one
+`raw.update_extensions(name, subset)` per group through the worker thread.
+Extensions whose attributes pypowsybl flags as "not modifiable" (e.g.
+`substationPosition`, `position`, `slackTerminal`) are omitted from
+`EDITABLE_EXTENSIONS` and stay in the read-only `st.dataframe` view.
+Download-as-CSV button included in both cases.
 
 ### Reactive Capability Curves — `reactive_curves.render_reactive_curves`
 
