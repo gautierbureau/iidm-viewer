@@ -173,28 +173,47 @@ EDITABLE_COMPONENTS: dict[str, tuple[str, list[str]]] = {
 }
 
 
-# Component label -> pypowsybl remove method name
-REMOVABLE_COMPONENTS: dict[str, str] = {
-    "Loads":                   "remove_load",
-    "Generators":              "remove_generator",
-    "Batteries":               "remove_battery",
-    "Shunt Compensators":      "remove_shunt_compensator",
-    "Static VAR Compensators": "remove_static_var_compensator",
-    "Lines":                   "remove_line",
-    "2-Winding Transformers":  "remove_2_windings_transformer",
-    "Dangling Lines":          "remove_dangling_line",
+# Injection types: pn.remove_feeder_bays removes the element AND its bay switches
+# (breaker + disconnectors), which is the correct deep-removal for node-breaker topology.
+_FEEDER_BAY_TYPES: frozenset[str] = frozenset({
+    "Loads",
+    "Generators",
+    "Batteries",
+    "Shunt Compensators",
+    "Static VAR Compensators",
+    "VSC Converter Stations",
+    "LCC Converter Stations",
+})
+
+# Branch/other types: individual remove_* methods (shallow; no bay-switch cascade).
+_SHALLOW_REMOVE_METHODS: dict[str, str] = {
+    "Lines":                  "remove_line",
+    "2-Winding Transformers": "remove_2_windings_transformer",
+    "Dangling Lines":         "remove_dangling_line",
 }
+
+REMOVABLE_COMPONENTS: frozenset[str] = _FEEDER_BAY_TYPES | frozenset(_SHALLOW_REMOVE_METHODS)
 
 
 def remove_components(network, component: str, ids: list[str]):
-    """Remove elements by id from the network, each called individually on the worker thread."""
-    remove_method_name = REMOVABLE_COMPONENTS[component]
+    """Remove elements from the network on the worker thread.
+
+    Injection types use pn.remove_feeder_bays so the entire bay (breaker +
+    disconnectors) is cleaned up in node-breaker topologies.  Branch types fall
+    back to their individual remove_* methods.
+    """
     raw = object.__getattribute__(network, "_obj")
 
-    def _do_remove():
-        method = getattr(raw, remove_method_name)
-        for eid in ids:
-            method(eid)
+    if component in _FEEDER_BAY_TYPES:
+        def _do_remove():
+            import pypowsybl.network as pn
+            pn.remove_feeder_bays(raw, ids)
+    else:
+        remove_method_name = _SHALLOW_REMOVE_METHODS[component]
+        def _do_remove():
+            method = getattr(raw, remove_method_name)
+            for eid in ids:
+                method(eid)
 
     run(_do_remove)
     st.session_state.pop("_vl_lookup_cache", None)
