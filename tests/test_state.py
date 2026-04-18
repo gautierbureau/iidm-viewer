@@ -21,6 +21,7 @@ from iidm_viewer.state import (
     create_hvdc_line,
     create_operational_limits,
     create_reactive_limits,
+    create_secondary_voltage_control,
     create_tap_changer,
     filter_voltage_levels,
     get_voltage_levels_df,
@@ -28,6 +29,8 @@ from iidm_viewer.state import (
     list_converter_stations,
     list_extension_candidates,
     list_extensions_for_component,
+    list_unit_candidates,
+    validate_secondary_voltage_control,
     list_node_breaker_voltage_levels,
     list_operational_limit_candidates,
     list_reactive_limit_candidates,
@@ -1419,3 +1422,118 @@ def test_create_extension_empty_target_raises(node_breaker_network):
             node_breaker_network, "substationPosition", "",
             {"latitude": 0.0, "longitude": 0.0},
         )
+
+
+# --- secondaryVoltageControl (network-level, two-dataframe extension) ---
+
+
+def _svc_zone(name="Z1", target_v=400.0, bus_ids=None):
+    return {"name": name, "target_v": target_v, "bus_ids": bus_ids or ""}
+
+
+def _svc_unit(uid, zone="Z1", participate=True):
+    return {"unit_id": uid, "zone_name": zone, "participate": participate}
+
+
+def test_list_unit_candidates_returns_units(node_breaker_network):
+    units = list_unit_candidates(node_breaker_network)
+    # Sample network has generators and an SVC
+    assert "GH1" in units
+    assert "SVC" in units
+
+
+def test_create_secondary_voltage_control_persists_to_xiidm(node_breaker_network):
+    bus = node_breaker_network.get_buses().index[0]
+    gen = node_breaker_network.get_generators().index[0]
+    create_secondary_voltage_control(
+        node_breaker_network,
+        [_svc_zone("Z1", 400.0, bus)],
+        [_svc_unit(gen, "Z1", True)],
+    )
+    # pypowsybl 1.14 has no read-back; check the XIIDM export round-trips the zone.
+    xml = node_breaker_network.save_to_string("XIIDM")
+    assert "secondaryVoltageControl" in xml
+    assert 'name="Z1"' in xml
+    assert f">{gen}<" in xml
+    assert 'targetV="400.0"' in xml
+
+
+def test_create_secondary_voltage_control_supports_multi_zone_multi_bus(node_breaker_network):
+    buses = node_breaker_network.get_buses().index.tolist()
+    gens = node_breaker_network.get_generators().index.tolist()
+    create_secondary_voltage_control(
+        node_breaker_network,
+        [
+            _svc_zone("ZA", 400.0, f"{buses[0]} {buses[1]}"),
+            _svc_zone("ZB", 380.0, buses[2]),
+        ],
+        [
+            _svc_unit(gens[0], "ZA", True),
+            _svc_unit(gens[1], "ZA", False),
+            _svc_unit(gens[2], "ZB", True),
+        ],
+    )
+    xml = node_breaker_network.save_to_string("XIIDM")
+    assert 'name="ZA"' in xml and 'name="ZB"' in xml
+    # The two-pilot zone must carry both bus ids in the pilot-point element.
+    assert f"{buses[0]} {buses[1]}" in xml
+
+
+def test_create_secondary_voltage_control_replaces_existing_definition(node_breaker_network):
+    bus = node_breaker_network.get_buses().index[0]
+    g1, g2 = node_breaker_network.get_generators().index[:2]
+    create_secondary_voltage_control(
+        node_breaker_network,
+        [_svc_zone("Z1", 400.0, bus)],
+        [_svc_unit(g1, "Z1")],
+    )
+    create_secondary_voltage_control(
+        node_breaker_network,
+        [_svc_zone("Z2", 350.0, bus)],
+        [_svc_unit(g2, "Z2")],
+    )
+    xml = node_breaker_network.save_to_string("XIIDM")
+    assert 'name="Z2"' in xml
+    assert 'name="Z1"' not in xml
+
+
+def test_validate_secondary_voltage_control_requires_zones():
+    errs = validate_secondary_voltage_control([], [])
+    assert any("At least one zone" in e for e in errs)
+
+
+def test_validate_secondary_voltage_control_flags_duplicate_zone_names():
+    errs = validate_secondary_voltage_control(
+        [_svc_zone("Z1", 400.0, "B"), _svc_zone("Z1", 380.0, "B")],
+        [],
+    )
+    assert any("duplicated" in e for e in errs)
+
+
+def test_validate_secondary_voltage_control_requires_unit_zone_to_exist():
+    errs = validate_secondary_voltage_control(
+        [_svc_zone("ZA", 400.0, "B")],
+        [_svc_unit("GEN1", "ZB")],
+    )
+    assert any("not one of the defined zones" in e for e in errs)
+
+
+def test_validate_secondary_voltage_control_requires_positive_target_v():
+    errs = validate_secondary_voltage_control(
+        [_svc_zone("Z1", 0.0, "B")],
+        [],
+    )
+    assert any("target_v must be > 0" in e for e in errs)
+
+
+def test_validate_secondary_voltage_control_requires_pilot_bus():
+    errs = validate_secondary_voltage_control(
+        [_svc_zone("Z1", 400.0, "")],
+        [],
+    )
+    assert any("pilot bus" in e for e in errs)
+
+
+def test_create_secondary_voltage_control_raises_on_validation_error(node_breaker_network):
+    with pytest.raises(ValueError, match="zone"):
+        create_secondary_voltage_control(node_breaker_network, [], [])

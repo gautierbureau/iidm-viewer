@@ -362,6 +362,30 @@ or ``element_id``; ``activePowerControl`` requires
 1.14's writer raises an internal error when populating its multi-row
 ``(id, num)`` layout. The read-only viewer continues to expose it.
 
+## Secondary voltage control — `create_secondary_voltage_control`
+
+`secondaryVoltageControl` is a *network-level* extension with two
+DataFrames (zones + units), so it doesn't fit the single-row
+``CREATABLE_EXTENSIONS`` registry. It has its own helper and form.
+
+The form (`_render_secondary_voltage_control_form`) appears under the
+Voltage Levels view and contains two `st.data_editor(num_rows="dynamic")`
+tables inside one `st.form`:
+
+- **Zones** — `name`, `target_v` (kV), `bus_ids` (space-separated list
+  of pilot-point bus ids when a zone has several).
+- **Control units** — `unit_id` (generator / battery / SVC),
+  `zone_name` (must match a zone defined above), `participate` (bool).
+
+`create_secondary_voltage_control(network, zones, units)` validates
+(non-empty zones, unique names, unit zone references exist, positive
+``target_v``, non-empty pilot bus ids) and submits both DataFrames in a
+single `network.create_extensions("secondaryVoltageControl", [zones_df,
+units_df])` call. **Replace semantics**: pypowsybl replaces the whole
+SVC definition on each write — so the form always submits the full
+list. pypowsybl 1.14 has no view adapter for reading it back via
+`get_extensions`, but the data persists in the XIIDM export.
+
 ## Column priority — `PRIORITY_COLUMNS`
 
 For Generators and Loads, certain columns are moved to sit right after `name`
