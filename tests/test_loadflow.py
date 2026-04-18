@@ -1,5 +1,8 @@
 """Tests for load flow execution and component updates."""
+import json
+
 import pandas as pd
+import streamlit as st
 
 from iidm_viewer.state import (
     create_extension,
@@ -102,3 +105,40 @@ def test_update_extension_ignores_nan_cells(xiidm_upload):
     assert bool(apc.loc["B1-G", "participate"]) is True
     assert apc.loc["B2-G", "droop"] == 4.0
     assert bool(apc.loc["B2-G", "participate"]) is False
+
+
+# ---------------------------------------------------------------------------
+# ReportNode JSON captured in session_state
+# ---------------------------------------------------------------------------
+
+def test_run_loadflow_stores_report_json(xiidm_upload):
+    network = load_network(xiidm_upload)
+    run_loadflow(network)
+    assert "_lf_report_json" in st.session_state
+    assert st.session_state["_lf_report_json"] is not None
+
+
+def test_run_loadflow_report_json_is_valid_json(xiidm_upload):
+    network = load_network(xiidm_upload)
+    run_loadflow(network)
+    data = json.loads(st.session_state["_lf_report_json"])
+    assert "version" in data
+    assert "dictionaries" in data
+    assert "reportRoot" in data
+
+
+def test_run_loadflow_report_contains_loadflow_node(xiidm_upload):
+    network = load_network(xiidm_upload)
+    run_loadflow(network)
+    data = json.loads(st.session_state["_lf_report_json"])
+    children = data["reportRoot"].get("children", [])
+    assert any("loadFlow" in c.get("messageKey", "") for c in children)
+
+
+def test_run_loadflow_report_json_replaced_on_subsequent_run(xiidm_upload):
+    network = load_network(xiidm_upload)
+    run_loadflow(network)
+    run_loadflow(network)
+    # Second run must still produce valid, non-empty JSON
+    data = json.loads(st.session_state["_lf_report_json"])
+    assert "reportRoot" in data
