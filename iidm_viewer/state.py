@@ -81,7 +81,7 @@ def load_network(uploaded_file):
     st.session_state.pop("_map_data_cache", None)
     st.session_state.pop("_export_bytes", None)
     st.session_state.pop("_export_fmt", None)
-    for k in [k for k in st.session_state if k.startswith("_change_log_")]:
+    for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_")]:
         del st.session_state[k]
     return network
 
@@ -109,7 +109,7 @@ def create_empty_network(network_id: str = "network"):
     st.session_state.pop("_last_file", None)
     st.session_state.pop("_export_bytes", None)
     st.session_state.pop("_export_fmt", None)
-    for k in [k for k in st.session_state if k.startswith("_change_log_")]:
+    for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_")]:
         del st.session_state[k]
     return network
 
@@ -171,6 +171,33 @@ EDITABLE_COMPONENTS: dict[str, tuple[str, list[str]]] = {
         ["r", "x", "g", "b", "connected1", "connected2"],
     ),
 }
+
+
+# Component label -> pypowsybl remove method name
+REMOVABLE_COMPONENTS: dict[str, str] = {
+    "Loads":                   "remove_load",
+    "Generators":              "remove_generator",
+    "Batteries":               "remove_battery",
+    "Shunt Compensators":      "remove_shunt_compensator",
+    "Static VAR Compensators": "remove_static_var_compensator",
+    "Lines":                   "remove_line",
+    "2-Winding Transformers":  "remove_2_windings_transformer",
+    "Dangling Lines":          "remove_dangling_line",
+}
+
+
+def remove_components(network, component: str, ids: list[str]):
+    """Remove elements by id from the network, each called individually on the worker thread."""
+    remove_method_name = REMOVABLE_COMPONENTS[component]
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_remove():
+        method = getattr(raw, remove_method_name)
+        for eid in ids:
+            method(eid)
+
+    run(_do_remove)
+    st.session_state.pop("_vl_lookup_cache", None)
 
 
 def update_components(network, component: str, changes_df):
