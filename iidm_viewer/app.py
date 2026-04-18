@@ -10,6 +10,7 @@ from iidm_viewer.state import (
     run_loadflow,
 )
 from iidm_viewer.lf_parameters import show_lf_parameters_dialog
+from iidm_viewer.network_reduction import show_network_reduction_dialog
 from iidm_viewer.components import vl_selector
 from iidm_viewer.network_info import render_overview
 from iidm_viewer.diagrams import render_nad_tab, render_sld_tab
@@ -64,6 +65,9 @@ with st.sidebar:
 
     selected_vl = None
     if network is not None:
+        st.divider()
+        if st.button("Network Reduction", key="network_reduction_btn", use_container_width=True):
+            show_network_reduction_dialog()
         st.divider()
         selected_vl = vl_selector(network)
         st.divider()
