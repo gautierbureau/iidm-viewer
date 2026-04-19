@@ -22,6 +22,13 @@ def vl_selector(network):
     if current in options:
         index = options.index(current)
 
+    # Sync the selectbox's widget state with selected_vl *before* the
+    # widget is instantiated. Without this, a NAD/SLD click that writes
+    # selected_vl from the tab callback is clobbered on the next rerun
+    # because the sidebar runs first and the stale widget state wins.
+    if current in options and st.session_state.get("vl_selectbox") != current:
+        st.session_state.vl_selectbox = current
+
     selected = st.selectbox(
         "Voltage Level",
         options=options,
