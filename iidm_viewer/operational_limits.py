@@ -202,7 +202,8 @@ def _get_filtered_element_ids(network, selected_vl) -> set[str]:
                         df = vl_subset
 
         filter_cols = FILTERS.get(component, [])
-        df = render_filters(df, filter_cols, key_prefix=f"lim_flt_{component}")
+        df = render_filters(df, filter_cols, key_prefix=f"lim_flt_{component}",
+                            label=f"Filter {component}")
         all_ids.update(df.index.tolist())
 
     return all_ids

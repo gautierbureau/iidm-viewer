@@ -93,7 +93,7 @@ def enrich_with_joins(df: pd.DataFrame, vl_lookup: pd.DataFrame) -> pd.DataFrame
     return out
 
 
-def render_filters(df: pd.DataFrame, columns: list[str], key_prefix: str) -> pd.DataFrame:
+def render_filters(df: pd.DataFrame, columns: list[str], key_prefix: str, label: str = "Filters") -> pd.DataFrame:
     """Render a filter widget per whitelisted column and return the narrowed df.
 
     Numeric → range slider. Bool → Any/True/False. Low-cardinality object →
@@ -104,7 +104,7 @@ def render_filters(df: pd.DataFrame, columns: list[str], key_prefix: str) -> pd.
         return df
 
     mask = pd.Series(True, index=df.index)
-    with st.expander("Filters", expanded=False):
+    with st.expander(label, expanded=False):
         for col in available:
             series = df[col]
             dtype = series.dtype
