@@ -66,6 +66,8 @@ def _build_vl_country_map(network) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=["voltage_level_id", "country"])
     subs = subs.rename(columns={"id": "substation_id"})
+    vls["substation_id"] = vls["substation_id"].astype(str)
+    subs["substation_id"] = subs["substation_id"].astype(str)
     merged = vls.merge(subs, on="substation_id", how="left")
     return merged.rename(columns={"id": "voltage_level_id"})[
         ["voltage_level_id", "country"]

@@ -49,6 +49,8 @@ def build_vl_lookup(network) -> pd.DataFrame:
             .reset_index()
             .rename(columns={"id": "substation_id"})
         )
+        vls["substation_id"] = vls["substation_id"].astype(str)
+        subs["substation_id"] = subs["substation_id"].astype(str)
         cache["id"] = net_id
         cache["df"] = vls.merge(subs, on="substation_id", how="left")
     return cache["df"]
