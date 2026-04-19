@@ -201,24 +201,23 @@ def render_overview(network):
     col3.metric("Format", network.source_format)
     col4.metric("Case Date", str(network.case_date.date()) if network.case_date else "-")
 
-    st.subheader("Element Counts")
-    counts = {}
-    for label, method in COMPONENT_TYPES.items():
-        try:
-            df = getattr(network, method)()
-            count = len(df)
-            if count > 0:
-                counts[label] = count
-        except Exception:
-            pass
-
-    if counts:
-        counts_df = pd.DataFrame(
-            {"Component": counts.keys(), "Count": counts.values()}
-        )
-        cols = st.columns(4)
-        for i, (label, count) in enumerate(counts.items()):
-            cols[i % 4].metric(label, count)
+    st.subheader("Generation and Consumption by Country")
+    country_df = _country_totals(network)
+    if country_df.empty:
+        st.info("No generation or consumption data available.")
+    else:
+        display = country_df.copy()
+        for col in ("generation_target_mw", "generation_actual_mw",
+                    "consumption_target_mw", "consumption_actual_mw"):
+            display[col] = display[col].round(2)
+        display.columns = [
+            "Country",
+            "Gen target (MW)", "Gen actual (MW)",
+            "Load target (MW)", "Load actual (MW)",
+        ]
+        if display[["Gen actual (MW)", "Load actual (MW)"]].isna().all(axis=None):
+            st.caption("Actual values populate once a load flow has run.")
+        st.dataframe(display, use_container_width=True, hide_index=True)
 
     st.subheader("Network Losses")
     losses = _branch_losses_totals(network)
@@ -237,20 +236,20 @@ def render_overview(network):
             st.caption("Losses by country — cross-border branches split 50/50.")
             st.dataframe(losses_df, use_container_width=True, hide_index=True)
 
-    st.subheader("Generation and Consumption by Country")
-    country_df = _country_totals(network)
-    if country_df.empty:
-        st.info("No generation or consumption data available.")
-    else:
-        display = country_df.copy()
-        for col in ("generation_target_mw", "generation_actual_mw",
-                    "consumption_target_mw", "consumption_actual_mw"):
-            display[col] = display[col].round(2)
-        display.columns = [
-            "Country",
-            "Gen target (MW)", "Gen actual (MW)",
-            "Load target (MW)", "Load actual (MW)",
-        ]
-        if display[["Gen actual (MW)", "Load actual (MW)"]].isna().all(axis=None):
-            st.caption("Actual values populate once a load flow has run.")
-        st.dataframe(display, use_container_width=True, hide_index=True)
+    with st.expander("Component statistics", expanded=False):
+        counts = {}
+        for label, method in COMPONENT_TYPES.items():
+            try:
+                df = getattr(network, method)()
+                count = len(df)
+                if count > 0:
+                    counts[label] = count
+            except Exception:
+                pass
+
+        if counts:
+            cols = st.columns(4)
+            for i, (label, count) in enumerate(counts.items()):
+                cols[i % 4].metric(label, count)
+        else:
+            st.info("No components found in this network.")
