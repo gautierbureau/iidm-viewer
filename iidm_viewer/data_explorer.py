@@ -1096,31 +1096,45 @@ def render_data_explorer(network, selected_vl):
 
     method_name = COMPONENT_TYPES[component]
 
-    if component in CREATABLE_COMPONENTS:
-        _render_create_component_form(network, component)
-    elif component in CREATABLE_BRANCHES:
-        _render_create_branch_form(network, component)
-        if component == "2-Winding Transformers":
-            _render_create_tap_changer_form(network)
-    elif component in CREATABLE_CONTAINERS:
-        _render_create_container_form(network, component)
+    _has_creation = (
+        component in CREATABLE_COMPONENTS
+        or component in CREATABLE_BRANCHES
+        or component in CREATABLE_CONTAINERS
+        or component in ("Switches", "HVDC Lines", "Voltage Levels")
+        or component in REACTIVE_LIMITS_TARGETS
+        or component in OPERATIONAL_LIMITS_TARGETS
+        or bool(list_extensions_for_component(component))
+    )
 
-    if component == "Switches":
-        _render_create_coupling_device_form(network)
+    if _has_creation:
+        with st.container(border=True):
+            st.caption(f"Create / attach — {component}")
 
-    if component == "HVDC Lines":
-        _render_create_hvdc_line_form(network)
+            if component in CREATABLE_COMPONENTS:
+                _render_create_component_form(network, component)
+            elif component in CREATABLE_BRANCHES:
+                _render_create_branch_form(network, component)
+                if component == "2-Winding Transformers":
+                    _render_create_tap_changer_form(network)
+            elif component in CREATABLE_CONTAINERS:
+                _render_create_container_form(network, component)
 
-    if component in REACTIVE_LIMITS_TARGETS:
-        _render_create_reactive_limits_form(network, component)
+            if component == "Switches":
+                _render_create_coupling_device_form(network)
 
-    if component in OPERATIONAL_LIMITS_TARGETS:
-        _render_create_operational_limits_form(network, component)
+            if component == "HVDC Lines":
+                _render_create_hvdc_line_form(network)
 
-    _render_create_extension_form(network, component)
+            if component in REACTIVE_LIMITS_TARGETS:
+                _render_create_reactive_limits_form(network, component)
 
-    if component == "Voltage Levels":
-        _render_secondary_voltage_control_form(network)
+            if component in OPERATIONAL_LIMITS_TARGETS:
+                _render_create_operational_limits_form(network, component)
+
+            _render_create_extension_form(network, component)
+
+            if component == "Voltage Levels":
+                _render_secondary_voltage_control_form(network)
 
     filter_by_vl = False
     if component in VL_FILTERABLE and selected_vl:
