@@ -81,7 +81,7 @@ def load_network(uploaded_file):
     st.session_state.pop("_map_data_cache", None)
     st.session_state.pop("_export_bytes", None)
     st.session_state.pop("_export_fmt", None)
-    for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_")]:
+    for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_")]:
         del st.session_state[k]
     return network
 
@@ -109,7 +109,7 @@ def create_empty_network(network_id: str = "network"):
     st.session_state.pop("_last_file", None)
     st.session_state.pop("_export_bytes", None)
     st.session_state.pop("_export_fmt", None)
-    for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_")]:
+    for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_")]:
         del st.session_state[k]
     return network
 
@@ -390,6 +390,17 @@ EDITABLE_EXTENSIONS: dict[str, list[str]] = {
         "voltage_regulator_on", "target_v", "regulated_element_id",
     ],
 }
+
+
+def remove_extension(network, extension_name: str, ids: list):
+    """Remove extension rows from the network on the worker thread."""
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_remove():
+        raw.remove_extensions(extension_name, ids)
+
+    run(_do_remove)
+    st.session_state.pop("_vl_lookup_cache", None)
 
 
 def update_extension(network, extension_name: str, changes_df):
