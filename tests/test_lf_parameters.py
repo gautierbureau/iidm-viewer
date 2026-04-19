@@ -177,3 +177,145 @@ def test_get_lf_parameters_returns_both_when_both_stored():
 
     assert generic == g
     assert provider == p
+
+
+# ---------------------------------------------------------------------------
+# _get_provider_params_info — exercises inner _fetch closure (lines 11-12)
+# ---------------------------------------------------------------------------
+
+
+def test_get_provider_params_info_real_fetch_exercises_closure():
+    """Calling without patching run() executes the inner _fetch body (lines 11-12)."""
+    from iidm_viewer.lf_parameters import _get_provider_params_info
+
+    with patch("iidm_viewer.lf_parameters.st") as mock_st:
+        mock_st.session_state = {}
+        result = _get_provider_params_info()
+
+    assert not result.empty
+    assert "type" in result.columns
+
+
+# ---------------------------------------------------------------------------
+# _render_generic_tab (lines 61-82)
+# ---------------------------------------------------------------------------
+
+
+def test_render_generic_tab_returns_all_param_names():
+    """Every param in _GENERIC_PARAMS appears as a key in the returned dict."""
+    from iidm_viewer.lf_parameters import _render_generic_tab, _GENERIC_PARAMS
+
+    with patch("iidm_viewer.lf_parameters.st") as mock_st:
+        mock_st.session_state = {}
+        mock_st.checkbox.return_value = True
+        mock_st.selectbox.return_value = "UNIFORM_VALUES"
+        mock_st.number_input.return_value = 1.0
+        result = _render_generic_tab()
+
+    expected = {p[0] for p in _GENERIC_PARAMS}
+    assert set(result.keys()) == expected
+
+
+def test_render_generic_tab_uses_correct_widget_per_type():
+    """bool → checkbox, enum → selectbox, float → number_input."""
+    from iidm_viewer.lf_parameters import _render_generic_tab, _GENERIC_PARAMS
+
+    bool_names = {p[0] for p in _GENERIC_PARAMS if p[1] == "bool"}
+    enum_names = {p[0] for p in _GENERIC_PARAMS if p[1] == "enum"}
+    float_names = {p[0] for p in _GENERIC_PARAMS if p[1] == "float"}
+
+    with patch("iidm_viewer.lf_parameters.st") as mock_st:
+        mock_st.session_state = {}
+        mock_st.checkbox.return_value = False
+        mock_st.selectbox.return_value = "UNIFORM_VALUES"
+        mock_st.number_input.return_value = 0.0
+        _render_generic_tab()
+
+    assert mock_st.checkbox.call_count == len(bool_names)
+    assert mock_st.selectbox.call_count == len(enum_names)
+    assert mock_st.number_input.call_count == len(float_names)
+
+
+# ---------------------------------------------------------------------------
+# _render_provider_tab (lines 87-155)
+# ---------------------------------------------------------------------------
+
+
+def _provider_info_df():
+    """Minimal provider params DataFrame covering all widget type branches."""
+    return pd.DataFrame(
+        {
+            "type": ["BOOLEAN", "INTEGER", "DOUBLE", "STRING", "STRING", "STRING"],
+            "default": ["true", "10", "1.0", "VAL1", "text", "other"],
+            "description": ["d1", "d2", "d3", "d4", "d5", "d6"],
+            "category_key": ["cat"] * 6,
+            "possible_values": [
+                None, None, None,
+                "[VAL1, VAL2]",  # enum-like string list → selectbox
+                "",              # empty string → no options → text_input
+                None,            # None → else branch → text_input
+            ],
+        },
+        index=["boolP", "intP", "dblP", "enumP", "strP1", "strP2"],
+    )
+
+
+def test_render_provider_tab_calls_correct_widgets():
+    """BOOLEAN→checkbox, INTEGER→number_input(step=1), DOUBLE→number_input(%g),
+    STRING with options→selectbox, STRING without options→text_input."""
+    from iidm_viewer.lf_parameters import _render_provider_tab
+
+    expander_cm = MagicMock()
+    expander_cm.__enter__ = MagicMock(return_value=None)
+    expander_cm.__exit__ = MagicMock(return_value=False)
+
+    with patch("iidm_viewer.lf_parameters.st") as mock_st, \
+         patch("iidm_viewer.lf_parameters._get_provider_params_info",
+               return_value=_provider_info_df()):
+        mock_st.session_state = {}
+        mock_st.expander.return_value = expander_cm
+        mock_st.checkbox.return_value = True
+        mock_st.number_input.return_value = 1
+        mock_st.selectbox.return_value = "VAL1"
+        mock_st.text_input.return_value = "x"
+        result = _render_provider_tab()
+
+    assert "boolP" in result    # BOOLEAN → checkbox
+    assert "intP" in result     # INTEGER → number_input
+    assert "dblP" in result     # DOUBLE  → number_input
+    assert "enumP" in result    # STRING  → selectbox (has options)
+    assert "strP1" in result    # STRING  → text_input (empty possible_values)
+    assert "strP2" in result    # STRING/None → else → text_input
+    assert mock_st.checkbox.call_count == 1
+    assert mock_st.selectbox.call_count == 1
+    assert mock_st.text_input.call_count == 2
+
+
+def test_render_provider_tab_iterable_possible_values():
+    """STRING param with a list possible_values (non-string iterable) → selectbox."""
+    from iidm_viewer.lf_parameters import _render_provider_tab
+
+    info_df = pd.DataFrame(
+        {
+            "type": ["STRING"],
+            "default": ["A"],
+            "description": ["d1"],
+            "category_key": ["cat"],
+            "possible_values": [["A", "B"]],  # list, not a bracketed string
+        },
+        index=["listP"],
+    )
+
+    expander_cm = MagicMock()
+    expander_cm.__enter__ = MagicMock(return_value=None)
+    expander_cm.__exit__ = MagicMock(return_value=False)
+
+    with patch("iidm_viewer.lf_parameters.st") as mock_st, \
+         patch("iidm_viewer.lf_parameters._get_provider_params_info",
+               return_value=info_df):
+        mock_st.session_state = {}
+        mock_st.expander.return_value = expander_cm
+        mock_st.selectbox.return_value = "A"
+        _render_provider_tab()
+
+    mock_st.selectbox.assert_called_once()

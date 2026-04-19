@@ -329,3 +329,60 @@ def test_sample_report_leaf_message():
 def test_sample_report_subtree_max_is_info():
     root = _SAMPLE_REPORT["reportRoot"]
     assert _subtree_max_severity_level(root) == _SEVERITY_ORDER["INFO"]
+
+
+# ---------------------------------------------------------------------------
+# show_lf_report_dialog body — accessed via __wrapped__ (functools.wraps)
+# ---------------------------------------------------------------------------
+
+
+def _dialog_inner():
+    from iidm_viewer.lf_report_dialog import show_lf_report_dialog
+    inner = getattr(show_lf_report_dialog, "__wrapped__", None)
+    if inner is None:
+        pytest.skip("@st.dialog does not expose __wrapped__")
+    return inner
+
+
+class TestDialogBody:
+    def test_no_report_in_session_state_shows_info(self):
+        """Lines 60-63: missing report_json → st.info and return."""
+        inner = _dialog_inner()
+        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
+            mock_st.session_state = {}
+            inner()
+            mock_st.info.assert_called_once()
+
+    def test_invalid_json_shows_error(self):
+        """Lines 65-69: JSON parse failure → st.error and return."""
+        inner = _dialog_inner()
+        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
+            mock_st.session_state = {"_lf_report_json": "{not valid json"}
+            inner()
+            mock_st.error.assert_called_once()
+
+    def test_empty_severity_selection_shows_warning(self):
+        """Lines 81-83: no severity selected → st.warning and return."""
+        inner = _dialog_inner()
+        report_json = json.dumps({"dictionaries": {}, "reportRoot": {}})
+        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
+            mock_st.session_state = {"_lf_report_json": report_json}
+            mock_st.multiselect.return_value = []
+            inner()
+            mock_st.warning.assert_called_once()
+
+    def test_valid_report_renders_divider_and_tree(self):
+        """Lines 85-89: valid JSON + severity → st.divider called."""
+        inner = _dialog_inner()
+        report = {
+            "dictionaries": {"default": {"k": "Hello"}},
+            "reportRoot": {
+                "messageKey": "k",
+                "children": [{"messageKey": "k", "values": {}}],
+            },
+        }
+        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
+            mock_st.session_state = {"_lf_report_json": json.dumps(report)}
+            mock_st.multiselect.return_value = ["INFO"]
+            inner()
+            mock_st.divider.assert_called_once()
