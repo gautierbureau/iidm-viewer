@@ -73,8 +73,11 @@ let overlay: MapboxOverlay | null = null;
 let legendEl: HTMLDivElement | null = null;
 let tooltipEl: HTMLDivElement | null = null;
 
-function sendParent(msg: unknown): void {
-  window.parent.postMessage(msg, '*');
+function sendParent(msg: Record<string, unknown>): void {
+  // Streamlit drops any postMessage whose payload lacks the
+  // `isStreamlitMessage` marker (checked via Object.hasOwn), so the
+  // iframe handshake never completes without it.
+  window.parent.postMessage({ isStreamlitMessage: true, ...msg }, '*');
 }
 
 function setFrameHeight(h: number): void {

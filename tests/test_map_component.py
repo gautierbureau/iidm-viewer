@@ -84,6 +84,9 @@ def test_bundle_wires_streamlit_protocol_and_library():
         "streamlit:componentReady",
         "streamlit:render",
         "streamlit:setFrameHeight",
+        # Required marker — Streamlit drops any postMessage whose payload
+        # omits it, breaking the iframe handshake.
+        "isStreamlitMessage",
         "tile.openstreetmap.org",
         "OpenStreetMap",
         "nominalV",
