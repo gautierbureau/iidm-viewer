@@ -1,4 +1,7 @@
 """Tests for iidm_viewer.lf_parameters."""
+import pandas as pd
+from unittest.mock import patch, MagicMock
+
 from iidm_viewer.lf_parameters import _GENERIC_PARAMS
 from iidm_viewer.powsybl_worker import run
 
@@ -57,3 +60,120 @@ def test_dc_approximation_type_has_options():
     pv = row["possible_values"]
     assert "IGNORE_R" in pv
     assert "IGNORE_G" in pv
+
+
+# ---------------------------------------------------------------------------
+# _get_provider_params_info — session-state caching
+# ---------------------------------------------------------------------------
+
+
+def _fake_params_df():
+    return pd.DataFrame(
+        {"type": ["BOOLEAN", "INTEGER"], "default": ["true", "10"],
+         "description": ["a bool", "an int"], "category_key": ["cat", "cat"],
+         "possible_values": [None, None]},
+        index=["flagParam", "sizeParam"],
+    )
+
+
+def test_get_provider_params_info_fetches_when_cache_empty():
+    """When _lf_provider_info is absent from session state, run() is called once."""
+    from iidm_viewer.lf_parameters import _get_provider_params_info
+
+    mock_df = _fake_params_df()
+    with patch("iidm_viewer.lf_parameters.st") as mock_st:
+        mock_st.session_state = {}
+        with patch("iidm_viewer.lf_parameters.run", return_value=mock_df):
+            result = _get_provider_params_info()
+
+    assert result is mock_df
+    assert mock_st.session_state["_lf_provider_info"]["df"] is mock_df
+
+
+def test_get_provider_params_info_returns_cached_df():
+    """When the cache is already populated, run() must NOT be called."""
+    from iidm_viewer.lf_parameters import _get_provider_params_info
+
+    cached_df = _fake_params_df()
+    with patch("iidm_viewer.lf_parameters.st") as mock_st:
+        mock_st.session_state = {"_lf_provider_info": {"df": cached_df}}
+        with patch("iidm_viewer.lf_parameters.run") as mock_run:
+            result = _get_provider_params_info()
+            mock_run.assert_not_called()
+
+    assert result is cached_df
+
+
+def test_get_provider_params_info_populates_cache_for_subsequent_calls():
+    """A second call inside the same session_state dict uses the cached value."""
+    from iidm_viewer.lf_parameters import _get_provider_params_info
+
+    mock_df = _fake_params_df()
+    call_count = 0
+
+    def _run(fn):
+        nonlocal call_count
+        call_count += 1
+        return mock_df
+
+    fake_state = {}
+    with patch("iidm_viewer.lf_parameters.st") as mock_st:
+        mock_st.session_state = fake_state
+        with patch("iidm_viewer.lf_parameters.run", side_effect=_run):
+            _get_provider_params_info()
+            _get_provider_params_info()
+
+    assert call_count == 1  # only fetched once
+
+
+# ---------------------------------------------------------------------------
+# get_lf_parameters — session-state read
+# ---------------------------------------------------------------------------
+
+
+def test_get_lf_parameters_returns_empty_dicts_when_nothing_stored():
+    from iidm_viewer.lf_parameters import get_lf_parameters
+
+    with patch("iidm_viewer.lf_parameters.st") as mock_st:
+        mock_st.session_state = {}
+        generic, provider = get_lf_parameters()
+
+    assert generic == {}
+    assert provider == {}
+
+
+def test_get_lf_parameters_returns_stored_generic_params():
+    from iidm_viewer.lf_parameters import get_lf_parameters
+
+    stored = {"distributed_slack": False, "balance_type": "PROPORTIONAL_TO_LOAD"}
+    with patch("iidm_viewer.lf_parameters.st") as mock_st:
+        mock_st.session_state = {"_lf_generic_params": stored}
+        generic, provider = get_lf_parameters()
+
+    assert generic == stored
+    assert provider == {}
+
+
+def test_get_lf_parameters_returns_stored_provider_params():
+    from iidm_viewer.lf_parameters import get_lf_parameters
+
+    stored_provider = {"maxNewtonIterations": 15}
+    with patch("iidm_viewer.lf_parameters.st") as mock_st:
+        mock_st.session_state = {"_lf_provider_params": stored_provider}
+        generic, provider = get_lf_parameters()
+
+    assert generic == {}
+    assert provider == stored_provider
+
+
+def test_get_lf_parameters_returns_both_when_both_stored():
+    from iidm_viewer.lf_parameters import get_lf_parameters
+
+    g = {"distributed_slack": True}
+    p = {"maxNewtonIterations": 5}
+    with patch("iidm_viewer.lf_parameters.st") as mock_st:
+        mock_st.session_state = {"_lf_generic_params": g, "_lf_provider_params": p}
+        generic, provider = get_lf_parameters()
+
+    assert generic == g
+    assert provider == p

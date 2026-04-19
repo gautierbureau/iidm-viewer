@@ -189,6 +189,26 @@ def test_add_to_ext_change_log_skips_nan_new_values():
     assert log == []
 
 
+def test_add_to_ext_change_log_handles_nonscalar_that_raises_in_isna():
+    """When pd.isna(value) raises TypeError (e.g. for a list), the value is
+    treated as non-NaN and the entry is recorded — covers the except branch."""
+    from iidm_viewer.extensions_explorer import _add_to_ext_change_log
+
+    # pd.isna([1, 2]) returns an array; using it in a boolean context raises
+    # ValueError, which triggers the except (TypeError, ValueError): pass branch.
+    orig = pd.DataFrame({"code": [None]}, index=pd.Index(["S1"]))
+    changes = pd.DataFrame({"code": [[1, 2]]}, index=pd.Index(["S1"]))
+
+    fake_state = {}
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+        _add_to_ext_change_log("entsoeArea", changes, orig)
+
+    log = fake_state.get("_ext_change_log_entsoeArea", [])
+    # The list value is non-NaN so an entry must have been created
+    assert len(log) == 1
+    assert log[0]["element_id"] == "S1"
+
+
 def test_add_to_ext_change_log_multiple_properties_and_elements():
     from iidm_viewer.extensions_explorer import _add_to_ext_change_log
 
