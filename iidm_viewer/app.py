@@ -37,10 +37,13 @@ if _qp_vl and st.session_state.get("selected_vl") != _qp_vl:
 with st.sidebar:
     st.title("IIDM Viewer")
 
+    if "file_uploader_gen" not in st.session_state:
+        st.session_state["file_uploader_gen"] = 0
+
     uploaded = st.file_uploader(
         "Load a network file",
         type=get_import_extensions(),
-        key="file_uploader",
+        key=f"file_uploader_{st.session_state['file_uploader_gen']}",
     )
 
     if uploaded is not None:
@@ -60,6 +63,9 @@ with st.sidebar:
         )
         if st.button("Create blank network", key="blank_network_btn"):
             create_empty_network(blank_id)
+            # Bump the uploader key so Streamlit discards the old file and
+            # doesn't re-load it over the blank network on the next rerun.
+            st.session_state["file_uploader_gen"] += 1
             st.rerun()
 
     network = get_network()
