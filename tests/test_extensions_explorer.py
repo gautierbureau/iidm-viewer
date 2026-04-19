@@ -2,7 +2,7 @@
 import pandas as pd
 import pytest
 from contextlib import contextmanager
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from streamlit.testing.v1 import AppTest
 
 from iidm_viewer.state import create_extension, load_network
@@ -417,6 +417,162 @@ def test_create_empty_network_clears_ext_logs():
         remaining_removal = [k for k in mock_st.session_state if k.startswith("_ext_removal_log_")]
         assert remaining_change == []
         assert remaining_removal == []
+
+
+# ---------------------------------------------------------------------------
+# Existing structural tests
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# _add_to_ext_change_log — exception in before==after comparison (lines 62-63)
+# ---------------------------------------------------------------------------
+
+
+def test_add_to_ext_change_log_handles_exception_in_before_after_comparison():
+    """Lines 62-63: when existing['before'] == existing['after'] raises (e.g.
+    because the value is a numpy array), the exception is swallowed and the
+    log entry is kept."""
+    import numpy as np
+    from iidm_viewer.extensions_explorer import _add_to_ext_change_log
+
+    # First call: creates a normal entry {before: 4.0, after: 6.0}
+    orig = pd.DataFrame({"droop": [4.0]}, index=pd.Index(["G1"]))
+    changes1 = pd.DataFrame({"droop": [6.0]}, index=pd.Index(["G1"]))
+    # Second call: tries to set after=array; 4.0 == array raises ValueError
+    changes2 = pd.DataFrame({"droop": [np.array([1, 2])]}, index=pd.Index(["G1"]))
+
+    fake_state = {}
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+        _add_to_ext_change_log("myExt", changes1, orig)
+        _add_to_ext_change_log("myExt", changes2, orig)
+
+    log = fake_state.get("_ext_change_log_myExt", [])
+    assert len(log) == 1  # entry stays because comparison raised
+
+
+# ---------------------------------------------------------------------------
+# _render_ext_change_log (lines 74-104)
+# ---------------------------------------------------------------------------
+
+
+def _col_mocks(revert_clicked=False):
+    cols = [MagicMock() for _ in range(5)]
+    cols[4].button.return_value = revert_clicked
+    return cols
+
+
+def test_render_ext_change_log_non_empty_renders_header_and_rows():
+    """Lines 74-86: markdown header + column headers + row text rendered."""
+    from iidm_viewer.extensions_explorer import _render_ext_change_log
+
+    log = [{"element_id": "G1", "property": "droop", "before": 4.0, "after": 6.0}]
+    cols = _col_mocks(revert_clicked=False)
+
+    with patch("iidm_viewer.extensions_explorer.st") as mock_st:
+        mock_st.session_state = {"_ext_change_log_myExt": log}
+        mock_st.columns.return_value = cols
+        _render_ext_change_log(MagicMock(), "myExt")
+
+    mock_st.markdown.assert_called()
+    cols[0].text.assert_called_with("G1")
+    cols[1].text.assert_called_with("droop")
+
+
+def test_render_ext_change_log_revert_with_none_before_shows_error():
+    """Lines 87-92: before=None → st.error (cannot revert)."""
+    from iidm_viewer.extensions_explorer import _render_ext_change_log
+
+    log = [{"element_id": "G1", "property": "droop", "before": None, "after": 6.0}]
+    cols = _col_mocks(revert_clicked=True)
+
+    with patch("iidm_viewer.extensions_explorer.st") as mock_st:
+        mock_st.session_state = {"_ext_change_log_myExt": list(log)}
+        mock_st.columns.return_value = cols
+        _render_ext_change_log(MagicMock(), "myExt")
+
+    mock_st.error.assert_called_once()
+
+
+def test_render_ext_change_log_revert_success_calls_update_and_rerun():
+    """Lines 93-102: valid before → update_extension called, rerun triggered."""
+    from iidm_viewer.extensions_explorer import _render_ext_change_log
+
+    log = [{"element_id": "G1", "property": "droop", "before": 4.0, "after": 6.0}]
+    cols = _col_mocks(revert_clicked=True)
+
+    with patch("iidm_viewer.extensions_explorer.st") as mock_st, \
+         patch("iidm_viewer.extensions_explorer.update_extension") as mock_upd:
+        mock_st.session_state = {"_ext_change_log_myExt": list(log)}
+        mock_st.columns.return_value = cols
+        _render_ext_change_log(MagicMock(), "myExt")
+
+    mock_upd.assert_called_once()
+    mock_st.rerun.assert_called_once()
+
+
+def test_render_ext_change_log_revert_failure_shows_error():
+    """Lines 103-104: update_extension raises → st.error displayed."""
+    from iidm_viewer.extensions_explorer import _render_ext_change_log
+
+    log = [{"element_id": "G1", "property": "droop", "before": 4.0, "after": 6.0}]
+    cols = _col_mocks(revert_clicked=True)
+
+    with patch("iidm_viewer.extensions_explorer.st") as mock_st, \
+         patch("iidm_viewer.extensions_explorer.update_extension",
+               side_effect=RuntimeError("network error")):
+        mock_st.session_state = {"_ext_change_log_myExt": list(log)}
+        mock_st.columns.return_value = cols
+        _render_ext_change_log(MagicMock(), "myExt")
+
+    mock_st.error.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _render_ext_removal_log (lines 125-128, 134-135)
+# ---------------------------------------------------------------------------
+
+
+def test_render_ext_removal_log_shows_header_and_items():
+    """Lines 125-128 and 134-135: non-empty log → markdown + captions."""
+    from iidm_viewer.extensions_explorer import _render_ext_removal_log
+
+    log = [{"element_id": "G1", "snapshot": {}}, {"element_id": "G2", "snapshot": {}}]
+    with patch("iidm_viewer.extensions_explorer.st") as mock_st:
+        mock_st.session_state = {"_ext_removal_log_myExt": log}
+        _render_ext_removal_log("myExt")
+
+    mock_st.markdown.assert_called_once()
+    assert mock_st.caption.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# render_extensions_explorer — error handler (lines 255-256)
+# ---------------------------------------------------------------------------
+
+
+def test_render_extensions_explorer_handles_get_extensions_error():
+    """Lines 255-256: network.get_extensions() raises → st.error displayed."""
+    from iidm_viewer.extensions_explorer import render_extensions_explorer
+
+    spinner_cm = MagicMock()
+    spinner_cm.__enter__ = MagicMock(return_value=None)
+    spinner_cm.__exit__ = MagicMock(return_value=False)
+
+    with patch("iidm_viewer.extensions_explorer.st") as mock_st, \
+         patch("iidm_viewer.extensions_explorer._extensions_names",
+               return_value=["myExt"]), \
+         patch("iidm_viewer.extensions_explorer._extensions_information",
+               return_value=pd.DataFrame()):
+        mock_st.session_state = {}
+        mock_st.selectbox.return_value = "myExt"
+        mock_st.text_input.return_value = ""
+        mock_st.spinner.return_value = spinner_cm
+
+        net = MagicMock()
+        net.get_extensions.side_effect = RuntimeError("broken")
+        render_extensions_explorer(net)
+
+    mock_st.error.assert_called()
 
 
 # ---------------------------------------------------------------------------
