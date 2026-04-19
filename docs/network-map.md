@@ -84,10 +84,13 @@ rebuilds it on every push.
    matches the visual style of the previous Leaflet implementation.
 
 No clicks are currently forwarded back to Python; tooltips and
-pan/zoom/drag are entirely browser-side. If we want click-to-navigate
-later, add `onClick` on `SubstationLayer` and post a
-`{type: "map-vl-click", vl, ts}` via `setComponentValue`, mirroring
-the NAD / SLD components.
+pan/zoom/drag are entirely browser-side. The parked plan to add
+substation click-to-navigate (and have it land on the **Single Line
+Diagram** tab rather than just updating the sidebar) is in
+[future-interactive-viewer.md § "Follow-up: cross-tab navigation"](future-interactive-viewer.md#follow-up-cross-tab-navigation-nad--map-click--sld-tab)
+— the wiring mirrors NAD / SLD: `pickable: true` + `onClick` on
+`SubstationLayer`, posting `{type: "map-vl-click", vl, ts}` via
+`setComponentValue`.
 
 ## Nominal-voltage colour scheme
 

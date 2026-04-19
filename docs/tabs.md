@@ -54,7 +54,9 @@ the library supplies pan, zoom, drag, hover, and hit-testing; our
 stay intact. See [future-interactive-viewer.md](future-interactive-viewer.md)
 for the full upgrade history and
 [`iidm_viewer/frontend/nad_component/README.md`](../iidm_viewer/frontend/nad_component/README.md)
-for the build workflow.
+for the build workflow. The parked plan to make a NAD click jump
+straight to the **Single Line Diagram** tab is in
+[future-interactive-viewer.md § "Follow-up: cross-tab navigation"](future-interactive-viewer.md#follow-up-cross-tab-navigation-nad--map-click--sld-tab).
 
 Note: accessing `.svg` and `.metadata` from the proxy issues two separate `run()`
 calls. Do not wrap these inside another `run()` — that deadlocks the executor.
