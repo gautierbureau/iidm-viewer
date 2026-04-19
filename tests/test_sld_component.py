@@ -82,6 +82,9 @@ def test_bundle_wires_streamlit_protocol_and_library_callback():
         "streamlit:render",
         "streamlit:setComponentValue",
         "streamlit:setFrameHeight",
+        # Required marker — Streamlit drops any postMessage whose payload
+        # omits it, breaking the iframe handshake.
+        "isStreamlitMessage",
         "sld-vl-click",
         "voltage-level",
         "onNextVoltageCallback",
