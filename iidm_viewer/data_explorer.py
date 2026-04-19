@@ -1196,6 +1196,11 @@ def render_data_explorer(network, selected_vl):
 
             is_removable = component in REMOVABLE_COMPONENTS
 
+            if editable_cols:
+                st.info(f"Editable properties: {', '.join(editable_cols)}")
+            elif is_removable:
+                st.info("No properties are editable for this component, but rows can be removed.")
+
             if editable_cols or is_removable:
                 # Prepend a _remove checkbox column for removable components
                 if is_removable:
