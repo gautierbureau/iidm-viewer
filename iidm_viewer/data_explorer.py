@@ -1139,7 +1139,13 @@ def render_data_explorer(network, selected_vl):
             if filter_by_vl and selected_vl:
                 kwargs["voltage_level_id"] = selected_vl
 
-            df = getattr(network, method_name)(all_attributes=True, **kwargs)
+            try:
+                df = getattr(network, method_name)(all_attributes=True, **kwargs)
+            except Exception as e:
+                if filter_by_vl and "No data provided for index" in str(e):
+                    st.info(f"No {component.lower()} in this voltage level.")
+                    return
+                raise
 
             if df.empty:
                 st.info(f"No {component.lower()} found in this network.")
