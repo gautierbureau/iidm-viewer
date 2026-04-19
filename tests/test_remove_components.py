@@ -507,3 +507,219 @@ def test_add_to_removal_log_multiple_components_use_separate_keys():
     assert "_removal_log_Generators" in fake_state
     assert fake_state["_removal_log_Loads"][0]["element_id"] == "L1"
     assert fake_state["_removal_log_Generators"][0]["element_id"] == "G1"
+
+
+# ---------------------------------------------------------------------------
+# _reorder_columns (data_explorer)
+# ---------------------------------------------------------------------------
+
+
+def test_reorder_columns_returns_df_unchanged_when_no_priority_for_component():
+    from iidm_viewer.data_explorer import _reorder_columns
+
+    df = pd.DataFrame({"id": [1], "target_p": [100.0], "name": ["G"]})
+    df.index.name = "id"
+    result = _reorder_columns(df, "Switches")  # no priority for Switches
+    assert list(result.columns) == list(df.columns)
+
+
+def test_reorder_columns_returns_df_unchanged_when_name_col_absent():
+    from iidm_viewer.data_explorer import _reorder_columns
+
+    df = pd.DataFrame({"target_p": [100.0], "connected": [True]})
+    result = _reorder_columns(df, "Generators")  # has priority but no 'name' col
+    assert list(result.columns) == list(df.columns)
+
+
+def test_reorder_columns_returns_df_unchanged_when_none_of_priority_cols_present():
+    from iidm_viewer.data_explorer import _reorder_columns
+
+    df = pd.DataFrame({"name": ["G1"], "r": [0.1], "x": [1.0]})
+    # Generators priority cols are target_p etc — none present here
+    result = _reorder_columns(df, "Generators")
+    assert list(result.columns) == list(df.columns)
+
+
+def test_reorder_columns_moves_target_p_right_after_name():
+    from iidm_viewer.data_explorer import _reorder_columns
+
+    df = pd.DataFrame({
+        "name": ["G1"],
+        "voltage_level_id": ["VL1"],
+        "target_p": [100.0],
+    })
+    result = _reorder_columns(df, "Generators")
+    cols = list(result.columns)
+    assert cols.index("target_p") == cols.index("name") + 1
+
+
+# ---------------------------------------------------------------------------
+# _compute_changes (data_explorer)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_changes_returns_empty_when_no_editable_cols_in_df():
+    from iidm_viewer.data_explorer import _compute_changes
+
+    df = pd.DataFrame({"name": ["G1"], "p": [100.0]})
+    result = _compute_changes(df, df.copy(), ["target_p"])  # target_p not in df
+    assert result.empty
+
+
+def test_compute_changes_returns_empty_when_nothing_changed():
+    from iidm_viewer.data_explorer import _compute_changes
+
+    df = pd.DataFrame({"target_p": [100.0], "connected": [True]}, index=["G1"])
+    result = _compute_changes(df, df.copy(), ["target_p", "connected"])
+    assert result.empty
+
+
+def test_compute_changes_detects_single_cell_change():
+    from iidm_viewer.data_explorer import _compute_changes
+
+    orig = pd.DataFrame({"target_p": [100.0], "target_q": [0.0]}, index=["G1"])
+    edited = orig.copy()
+    edited.at["G1", "target_p"] = 200.0
+
+    result = _compute_changes(orig, edited, ["target_p", "target_q"])
+    assert len(result) == 1
+    assert result.at["G1", "target_p"] == 200.0
+    # target_q did not change — must be absent or NaN in the sparse result
+    assert "target_q" not in result.columns or pd.isna(result.at["G1", "target_q"])
+
+
+def test_compute_changes_only_includes_changed_columns_in_each_row():
+    from iidm_viewer.data_explorer import _compute_changes
+
+    orig = pd.DataFrame({"a": [1.0, 2.0], "b": [10.0, 20.0]}, index=["R1", "R2"])
+    edited = orig.copy()
+    edited.at["R1", "a"] = 99.0  # only column 'a' changed on R1
+
+    result = _compute_changes(orig, edited, ["a", "b"])
+    assert "R1" in result.index
+    assert result.at["R1", "a"] == 99.0
+    # 'b' did not change on R1 so it should be absent or NaN in the result
+    assert "b" not in result.columns or pd.isna(result.at["R1", "b"])
+
+
+def test_compute_changes_nan_vs_nan_treated_as_equal():
+    from iidm_viewer.data_explorer import _compute_changes
+
+    orig = pd.DataFrame({"target_q": [float("nan")]}, index=["G1"])
+    edited = orig.copy()
+
+    result = _compute_changes(orig, edited, ["target_q"])
+    assert result.empty
+
+
+def test_compute_changes_multiple_rows_changed():
+    from iidm_viewer.data_explorer import _compute_changes
+
+    orig = pd.DataFrame({"p0": [10.0, 20.0, 30.0]}, index=["L1", "L2", "L3"])
+    edited = orig.copy()
+    edited.at["L1", "p0"] = 11.0
+    edited.at["L3", "p0"] = 33.0
+
+    result = _compute_changes(orig, edited, ["p0"])
+    assert set(result.index) == {"L1", "L3"}
+    assert result.at["L1", "p0"] == 11.0
+    assert result.at["L3", "p0"] == 33.0
+
+
+# ---------------------------------------------------------------------------
+# _add_to_change_log (data_explorer)
+# ---------------------------------------------------------------------------
+
+
+def test_add_to_change_log_creates_entry_with_before_and_after():
+    from iidm_viewer.data_explorer import _add_to_change_log
+
+    orig = pd.DataFrame({"target_p": [100.0]}, index=pd.Index(["G1"]))
+    changes = pd.DataFrame({"target_p": [200.0]}, index=pd.Index(["G1"]))
+
+    fake_state = {}
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+        _add_to_change_log("get_generators", changes, orig)
+
+    log = fake_state["_change_log_get_generators"]
+    assert len(log) == 1
+    assert log[0]["element_id"] == "G1"
+    assert log[0]["property"] == "target_p"
+    assert log[0]["before"] == 100.0
+    assert log[0]["after"] == 200.0
+
+
+def test_add_to_change_log_updates_after_on_second_edit():
+    from iidm_viewer.data_explorer import _add_to_change_log
+
+    orig = pd.DataFrame({"target_p": [100.0]}, index=pd.Index(["G1"]))
+    edit1 = pd.DataFrame({"target_p": [150.0]}, index=pd.Index(["G1"]))
+    edit2 = pd.DataFrame({"target_p": [250.0]}, index=pd.Index(["G1"]))
+
+    fake_state = {}
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+        _add_to_change_log("get_generators", edit1, orig)
+        _add_to_change_log("get_generators", edit2, orig)
+
+    log = fake_state["_change_log_get_generators"]
+    assert len(log) == 1
+    assert log[0]["before"] == 100.0
+    assert log[0]["after"] == 250.0
+
+
+def test_add_to_change_log_removes_entry_when_reverted_to_original():
+    from iidm_viewer.data_explorer import _add_to_change_log
+
+    orig = pd.DataFrame({"target_p": [100.0]}, index=pd.Index(["G1"]))
+    fwd = pd.DataFrame({"target_p": [200.0]}, index=pd.Index(["G1"]))
+    back = pd.DataFrame({"target_p": [100.0]}, index=pd.Index(["G1"]))
+
+    fake_state = {}
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+        _add_to_change_log("get_generators", fwd, orig)
+        _add_to_change_log("get_generators", back, orig)
+
+    assert fake_state["_change_log_get_generators"] == []
+
+
+def test_add_to_change_log_skips_nan_new_values():
+    from iidm_viewer.data_explorer import _add_to_change_log
+
+    orig = pd.DataFrame({"target_p": [100.0]}, index=pd.Index(["G1"]))
+    changes = pd.DataFrame({"target_p": [float("nan")]}, index=pd.Index(["G1"]))
+
+    fake_state = {}
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+        _add_to_change_log("get_generators", changes, orig)
+
+    assert fake_state.get("_change_log_get_generators", []) == []
+
+
+def test_add_to_change_log_before_value_is_none_when_col_not_in_original():
+    from iidm_viewer.data_explorer import _add_to_change_log
+
+    orig = pd.DataFrame({"other_col": [1.0]}, index=pd.Index(["G1"]))
+    changes = pd.DataFrame({"target_p": [200.0]}, index=pd.Index(["G1"]))
+
+    fake_state = {}
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+        _add_to_change_log("get_generators", changes, orig)
+
+    log = fake_state["_change_log_get_generators"]
+    assert log[0]["before"] is None
+    assert log[0]["after"] == 200.0
+
+
+def test_add_to_change_log_separate_keys_per_method():
+    from iidm_viewer.data_explorer import _add_to_change_log
+
+    orig = pd.DataFrame({"p0": [10.0]}, index=pd.Index(["L1"]))
+    changes = pd.DataFrame({"p0": [20.0]}, index=pd.Index(["L1"]))
+
+    fake_state = {}
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+        _add_to_change_log("get_generators", changes, orig)
+        _add_to_change_log("get_loads", changes, orig)
+
+    assert "_change_log_get_generators" in fake_state
+    assert "_change_log_get_loads" in fake_state
