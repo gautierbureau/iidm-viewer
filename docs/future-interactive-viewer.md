@@ -385,3 +385,123 @@ library into.
 | Adding drag / pan-zoom for static SVG | Not possible without a JS layout engine — skip to Option 2 |
 | Full `@powsybl/network-viewer` component | 1–2 weeks: npm project, build, packaging, release pipeline |
 
+
+## Follow-up: cross-tab navigation (NAD / Map click → SLD tab)
+
+**Status:** parked. Rationale and implementation sketch below so we can
+come back without re-investigating.
+
+### What we want
+
+- Click a voltage-level node in the NAD → land on the **Single Line
+  Diagram** tab rendering that VL.
+- Click a substation on the **Network Map** → same: land on the SLD
+  tab with the clicked substation's first (or nominal-voltage-highest)
+  VL selected.
+
+Today both the NAD click (`nad-vl-click`) and the in-SLD navigation
+arrow (`sld-vl-click`) update `st.session_state.selected_vl` and
+rerun, but **stay on the originating tab**. The map component posts
+no click events at all yet.
+
+### Why this is parked
+
+`st.tabs()` has no programmatic-selection API as of Streamlit 1.56.
+Swapping the tab implementation is a cross-cutting change, and the
+current NAD→NAD / SLD→SLD in-tab navigation is already useful, so we
+shipped that first.
+
+### Implementation sketch
+
+Two independent pieces.
+
+**1. Map click wiring — `iidm_viewer/frontend/map_component/src/main.ts`**
+
+Mirror the pattern already used by NAD and SLD:
+
+```ts
+new SubstationLayer({
+  ...existingProps,
+  pickable: true,
+  onClick: (info) => {
+    const sub = info.object as MapSubstation | undefined;
+    if (!sub) return;
+    // Pick the highest-nominal-voltage VL on the substation as the
+    // SLD target (matches what a user most likely wants to inspect).
+    const vl = [...sub.voltageLevels]
+      .sort((a, b) => b.nominalV - a.nominalV)[0]?.id;
+    if (vl) {
+      setComponentValue({ type: 'map-vl-click', vl, ts: Date.now() });
+    }
+  },
+});
+```
+
+Python side, in `network_map.py::render_network_map`:
+
+```python
+click = render_interactive_map(substations, positions, lines, ...)
+if click and click.get("type") == "map-vl-click":
+    vl = click.get("vl")
+    if vl and vl != st.session_state.get("selected_vl"):
+        st.session_state.selected_vl = vl
+        st.session_state.active_tab = "Single Line Diagram"  # see §2
+        st.rerun()
+```
+
+Bundle smoke-test update: add `map-vl-click` and `onClick` to the
+needle list in `tests/test_map_component.py`.
+
+**2. Programmable tab switcher — `iidm_viewer/app.py`**
+
+Replace `st.tabs([...])` with an `st.segmented_control` (or
+`st.radio(horizontal=True, label_visibility="collapsed")`) backed by
+`st.session_state["active_tab"]`. Sketch:
+
+```python
+TAB_ORDER = [
+    "Overview", "Network Map", "Network Area Diagram",
+    "Single Line Diagram", "Data Explorer Components",
+    "Data Explorer Extensions", "Reactive Capability Curves",
+    "Operational Limits",
+]
+
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = "Overview"
+
+active = st.segmented_control(
+    "tab",
+    options=TAB_ORDER,
+    key="active_tab",
+    label_visibility="collapsed",
+)
+
+if active == "Overview":
+    render_overview(network)
+elif active == "Single Line Diagram":
+    render_sld_tab(network, selected_vl)
+# …etc.
+```
+
+The NAD click handler in `diagrams.py::render_nad_tab` then also
+writes `st.session_state.active_tab = "Single Line Diagram"` before
+`st.rerun()`. Same session-state update wherever we want to route the
+click (Map → SLD, NAD → SLD).
+
+### Trade-offs
+
+- **Segmented control vs native tabs:** segmented control keeps the
+  Streamlit design language but doesn't look exactly like the tab
+  strip we have today. Acceptable.
+- **JS hack alternative:** inject `components.v1.html` that finds the
+  target tab button by `aria-label` and clicks it. Preserves native
+  `st.tabs()`, but is timing-fragile and breaks whenever Streamlit
+  reshapes its DOM. Rejected.
+- **`st.navigation` / multipage apps:** would rewrite the whole app
+  structure and lose the single-file layout. Rejected for this scope.
+
+### Estimate
+
+~1 day end-to-end: 15 lines in `main.ts`, 5 lines in `network_map.py`,
+~20-line diff in `app.py`, bundle smoke-test additions, docs refresh
+(`docs/tabs.md`, `docs/network-map.md`, `AGENTS.md`).
