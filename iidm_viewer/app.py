@@ -21,6 +21,7 @@ from iidm_viewer.reactive_curves import render_reactive_curves
 from iidm_viewer.operational_limits import render_operational_limits
 from iidm_viewer.network_map import render_network_map
 from iidm_viewer.pmax_visualization import render_pmax_visualization
+from iidm_viewer.voltage_analysis import render_voltage_analysis
 
 
 st.set_page_config(page_title="IIDM Viewer", layout="wide", page_icon="⚡")
@@ -130,7 +131,7 @@ if network is None:
     )
     st.stop()
 
-tab_overview, tab_map, tab_nad, tab_sld, tab_components, tab_extensions, tab_rcc, tab_limits, tab_pmax = st.tabs(
+tab_overview, tab_map, tab_nad, tab_sld, tab_components, tab_extensions, tab_rcc, tab_limits, tab_pmax, tab_voltage = st.tabs(
     [
         "Overview",
         "Network Map",
@@ -141,6 +142,7 @@ tab_overview, tab_map, tab_nad, tab_sld, tab_components, tab_extensions, tab_rcc
         "Reactive Capability Curves",
         "Operational Limits",
         "Pmax Visualization",
+        "Voltage Analysis",
     ]
 )
 
@@ -170,3 +172,6 @@ with tab_limits:
 
 with tab_pmax:
     render_pmax_visualization(network, selected_vl)
+
+with tab_voltage:
+    render_voltage_analysis(network)
