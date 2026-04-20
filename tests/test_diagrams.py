@@ -3,7 +3,13 @@ import math
 
 from streamlit.testing.v1 import AppTest
 
-from iidm_viewer.diagrams import _BUS_LEGEND_PALETTE, _format_float
+from iidm_viewer.diagrams import (
+    _BUS_LEGEND_PALETTE,
+    _format_float,
+    _parse_sld_busbar_indices,
+    _parse_sld_palette,
+    _resolve_bus_colors,
+)
 from iidm_viewer.state import load_network
 
 
@@ -24,6 +30,50 @@ def test_bus_legend_palette_is_deterministic_and_nonempty():
     for c in _BUS_LEGEND_PALETTE:
         assert c.startswith("#") and len(c) == 7
         int(c[1:], 16)  # parses as hex
+
+
+_SLD_SVG_STUB = """
+<svg>
+<style><![CDATA[
+.sld-vl120to180.sld-bus-0 {--sld-vl-color: #00AFAE}
+.sld-vl120to180.sld-bus-1 {--sld-vl-color: #000D58}
+.sld-vl300to500.sld-bus-0 {--sld-vl-color: #FF0000}
+]]></style>
+<g class="sld-busbar-section sld-vl120to180 sld-bus-0" id="idB4" transform="x">
+</g>
+<g class="sld-busbar-section sld-vl120to180 sld-bus-1" id="idB4b" transform="x">
+</g>
+</svg>
+"""
+
+
+def test_parse_sld_palette_extracts_band_index_colors():
+    palette = _parse_sld_palette(_SLD_SVG_STUB)
+    assert palette[("vl120to180", 0)] == "#00AFAE"
+    assert palette[("vl120to180", 1)] == "#000D58"
+    assert palette[("vl300to500", 0)] == "#FF0000"
+
+
+def test_parse_sld_busbar_indices_matches_busbar_group_classes():
+    indices = _parse_sld_busbar_indices(_SLD_SVG_STUB)
+    # Pypowsybl strips the leading "id" prefix when emitting equipmentId in
+    # the metadata, so our parser must match what's after `id="id…"`.
+    assert indices == {"B4": ("vl120to180", 0), "B4b": ("vl120to180", 1)}
+
+
+def test_parse_sld_palette_handles_missing_style_block():
+    assert _parse_sld_palette("") == {}
+    assert _parse_sld_palette("<svg></svg>") == {}
+
+
+def test_resolve_bus_colors_empty_svg_returns_empty():
+    # Covers the NAD-only / no-SLD-rendered case where the legend renders
+    # before a real SVG is available.
+    class _Stub:
+        def get_busbar_sections(self, **_):
+            raise AssertionError("should not be called when SVG is empty")
+
+    assert _resolve_bus_colors(_Stub(), "VL4", "") == {}
 
 
 def _prepare(xiidm_upload, selected_vl=None):
