@@ -61,3 +61,20 @@ def node_breaker_network():
         return pn.create_four_substations_node_breaker_network()
 
     return NetworkProxy(run(_make))
+
+
+@pytest.fixture
+def blank_network():
+    """A NetworkProxy wrapping a completely empty network (no substations, no VLs).
+
+    Mirrors what the UI creates when the user clicks "Start from blank network".
+    Used to verify that merge operations on empty DataFrames don't raise
+    ValueError due to float64 vs object dtype mismatches on ID columns.
+    """
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_empty(network_id="blank")
+
+    return NetworkProxy(run(_make))

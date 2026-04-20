@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from iidm_viewer.filters import FILTERS, enrich_with_joins
+from iidm_viewer.filters import FILTERS, build_vl_lookup, enrich_with_joins
 from iidm_viewer.network_info import COMPONENT_TYPES
 from iidm_viewer.state import load_network
 
@@ -154,3 +154,60 @@ def test_all_filters_neutral_shows_full_count(xiidm_upload):
     assert not at.exception
     captions = [c.value for c in at.caption]
     assert any("5 generators" in c for c in captions)
+
+
+# ---------- blank-network regression tests (float64 vs object dtype) ----------
+# pypowsybl returns float64 index columns when a DataFrame is empty.
+# Merging those against object-dtype columns from component DataFrames must
+# not raise ValueError.  These tests guard against that regression.
+
+def test_build_vl_lookup_blank_network_no_error(blank_network):
+    """build_vl_lookup must not raise on a network with no substations or VLs."""
+    lookup = build_vl_lookup(blank_network)
+    assert lookup.empty or set(lookup.columns) >= {"id", "substation_id", "nominal_v"}
+
+
+def test_enrich_joins_with_empty_vl_lookup_no_error():
+    """enrich_with_joins must not raise when vl_lookup is an empty DataFrame
+    (which has float64 dtype on ID columns, as returned by pypowsybl)."""
+    empty_lookup = pd.DataFrame(
+        {"id": pd.Series(dtype="float64"),
+         "substation_id": pd.Series(dtype="float64"),
+         "nominal_v": pd.Series(dtype="float64"),
+         "country": pd.Series(dtype="object")}
+    )
+    df = pd.DataFrame(
+        {"voltage_level_id": pd.Series(dtype="object")},
+        index=pd.Index([], name="id"),
+    )
+    result = enrich_with_joins(df, empty_lookup)
+    assert result.empty
+
+
+def test_enrich_joins_sided_with_empty_vl_lookup_no_error():
+    """Same regression for two-sided (branch) DataFrames."""
+    empty_lookup = pd.DataFrame(
+        {"id": pd.Series(dtype="float64"),
+         "substation_id": pd.Series(dtype="float64"),
+         "nominal_v": pd.Series(dtype="float64"),
+         "country": pd.Series(dtype="object")}
+    )
+    df = pd.DataFrame(
+        {"voltage_level1_id": pd.Series(dtype="object"),
+         "voltage_level2_id": pd.Series(dtype="object")},
+        index=pd.Index([], name="id"),
+    )
+    result = enrich_with_joins(df, empty_lookup)
+    assert result.empty
+
+
+def test_build_vl_lookup_and_enrich_join_blank_network_no_error(blank_network):
+    """Full round-trip: build lookup from blank network, then enrich an empty
+    component DataFrame — must not raise ValueError."""
+    lookup = build_vl_lookup(blank_network)
+    df = pd.DataFrame(
+        {"voltage_level_id": pd.Series(dtype="object")},
+        index=pd.Index([], name="id"),
+    )
+    result = enrich_with_joins(df, lookup)
+    assert result.empty
