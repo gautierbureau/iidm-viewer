@@ -236,6 +236,7 @@ def render_overview(network):
             st.caption("Losses by country — cross-border branches split 50/50.")
             st.dataframe(losses_df, use_container_width=True, hide_index=True)
 
+    st.subheader("Component Statistics")
     with st.expander("Component statistics", expanded=False):
         counts = {}
         for label, method in COMPONENT_TYPES.items():
