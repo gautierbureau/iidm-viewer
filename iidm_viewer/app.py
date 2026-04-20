@@ -28,7 +28,7 @@ st.set_page_config(page_title="IIDM Viewer", layout="wide", page_icon="⚡")
 init_state()
 
 
-@st.dialog("Start from a blank network")
+@st.dialog("Start with empty network")
 def _show_blank_network_dialog():
     blank_id = st.text_input("Network ID", value="network", key="blank_network_id")
     if st.button("Create blank network", key="blank_network_btn"):
