@@ -67,6 +67,7 @@ def _build_vl_country_map(network) -> pd.DataFrame:
         return pd.DataFrame(columns=["voltage_level_id", "country"])
     subs = subs.rename(columns={"id": "substation_id"})
     vls["substation_id"] = vls["substation_id"].astype(str)
+    vls["id"] = vls["id"].astype(str)
     subs["substation_id"] = subs["substation_id"].astype(str)
     merged = vls.merge(subs, on="substation_id", how="left")
     return merged.rename(columns={"id": "voltage_level_id"})[
@@ -140,7 +141,11 @@ def _country_totals(network) -> pd.DataFrame:
     def _aggregate(df: pd.DataFrame, value_col: str) -> pd.Series:
         if df.empty or value_col not in df.columns:
             return pd.Series(dtype=float)
-        merged = df.reset_index().merge(vl_country, on="voltage_level_id", how="left")
+        df2 = df.reset_index()
+        df2["voltage_level_id"] = df2["voltage_level_id"].astype(str)
+        vl_c = vl_country.copy()
+        vl_c["voltage_level_id"] = vl_c["voltage_level_id"].astype(str)
+        merged = df2.merge(vl_c, on="voltage_level_id", how="left")
         merged["country"] = merged["country"].fillna("—").replace("", "—")
         series = merged[value_col].dropna()
         if series.empty:

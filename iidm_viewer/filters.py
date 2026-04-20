@@ -49,6 +49,7 @@ def build_vl_lookup(network) -> pd.DataFrame:
             .reset_index()
             .rename(columns={"id": "substation_id"})
         )
+        vls["id"] = vls["id"].astype(str)
         vls["substation_id"] = vls["substation_id"].astype(str)
         subs["substation_id"] = subs["substation_id"].astype(str)
         cache["id"] = net_id
@@ -73,7 +74,9 @@ def enrich_with_joins(df: pd.DataFrame, vl_lookup: pd.DataFrame) -> pd.DataFrame
         if missing:
             lookup = vl_lookup.rename(columns={"id": "voltage_level_id"})[
                 ["voltage_level_id", *missing]
-            ]
+            ].copy()
+            lookup["voltage_level_id"] = lookup["voltage_level_id"].astype(str)
+            out["voltage_level_id"] = out["voltage_level_id"].astype(str)
             out = out.merge(lookup, on="voltage_level_id", how="left")
 
     for side in ("1", "2"):
@@ -85,7 +88,9 @@ def enrich_with_joins(df: pd.DataFrame, vl_lookup: pd.DataFrame) -> pd.DataFrame
                     "nominal_v": f"nominal_v{side}",
                     "country": f"country{side}",
                 }
-            )[[col, f"nominal_v{side}", f"country{side}"]]
+            )[[col, f"nominal_v{side}", f"country{side}"]].copy()
+            lookup[col] = lookup[col].astype(str)
+            out[col] = out[col].astype(str)
             out = out.merge(lookup, on=col, how="left")
 
     if idx_name and idx_name in out.columns:
