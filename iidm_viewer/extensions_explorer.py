@@ -10,7 +10,7 @@ from iidm_viewer.state import EDITABLE_EXTENSIONS, remove_extension, update_exte
 def _extensions_names():
     def _call():
         import pypowsybl.network as pn
-        return list(pn.get_extensions_names())
+        return sorted(pn.get_extensions_names())
 
     return run(_call)
 
