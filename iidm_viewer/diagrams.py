@@ -1,17 +1,16 @@
 import html
 import math
+import re
 
 import streamlit as st
 from iidm_viewer.nad_component import render_interactive_nad
 from iidm_viewer.sld_component import render_interactive_sld
 
 
-# Fixed palette for the bus-voltage legend rendered beneath the SLD.
-# Colors are deterministic by bus order within the voltage level so
-# repeat renders of the same VL produce the same legend. They do NOT
-# attempt to match the bus colors inside the pypowsybl SLD SVG — a
-# frontend-side legend that reads the real SVG is Option B in
-# docs/future-interactive-viewer.md.
+# Fallback palette used only when the exact SLD-SVG color cannot be
+# resolved (e.g. the SVG carries no busbar-section tagging for a bus).
+# The primary path parses the real `--sld-vl-color` values out of the
+# pypowsybl-generated SVG so the legend dots match the SLD.
 _BUS_LEGEND_PALETTE = (
     "#228b22",  # forest green
     "#4169e1",  # royal blue
@@ -22,6 +21,83 @@ _BUS_LEGEND_PALETTE = (
     "#b8860b",  # dark goldenrod
     "#4b0082",  # indigo
 )
+
+# Matches `.sld-vl120to180.sld-bus-0 {--sld-vl-color: #00AFAE}` in the SLD
+# SVG's <style> CDATA block.
+_SLD_COLOR_RE = re.compile(
+    r"\.sld-(vl\d+to\d+)\.sld-bus-(\d+)\s*\{\s*--sld-vl-color:\s*(#[0-9A-Fa-f]{6})"
+)
+# Matches `<g class="sld-busbar-section sld-vl120to180 sld-bus-0" id="idB4" ...>`.
+# Class-order is fixed by pypowsybl's SLG renderer: busbar-section, then
+# voltage band, then bus index.
+_SLD_BUSBAR_RE = re.compile(
+    r'<g\s+class="sld-busbar-section\s+sld-(vl\d+to\d+)\s+sld-bus-(\d+)"\s+id="id([^"]+)"'
+)
+
+
+def _parse_sld_palette(svg: str) -> dict:
+    """Return ``{(band, bus_index): "#RRGGBB"}`` from the SVG <style> block."""
+    return {
+        (m.group(1), int(m.group(2))): m.group(3)
+        for m in _SLD_COLOR_RE.finditer(svg or "")
+    }
+
+
+def _parse_sld_busbar_indices(svg: str) -> dict:
+    """Return ``{busbar_section_id: (band, bus_index)}`` from <g> elements."""
+    return {
+        m.group(3): (m.group(1), int(m.group(2)))
+        for m in _SLD_BUSBAR_RE.finditer(svg or "")
+    }
+
+
+def _resolve_bus_colors(network, selected_vl: str, svg: str) -> dict:
+    """Map each calculated bus id in ``selected_vl`` to its SLD color.
+
+    Joins three pieces:
+      * palette from <style>                          — ``(band, idx) -> hex``
+      * busbar-section classes from <g> elements      — ``busbar_id -> (band, idx)``
+      * network topology                              — ``busbar_id -> bus_id``
+
+    Returns an empty dict on any parse/topology failure; the caller falls
+    back to :data:`_BUS_LEGEND_PALETTE`.
+    """
+    palette = _parse_sld_palette(svg)
+    busbars = _parse_sld_busbar_indices(svg)
+    if not palette or not busbars:
+        return {}
+
+    # busbar-section id -> calculated bus id. Try node-breaker first
+    # (get_busbar_sections lists real sections), then bus-breaker (the
+    # SLG renderer injects a virtual busbar per bus-breaker bus, whose
+    # id matches the bus-breaker bus id).
+    bb_to_bus: dict = {}
+    try:
+        bbs = network.get_busbar_sections(all_attributes=True)
+        bbs = bbs[bbs["voltage_level_id"].astype(str) == str(selected_vl)]
+        for bb_id, row in bbs.iterrows():
+            bus_id = row.get("bus_id")
+            if bus_id:
+                bb_to_bus[str(bb_id)] = str(bus_id)
+    except Exception:
+        pass
+    if not bb_to_bus:
+        try:
+            tp = network.get_bus_breaker_topology(selected_vl)
+            for bb_id, row in tp.buses.iterrows():
+                bus_id = row.get("bus_id")
+                if bus_id:
+                    bb_to_bus[str(bb_id)] = str(bus_id)
+        except Exception:
+            pass
+
+    colors: dict = {}
+    for bb_id, key in busbars.items():
+        bus_id = bb_to_bus.get(bb_id)
+        color = palette.get(key)
+        if bus_id and color:
+            colors.setdefault(bus_id, color)
+    return colors
 
 
 def _format_float(val, fmt: str) -> str:
@@ -36,15 +112,14 @@ def _format_float(val, fmt: str) -> str:
     return format(f, fmt)
 
 
-def _render_bus_legend(network, selected_vl: str) -> None:
+def _render_bus_legend(network, selected_vl: str, svg: str = "") -> None:
     """Show one row per bus in `selected_vl` — colored dot, bus id, V (kV), angle (°).
 
     Voltages come from `network.get_buses(all_attributes=True)`; `v_mag`
     and `v_angle` are NaN until a load flow has been run, in which case
-    we show em-dashes. Colors come from a fixed palette indexed by bus
-    order within the VL; they do not match the SLD SVG's internal bus
-    coloring — see Option B in
-    docs/future-interactive-viewer.md if exact matching is ever needed.
+    we show em-dashes. Colors are parsed from ``svg`` so they match
+    pypowsybl's SLG output exactly; buses the SVG doesn't tag fall back
+    to :data:`_BUS_LEGEND_PALETTE` (ordered by bus index in the VL).
     """
     try:
         buses = network.get_buses(all_attributes=True).reset_index()
@@ -58,9 +133,12 @@ def _render_bus_legend(network, selected_vl: str) -> None:
     if vl_buses.empty:
         return
 
+    bus_colors = _resolve_bus_colors(network, selected_vl, svg)
+
     rows_html = []
     for i, (_, row) in enumerate(vl_buses.iterrows()):
-        color = _BUS_LEGEND_PALETTE[i % len(_BUS_LEGEND_PALETTE)]
+        bus_id_raw = str(row.get("id", ""))
+        color = bus_colors.get(bus_id_raw) or _BUS_LEGEND_PALETTE[i % len(_BUS_LEGEND_PALETTE)]
         bus_id = html.escape(str(row.get("id", "")))
         v_mag = _format_float(row.get("v_mag"), ".2f")
         v_angle = _format_float(row.get("v_angle"), ".2f")
@@ -152,7 +230,7 @@ def render_sld_tab(network, selected_vl):
         key=f"sld_{selected_vl}",
     )
 
-    _render_bus_legend(network, selected_vl)
+    _render_bus_legend(network, selected_vl, svg)
 
     if click and click.get("type") == "sld-vl-click":
         vl = click.get("vl")

@@ -508,22 +508,24 @@ click (Map → SLD, NAD → SLD).
 
 ## Bus-voltage legend — Option B (in-iframe legend)
 
-**Status:** parked. Option A (Python-side legend under the SLD with a
-fixed palette) is live — see
-`iidm_viewer/diagrams.py::_render_bus_legend`. Option B below is the
-more faithful alternative we'd reach for only if exact color-matching
-with the SLD SVG becomes a requirement.
+**Status:** parked. Option A (Python-side legend under the SLD) is
+live — see `iidm_viewer/diagrams.py::_render_bus_legend` — and now
+extracts **exact** colors from the SLD SVG. Option B below stays parked
+as the "move the legend inside the iframe" path for richer interactions
+(hover highlight, theme-following, layout adjacent to the SVG).
 
 ### Why we shipped Option A first
 
 - No JS rebuild, no frontend changes, no new component prop.
 - Post-LF voltages automatically refresh because `get_buses()` is
   just a worker-thread call made on each rerun.
-- One known limitation: the legend dot colors don't match the bus
-  colors drawn inside the SLD SVG. The palette is indexed by bus
-  order in the VL, not derived from the SVG. For single-bus VLs
-  (the common case) this is visually fine; for multi-bus VLs the
-  dot/SVG color correspondence is missing.
+- Colors now match the SLD SVG exactly. The resolver parses
+  `--sld-vl-color` out of the `<style>` block and maps each
+  calculated bus id to its busbar-section's `sld-bus-N` index via
+  `get_busbar_sections()` (node-breaker) or
+  `get_bus_breaker_topology().buses` (bus-breaker). Buses the SVG
+  doesn't tag fall back to `_BUS_LEGEND_PALETTE`. See
+  `iidm_viewer/diagrams.py::_resolve_bus_colors` for the details.
 
 ### What Option B would add
 
@@ -568,14 +570,17 @@ Sketch:
 
 | | Option A (live) | Option B (parked) |
 |---|---|---|
-| Exact SLD-color matching | No (fixed palette) | Yes (read from SVG) |
+| Exact SLD-color matching | Yes (parsed from SVG) | Yes (read from live DOM) |
+| Layout alongside SVG | No (table under iframe) | Yes |
+| Hover cross-highlight SVG↔legend | No | Possible |
 | JS rebuild required | No | Yes (small edit to `main.ts`) |
 | Post-LF refresh | Automatic | Requires new prop round-trip |
-| Depends on SLG SVG markup | No | Yes — brittle if Powsybl reshapes bus IDs/classes |
-| Effort | ~30 LOC Python | ~50 LOC TS + build + tests |
+| Depends on SLG SVG markup | Yes (CSS + busbar classes) | Yes — plus live DOM structure |
+| Effort | ~60 LOC Python | ~50 LOC TS + build + tests |
 
 ### When to switch
 
-Pick Option B if users report the dot-vs-SVG color mismatch on
-multi-bus VLs as a real usability issue. Otherwise the Python-side
-legend is enough.
+Pick Option B only if the legend needs to live visually next to the
+SVG (e.g. for hover cross-highlight or theme-driven restyling that
+follows SVG state changes). Color accuracy alone is no longer a
+reason to switch — Option A already matches the SLD.

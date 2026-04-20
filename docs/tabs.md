@@ -86,14 +86,25 @@ NetworkProxy stay intact. Same invariant as NAD: accessing `.svg` and
 `.metadata` issues two separate `run()` calls — don't wrap them inside
 another `run()`.
 
-Below the diagram, `_render_bus_legend(network, selected_vl)` shows
+Below the diagram, `_render_bus_legend(network, selected_vl, svg)` shows
 one row per bus in the VL with columns: colored dot, bus id, V (kV),
 angle (°). Data comes from `network.get_buses(all_attributes=True)`;
 `v_mag` / `v_angle` show `—` until a load flow has run. The dot
-colors come from a fixed palette (`_BUS_LEGEND_PALETTE`) indexed by
-bus order, which **does not** attempt to match the bus colors inside
-the pypowsybl SLD SVG. Rationale and the sketch of a more faithful
-in-iframe legend are parked as "Option B" in
+colors are parsed out of the SLD SVG itself so they match pypowsybl's
+SLG rendering exactly. The resolver (`_resolve_bus_colors`) joins three
+pieces:
+
+1. the `--sld-vl-color` palette from the SVG's `<style>` block
+   (`(voltage_band, bus_index) → hex`),
+2. the `sld-bus-N` class on each `<g class="sld-busbar-section …">`
+   element (`busbar_id → (band, index)`), and
+3. network topology — `get_busbar_sections()` for node-breaker VLs,
+   `get_bus_breaker_topology(vl).buses` for bus-breaker VLs —
+   (`busbar_id → calculated bus_id`).
+
+Buses the SVG doesn't tag fall back to `_BUS_LEGEND_PALETTE`. Moving
+the legend fully inside the iframe (so it picks up theme changes and
+hover highlights automatically) is still parked as "Option B" in
 [future-interactive-viewer.md § "Bus-voltage legend — Option B"](future-interactive-viewer.md#bus-voltage-legend--option-b-in-iframe-legend).
 
 ### Data Explorer Components — `data_explorer.render_data_explorer`
