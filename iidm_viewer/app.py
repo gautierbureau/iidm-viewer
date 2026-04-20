@@ -31,7 +31,7 @@ init_state()
 @st.dialog("Start with empty network")
 def _show_blank_network_dialog():
     blank_id = st.text_input("Network ID", value="network", key="blank_network_id")
-    if st.button("Create blank network", key="blank_network_btn"):
+    if st.button("Create empty network", key="blank_network_btn"):
         create_empty_network(blank_id)
         # Bump the uploader key so Streamlit discards the old file and
         # doesn't re-load it over the blank network on the next rerun.
@@ -93,7 +93,7 @@ with st.sidebar:
                 st.session_state["_last_file"] = uploaded.name
             st.rerun()
 
-    if st.button("Start from blank network", key="blank_network_open_btn", use_container_width=True):
+    if st.button("Start with empty network", key="blank_network_open_btn", use_container_width=True):
         _show_blank_network_dialog()
 
     network = get_network()
