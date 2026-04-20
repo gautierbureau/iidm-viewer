@@ -100,10 +100,14 @@ def load_network(uploaded_file):
     network = NetworkProxy(run(_load))
     st.session_state.network = network
     st.session_state.selected_vl = None
+    st.session_state.pop("vl_selectbox", None)
+    st.session_state.pop("vl_filter_text", None)
     st.session_state.pop("_map_data_cache", None)
+    st.session_state.pop("_vl_lookup_cache", None)
     st.session_state.pop("_export_bytes", None)
     st.session_state.pop("_export_fmt", None)
-    for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_")]:
+    st.session_state.pop("_export_ext", None)
+    for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_") or k.startswith("_export_cache_")]:
         del st.session_state[k]
     return network
 
@@ -126,12 +130,15 @@ def create_empty_network(network_id: str = "network"):
     network = NetworkProxy(run(_create))
     st.session_state.network = network
     st.session_state.selected_vl = None
+    st.session_state.pop("vl_selectbox", None)
+    st.session_state.pop("vl_filter_text", None)
     st.session_state.pop("_map_data_cache", None)
     st.session_state.pop("_vl_lookup_cache", None)
     st.session_state.pop("_last_file", None)
     st.session_state.pop("_export_bytes", None)
     st.session_state.pop("_export_fmt", None)
-    for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_")]:
+    st.session_state.pop("_export_ext", None)
+    for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_") or k.startswith("_export_cache_")]:
         del st.session_state[k]
     return network
 

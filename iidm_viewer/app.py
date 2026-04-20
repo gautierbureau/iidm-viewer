@@ -46,26 +46,24 @@ def _show_save_network_dialog():
         st.warning("No network loaded.")
         return
     fmt = st.selectbox("Export format", get_export_formats(), key="export_format_select")
-    if st.button("Prepare download", key="export_prepare_btn"):
-        with st.spinner("Exporting..."):
+    net_obj_id = id(object.__getattribute__(network, "_obj"))
+    cache_key = f"_export_cache_{net_obj_id}_{fmt}"
+    if cache_key not in st.session_state:
+        with st.spinner(f"Preparing {fmt} export…"):
             try:
                 data, ext = export_network(network, fmt)
-                st.session_state["_export_bytes"] = data
-                st.session_state["_export_ext"] = ext
-                st.session_state["_export_fmt"] = fmt
+                st.session_state[cache_key] = (data, ext)
             except Exception as exc:
                 st.error(f"Export failed: {exc}")
-    cached_fmt = st.session_state.get("_export_fmt")
-    cached_bytes = st.session_state.get("_export_bytes")
-    cached_ext = st.session_state.get("_export_ext", fmt.lower())
-    if cached_bytes and cached_fmt == fmt:
-        st.download_button(
-            label=f"Download ({fmt})",
-            data=cached_bytes,
-            file_name=f"network.{cached_ext}",
-            mime="application/octet-stream",
-            key="export_download_btn",
-        )
+                return
+    data, ext = st.session_state[cache_key]
+    st.download_button(
+        label=f"Download ({fmt})",
+        data=data,
+        file_name=f"network.{ext}",
+        mime="application/octet-stream",
+        key="export_download_btn",
+    )
 
 # The NAD's click-to-select injection rewrites the top window URL with
 # ?selected_vl=VLx. Promote that into session state so the sidebar picks
