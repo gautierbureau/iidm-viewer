@@ -53,13 +53,26 @@ from iidm_viewer.filters import (
 PRIORITY_COLUMNS: dict[str, list[str]] = {
     "Generators": ["target_p", "target_q", "target_v", "connected", "voltage_regulator_on", "p", "q", "regulated_element_id"],
     "Loads": ["p0", "q0", "connected", "p", "q"],
+    "Lines": ["connected1", "connected2"],
+    "2-Winding Transformers": ["connected1", "connected2"],
+    "3-Winding Transformers": ["connected1", "connected2", "connected3"],
+}
+
+# Column after which the priority columns are inserted (defaults to "name")
+PRIORITY_ANCHOR: dict[str, str] = {
+    "Lines": "i2",
+    "2-Winding Transformers": "i2",
+    "3-Winding Transformers": "i3",
 }
 
 
 def _reorder_columns(df, component: str):
-    """Move priority columns right after 'name', preserving the rest."""
+    """Move priority columns right after the anchor column, preserving the rest."""
     priority = PRIORITY_COLUMNS.get(component)
-    if not priority or "name" not in df.columns:
+    if not priority:
+        return df
+    anchor = PRIORITY_ANCHOR.get(component, "name")
+    if anchor not in df.columns:
         return df
     present = [c for c in priority if c in df.columns]
     if not present:
@@ -67,7 +80,7 @@ def _reorder_columns(df, component: str):
     cols = list(df.columns)
     for c in present:
         cols.remove(c)
-    insert_at = cols.index("name") + 1
+    insert_at = cols.index(anchor) + 1
     for i, c in enumerate(present):
         cols.insert(insert_at + i, c)
     return df[cols]
