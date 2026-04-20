@@ -57,11 +57,17 @@ def _show_save_network_dialog():
                 st.error(f"Export failed: {exc}")
                 return
     data, ext = st.session_state[cache_key]
+    if data[:5] == b'<?xml':
+        mime = "text/xml; charset=utf-8"
+    elif data[:1] == b'{':
+        mime = "application/json"
+    else:
+        mime = "application/octet-stream"
     st.download_button(
         label=f"Download ({fmt})",
         data=data,
         file_name=f"network.{ext}",
-        mime="application/octet-stream",
+        mime=mime,
         key="export_download_btn",
     )
 
