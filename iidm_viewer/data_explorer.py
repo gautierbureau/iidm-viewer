@@ -1086,7 +1086,7 @@ def render_data_explorer(network, selected_vl):
                 if st.button("View Logs", key="de_lf_logs_btn", help="Load Flow Logs"):
                     show_lf_report_dialog()
 
-    component_options = list(COMPONENT_TYPES.keys())
+    component_options = sorted(COMPONENT_TYPES.keys())
     component = st.selectbox(
         "Component type",
         options=component_options,
