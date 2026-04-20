@@ -1,7 +1,29 @@
 """NAD and SLD tab rendering."""
+import math
+
 from streamlit.testing.v1 import AppTest
 
+from iidm_viewer.diagrams import _BUS_LEGEND_PALETTE, _format_float
 from iidm_viewer.state import load_network
+
+
+def test_format_float_handles_none_nan_and_values():
+    assert _format_float(1.2345, ".2f") == "1.23"
+    assert _format_float(None, ".2f") == "—"
+    assert _format_float(float("nan"), ".2f") == "—"
+    assert _format_float("not a number", ".2f") == "—"
+    # Int input still formats cleanly.
+    assert _format_float(42, ".1f") == "42.0"
+
+
+def test_bus_legend_palette_is_deterministic_and_nonempty():
+    # Palette must have at least one color — `i % len(palette)` would
+    # raise ZeroDivisionError otherwise, breaking the SLD tab.
+    assert len(_BUS_LEGEND_PALETTE) > 0
+    # Hex-color sanity so a future palette swap can't ship a typo.
+    for c in _BUS_LEGEND_PALETTE:
+        assert c.startswith("#") and len(c) == 7
+        int(c[1:], 16)  # parses as hex
 
 
 def _prepare(xiidm_upload, selected_vl=None):
