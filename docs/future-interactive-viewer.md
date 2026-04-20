@@ -505,3 +505,77 @@ click (Map → SLD, NAD → SLD).
 ~1 day end-to-end: 15 lines in `main.ts`, 5 lines in `network_map.py`,
 ~20-line diff in `app.py`, bundle smoke-test additions, docs refresh
 (`docs/tabs.md`, `docs/network-map.md`, `AGENTS.md`).
+
+## Bus-voltage legend — Option B (in-iframe legend)
+
+**Status:** parked. Option A (Python-side legend under the SLD with a
+fixed palette) is live — see
+`iidm_viewer/diagrams.py::_render_bus_legend`. Option B below is the
+more faithful alternative we'd reach for only if exact color-matching
+with the SLD SVG becomes a requirement.
+
+### Why we shipped Option A first
+
+- No JS rebuild, no frontend changes, no new component prop.
+- Post-LF voltages automatically refresh because `get_buses()` is
+  just a worker-thread call made on each rerun.
+- One known limitation: the legend dot colors don't match the bus
+  colors drawn inside the SLD SVG. The palette is indexed by bus
+  order in the VL, not derived from the SVG. For single-bus VLs
+  (the common case) this is visually fine; for multi-bus VLs the
+  dot/SVG color correspondence is missing.
+
+### What Option B would add
+
+Move the legend inside the SLD iframe, alongside the SVG. The
+frontend reads the bus colors directly from the rendered SVG (via
+`querySelectorAll` over the busbar-section elements the SLG library
+emits) and displays them next to the voltage/angle numbers pushed in
+from Python.
+
+Sketch:
+
+1. **Python** — extend `render_interactive_sld` to forward a list of
+   buses with v/angle as a prop:
+   ```python
+   buses = [
+       {"id": b.id, "v_mag": float(b.v_mag), "v_angle": float(b.v_angle)}
+       for b in ...  # network.get_buses(all_attributes=True) filtered to VL
+   ]
+   return _component(svg=..., metadata=..., buses=buses, ...)
+   ```
+2. **Frontend** — in `iidm_viewer/frontend/sld_component/src/main.ts`
+   after the library mounts the SVG, walk the DOM to find each bus's
+   rendered color:
+   ```ts
+   const colors = new Map<string, string>();
+   root.querySelectorAll<SVGElement>('[id]').forEach(el => {
+     // Powsybl SLG tags busbar sections with the bus id; its stroke
+     // is the color we want. Exact selector TBD against a real SLD
+     // sample — test via DevTools on a multi-bus VL.
+     const stroke = el.getAttribute('stroke');
+     if (stroke && el.id) colors.set(el.id, stroke);
+   });
+   ```
+   Render a small `<div class="sld-legend">` alongside the SVG listing
+   each `{id, color, v_mag, v_angle}` row. Forward mount-and-resize
+   via the existing `setFrameHeight` path.
+3. **Smoke-test additions** — append `sld-legend` and
+   `bus-voltage` tokens to the bundle needle list in
+   `tests/test_sld_component.py` so the wiring can't regress silently.
+
+### Trade-offs vs Option A
+
+| | Option A (live) | Option B (parked) |
+|---|---|---|
+| Exact SLD-color matching | No (fixed palette) | Yes (read from SVG) |
+| JS rebuild required | No | Yes (small edit to `main.ts`) |
+| Post-LF refresh | Automatic | Requires new prop round-trip |
+| Depends on SLG SVG markup | No | Yes — brittle if Powsybl reshapes bus IDs/classes |
+| Effort | ~30 LOC Python | ~50 LOC TS + build + tests |
+
+### When to switch
+
+Pick Option B if users report the dot-vs-SVG color mismatch on
+multi-bus VLs as a real usability issue. Otherwise the Python-side
+legend is enough.

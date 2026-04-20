@@ -86,6 +86,16 @@ NetworkProxy stay intact. Same invariant as NAD: accessing `.svg` and
 `.metadata` issues two separate `run()` calls — don't wrap them inside
 another `run()`.
 
+Below the diagram, `_render_bus_legend(network, selected_vl)` shows
+one row per bus in the VL with columns: colored dot, bus id, V (kV),
+angle (°). Data comes from `network.get_buses(all_attributes=True)`;
+`v_mag` / `v_angle` show `—` until a load flow has run. The dot
+colors come from a fixed palette (`_BUS_LEGEND_PALETTE`) indexed by
+bus order, which **does not** attempt to match the bus colors inside
+the pypowsybl SLD SVG. Rationale and the sketch of a more faithful
+in-iframe legend are parked as "Option B" in
+[future-interactive-viewer.md § "Bus-voltage legend — Option B"](future-interactive-viewer.md#bus-voltage-legend--option-b-in-iframe-legend).
+
 ### Data Explorer Components — `data_explorer.render_data_explorer`
 
 See [data-explorer.md](data-explorer.md).
