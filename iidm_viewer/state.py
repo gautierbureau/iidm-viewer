@@ -50,14 +50,36 @@ def get_export_formats() -> list[str]:
     return st.session_state["export_formats"]
 
 
-def export_network(network, format_name: str) -> bytes:
-    """Export the network to bytes using the given format name."""
+def export_network(network, format_name: str) -> tuple[bytes, str]:
+    """Export the network; return (bytes, file_extension).
+
+    pypowsybl wraps some formats (e.g. XIIDM) in a ZIP archive.  Single-file
+    ZIPs are unwrapped so the caller gets the real content and the correct
+    extension.  Multi-file ZIPs are served as-is with extension ``zip``.
+    """
+    import io as _io
+    import zipfile as _zf
+
     raw = object.__getattribute__(network, "_obj")
 
     def _export():
         return raw.save_to_binary_buffer(format_name).getvalue()
 
-    return run(_export)
+    data = run(_export)
+
+    if data[:2] == b'PK':
+        try:
+            with _zf.ZipFile(_io.BytesIO(data)) as zf:
+                names = zf.namelist()
+                if len(names) == 1:
+                    inner = zf.read(names[0])
+                    ext = names[0].rsplit(".", 1)[-1] if "." in names[0] else format_name.lower()
+                    return inner, ext
+        except Exception:
+            pass
+        return data, "zip"
+
+    return data, format_name.lower()
 
 
 def load_network(uploaded_file):
