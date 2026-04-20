@@ -1,7 +1,18 @@
 import streamlit as st
 import pandas as pd
 
-from iidm_viewer.filters import build_vl_lookup
+
+def _vl_nominal_v(network) -> pd.DataFrame:
+    """Return a voltage_level_id → nominal_v lookup without session-state caching.
+
+    Keeping this session-state-free makes the helper functions unit-testable
+    outside of a Streamlit AppTest context.
+    """
+    try:
+        vls = network.get_voltage_levels(attributes=["nominal_v"]).reset_index()
+        return vls.rename(columns={"id": "voltage_level_id"})[["voltage_level_id", "nominal_v"]]
+    except Exception:
+        return pd.DataFrame(columns=["voltage_level_id", "nominal_v"])
 
 
 def _bus_voltages(network) -> pd.DataFrame:
@@ -11,16 +22,15 @@ def _bus_voltages(network) -> pd.DataFrame:
     v_mag / v_pu are NaN when no load flow has run.
     """
     try:
-        buses = network.get_buses(attributes=["v_mag", "angle", "voltage_level_id"]).reset_index()
+        buses = network.get_buses(
+            attributes=["v_mag", "angle", "voltage_level_id"]
+        ).reset_index()
     except Exception:
         return pd.DataFrame(columns=["bus_id", "voltage_level_id", "nominal_v", "v_mag", "v_pu"])
 
-    vl_lookup = build_vl_lookup(network)
-    # vl_lookup index is "id" (voltage level id); rename for the merge
-    lookup = vl_lookup[["id", "nominal_v"]].rename(columns={"id": "voltage_level_id"})
+    lookup = _vl_nominal_v(network)
     merged = buses.merge(lookup, on="voltage_level_id", how="left")
     merged = merged.rename(columns={"id": "bus_id"})
-
     merged["v_pu"] = merged["v_mag"] / merged["nominal_v"]
     return merged[["bus_id", "voltage_level_id", "nominal_v", "v_mag", "v_pu"]]
 
@@ -28,11 +38,11 @@ def _bus_voltages(network) -> pd.DataFrame:
 def _shunt_compensation(network) -> pd.DataFrame:
     """Return one row per shunt compensator with reactive power columns (MVAr).
 
-    current_q_mvar  — from load-flow q if available, else b × nominal_v²
-    available_q_mvar — additional capacity not yet activated (remaining
-                       sections × b_per_section × nominal_v², plus full
-                       capacity of disconnected units)
-    total_q_mvar    — full capacity at maximum_section_count
+    current_q_mvar   — from load-flow q if available, else
+                       b_per_section × section_count × nominal_v²
+    available_q_mvar — remaining sections × b_per_section × nominal_v²,
+                       plus the current contribution of disconnected units
+    total_q_mvar     — full capacity at max_section_count × b_per_section × nominal_v²
     """
     try:
         shunts = network.get_shunt_compensators(
@@ -46,27 +56,21 @@ def _shunt_compensation(network) -> pd.DataFrame:
     if shunts.empty:
         return shunts
 
-    vl_lookup = build_vl_lookup(network)
-    lookup = vl_lookup[["id", "nominal_v"]].rename(columns={"id": "voltage_level_id"})
+    lookup = _vl_nominal_v(network)
     df = shunts.merge(lookup, on="voltage_level_id", how="left")
 
-    v2 = df["nominal_v"] ** 2  # kV² → MVAr when multiplied by S
+    v2 = df["nominal_v"] ** 2
 
-    # current injection
     has_lf = df["q"].notna().any()
     if has_lf:
         df["current_q_mvar"] = df["q"]
     else:
         df["current_q_mvar"] = df["b_per_section"] * df["section_count"] * v2
 
-    # total capacity at max sections
     df["total_q_mvar"] = df["b_per_section"] * df["max_section_count"] * v2
 
-    # available but not yet activated
-    remaining_sections = (df["max_section_count"] - df["section_count"]).clip(lower=0)
-    available_from_sections = df["b_per_section"] * remaining_sections * v2
-    # disconnected units: their current contribution is zero, so the full
-    # current_q_mvar is "available" once reconnected
+    remaining = (df["max_section_count"] - df["section_count"]).clip(lower=0)
+    available_from_sections = df["b_per_section"] * remaining * v2
     disconnected_loss = df["current_q_mvar"].where(~df["connected"], other=0.0).fillna(0.0)
     df["available_q_mvar"] = available_from_sections + disconnected_loss
 
@@ -80,8 +84,9 @@ def _shunt_compensation(network) -> pd.DataFrame:
 def _svc_compensation(network) -> pd.DataFrame:
     """Return one row per SVC with reactive power columns (MVAr).
 
-    current_q_mvar — from load-flow q if available; 0 for OFF mode
-    q_min_mvar / q_max_mvar — operating range from b_min/b_max × nominal_v²
+    current_q_mvar  — from load-flow q if available; 0 for OFF mode
+    q_min_mvar      — b_min × nominal_v²
+    q_max_mvar      — b_max × nominal_v²
     """
     try:
         svcs = network.get_static_var_compensators(
@@ -95,8 +100,7 @@ def _svc_compensation(network) -> pd.DataFrame:
     if svcs.empty:
         return svcs
 
-    vl_lookup = build_vl_lookup(network)
-    lookup = vl_lookup[["id", "nominal_v"]].rename(columns={"id": "voltage_level_id"})
+    lookup = _vl_nominal_v(network)
     df = svcs.merge(lookup, on="voltage_level_id", how="left")
 
     v2 = df["nominal_v"] ** 2
@@ -123,7 +127,6 @@ def _render_voltage_section(buses: pd.DataFrame):
     if not has_lf:
         st.info("Voltage magnitudes are not available — run a load flow first.")
 
-    # Summary table grouped by nominal_v
     grp = buses.groupby("nominal_v")
     summary_rows = []
     for nom_v, g in grp:
