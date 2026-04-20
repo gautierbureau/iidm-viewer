@@ -27,6 +27,44 @@ from iidm_viewer.voltage_analysis import render_voltage_analysis
 st.set_page_config(page_title="IIDM Viewer", layout="wide", page_icon="⚡")
 init_state()
 
+
+@st.dialog("Start from a blank network")
+def _show_blank_network_dialog():
+    blank_id = st.text_input("Network ID", value="network", key="blank_network_id")
+    if st.button("Create blank network", key="blank_network_btn"):
+        create_empty_network(blank_id)
+        # Bump the uploader key so Streamlit discards the old file and
+        # doesn't re-load it over the blank network on the next rerun.
+        st.session_state["file_uploader_gen"] += 1
+        st.rerun()
+
+
+@st.dialog("Save network")
+def _show_save_network_dialog():
+    network = get_network()
+    if network is None:
+        st.warning("No network loaded.")
+        return
+    fmt = st.selectbox("Export format", get_export_formats(), key="export_format_select")
+    if st.button("Prepare download", key="export_prepare_btn"):
+        with st.spinner("Exporting..."):
+            try:
+                data = export_network(network, fmt)
+                st.session_state["_export_bytes"] = data
+                st.session_state["_export_fmt"] = fmt
+            except Exception as exc:
+                st.error(f"Export failed: {exc}")
+    cached_fmt = st.session_state.get("_export_fmt")
+    cached_bytes = st.session_state.get("_export_bytes")
+    if cached_bytes and cached_fmt == fmt:
+        st.download_button(
+            label=f"Download ({fmt})",
+            data=cached_bytes,
+            file_name=f"network.{fmt.lower()}",
+            mime="application/octet-stream",
+            key="export_download_btn",
+        )
+
 # The NAD's click-to-select injection rewrites the top window URL with
 # ?selected_vl=VLx. Promote that into session state so the sidebar picks
 # it up on the subsequent rerun.
@@ -56,27 +94,20 @@ with st.sidebar:
                 st.session_state["_last_file"] = uploaded.name
             st.rerun()
 
-    # Bootstrap a blank network so users can build a node-breaker model
-    # from scratch via the Data Explorer's "Create a new ..." forms.
-    with st.expander("Or start from a blank network", expanded=False):
-        blank_id = st.text_input(
-            "Network ID", value="network", key="blank_network_id"
-        )
-        if st.button("Create blank network", key="blank_network_btn"):
-            create_empty_network(blank_id)
-            # Bump the uploader key so Streamlit discards the old file and
-            # doesn't re-load it over the blank network on the next rerun.
-            st.session_state["file_uploader_gen"] += 1
-            st.rerun()
+    if st.button("Start from blank network", key="blank_network_open_btn", use_container_width=True):
+        _show_blank_network_dialog()
 
     network = get_network()
 
     selected_vl = None
     if network is not None:
-        st.divider()
-        if st.button("Network Reduction", key="network_reduction_btn", use_container_width=True):
-            show_network_reduction_dialog()
-        st.divider()
+        col_nr, col_save = st.columns(2)
+        with col_nr:
+            if st.button("Network Reduction", key="network_reduction_btn", use_container_width=True):
+                show_network_reduction_dialog()
+        with col_save:
+            if st.button("Save network", key="save_network_btn", use_container_width=True):
+                _show_save_network_dialog()
         selected_vl = vl_selector(network)
         st.divider()
         col_lf, col_params = st.columns([2, 1], gap="small")
@@ -96,38 +127,12 @@ with st.sidebar:
             if st.button("View Logs", key="lf_logs_btn", help="Load Flow Logs"):
                 show_lf_report_dialog()
 
-        st.divider()
-        with st.expander("Save network", expanded=False):
-            fmt = st.selectbox(
-                "Export format",
-                get_export_formats(),
-                key="export_format_select",
-            )
-            if st.button("Prepare download", key="export_prepare_btn"):
-                with st.spinner("Exporting..."):
-                    try:
-                        data = export_network(network, fmt)
-                        st.session_state["_export_bytes"] = data
-                        st.session_state["_export_fmt"] = fmt
-                    except Exception as exc:
-                        st.error(f"Export failed: {exc}")
-            cached_fmt = st.session_state.get("_export_fmt")
-            cached_bytes = st.session_state.get("_export_bytes")
-            if cached_bytes and cached_fmt == fmt:
-                st.download_button(
-                    label=f"Download ({fmt})",
-                    data=cached_bytes,
-                    file_name=f"network.{fmt.lower()}",
-                    mime="application/octet-stream",
-                    key="export_download_btn",
-                )
-
 # -- Main area --
 if network is None:
     st.header("IIDM Viewer")
     st.info(
         "Upload a network file in the sidebar to get started, "
-        "or expand \"Or start from a blank network\" to build one from scratch."
+        "or click \"Start from blank network\" to build one from scratch."
     )
     st.stop()
 
