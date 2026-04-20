@@ -10,6 +10,7 @@ def _vl_nominal_v(network) -> pd.DataFrame:
     """
     try:
         vls = network.get_voltage_levels(attributes=["nominal_v"]).reset_index()
+        vls["id"] = vls["id"].astype(str)
         return vls.rename(columns={"id": "voltage_level_id"})[["voltage_level_id", "nominal_v"]]
     except Exception:
         return pd.DataFrame(columns=["voltage_level_id", "nominal_v"])
@@ -26,6 +27,7 @@ def _bus_voltages(network) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=["bus_id", "voltage_level_id", "nominal_v", "v_mag", "v_pu"])
 
+    buses["voltage_level_id"] = buses["voltage_level_id"].astype(str)
     lookup = _vl_nominal_v(network)
     merged = buses.merge(lookup, on="voltage_level_id", how="left")
     merged = merged.rename(columns={"id": "bus_id"})
@@ -50,6 +52,7 @@ def _shunt_compensation(network) -> pd.DataFrame:
     if shunts.empty:
         return shunts
 
+    shunts["voltage_level_id"] = shunts["voltage_level_id"].astype(str)
     lookup = _vl_nominal_v(network)
     df = shunts.merge(lookup, on="voltage_level_id", how="left")
 
@@ -94,6 +97,7 @@ def _svc_compensation(network) -> pd.DataFrame:
     if svcs.empty:
         return svcs
 
+    svcs["voltage_level_id"] = svcs["voltage_level_id"].astype(str)
     lookup = _vl_nominal_v(network)
     df = svcs.merge(lookup, on="voltage_level_id", how="left")
 

@@ -132,3 +132,37 @@ def test_component_types_keys_match_network_methods():
         assert method_name.startswith("get_")
         # Method resolved on the Network class, not an instance.
         assert hasattr(pn.Network, method_name), method_name
+
+
+# ---------- blank-network regression tests (float64 vs object dtype) ----------
+
+def test_country_totals_blank_network_no_error(blank_network):
+    """_country_totals must not raise on a network with no substations or VLs."""
+    df = _country_totals(blank_network)
+    assert df.empty or set(df.columns) >= {"country"}
+
+
+def test_build_vl_country_map_blank_network_no_error(blank_network):
+    """_build_vl_country_map must return an empty DataFrame (not raise) for a
+    blank network whose get_voltage_levels/get_substations return empty frames
+    with float64 ID columns."""
+    from iidm_viewer.network_info import _build_vl_country_map
+    result = _build_vl_country_map(blank_network)
+    assert result.empty
+    assert set(result.columns) >= {"voltage_level_id", "country"}
+
+
+def test_overview_blank_network_no_exception():
+    """Rendering the Overview tab with a blank (empty) network must not crash."""
+    from streamlit.testing.v1 import AppTest
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_empty(network_id="blank")
+
+    at = AppTest.from_file("iidm_viewer/app.py")
+    at.run(timeout=30)
+    at.session_state["network"] = NetworkProxy(run(_make))
+    at.run(timeout=30)
+    assert not at.exception
