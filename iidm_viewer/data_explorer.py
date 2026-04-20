@@ -1107,8 +1107,7 @@ def render_data_explorer(network, selected_vl):
     )
 
     if _has_creation:
-        with st.container(border=True):
-            st.caption(f"Create / attach — {component}")
+        with st.expander("Create component and/or attach extensions", expanded=False):
 
             if component in CREATABLE_COMPONENTS:
                 _render_create_component_form(network, component)
