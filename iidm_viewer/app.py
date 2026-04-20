@@ -101,13 +101,11 @@ with st.sidebar:
 
     selected_vl = None
     if network is not None:
-        col_nr, col_save = st.columns(2)
-        with col_nr:
-            if st.button("Network Reduction", key="network_reduction_btn", use_container_width=True):
-                show_network_reduction_dialog()
-        with col_save:
-            if st.button("Save network", key="save_network_btn", use_container_width=True):
-                _show_save_network_dialog()
+        if st.button("Network Reduction", key="network_reduction_btn", use_container_width=True):
+            show_network_reduction_dialog()
+        if st.button("Save network", key="save_network_btn", use_container_width=True):
+            _show_save_network_dialog()
+        st.markdown('<hr style="margin: 0.4rem 0"/>', unsafe_allow_html=True)
         selected_vl = vl_selector(network)
         st.divider()
         col_lf, col_params = st.columns([2, 1], gap="small")
