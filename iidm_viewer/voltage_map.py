@@ -219,19 +219,12 @@ function toRGBA(c, alpha) {{
   return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')';
 }}
 
-var map = L.map('map');
+// Start centered on France (same default as the pre-2dac287 Leaflet map).
+var map = L.map('map').setView([46.6, 2.5], 6);
 L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
   attribution: '&copy; OpenStreetMap contributors',
   maxZoom: 18
 }}).addTo(map);
-
-if (records.length > 0) {{
-  var pts = records.map(function(r) {{ return [r.lat, r.lon]; }});
-  var bounds = L.latLngBounds(pts);
-  map.fitBounds(bounds, {{ padding: [30, 30] }});
-}} else {{
-  map.setView([46.6, 2.5], 6);
-}}
 
 function tooltipHtml(r) {{
   var html = '<b>' + r.vl_id + '</b><br>' +
