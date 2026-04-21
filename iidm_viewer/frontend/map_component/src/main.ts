@@ -15,6 +15,7 @@
  *     substations: MapSubstation[],
  *     substationPositions: GeoDataSubstation[],
  *     lines: MapLine[],                   // lines + 2W-transformers, untyped
+ *     linePositions: {id: string, coordinates: Coordinate[]}[],
  *     height: number,
  *   }
  *
@@ -37,10 +38,13 @@ import {
   type MapSubstation,
 } from '@powsybl/network-map-layers';
 
+type LinePosition = { id: string; coordinates: Coordinate[] };
+
 type RenderArgs = {
   substations?: MapSubstation[];
   substationPositions?: GeoDataSubstation[];
   lines?: MapLine[];
+  linePositions?: LinePosition[];
   height?: number;
 };
 
@@ -159,6 +163,7 @@ function render(args: RenderArgs): void {
   const substations = args.substations ?? [];
   const substationPositions = args.substationPositions ?? [];
   const lines = args.lines ?? [];
+  const linePositions = args.linePositions ?? [];
 
   // ------------------------------------------------------------------
   // Build MapEquipments / GeoData.
@@ -171,7 +176,11 @@ function render(args: RenderArgs): void {
 
   const subPosMap = new Map<string, Coordinate>();
   for (const p of substationPositions) subPosMap.set(p.id, p.coordinate);
-  const geoData = new GeoData(subPosMap, new Map());
+
+  const linePosMap = new Map<string, Coordinate[]>();
+  for (const lp of linePositions) linePosMap.set(lp.id, lp.coordinates);
+
+  const geoData = new GeoData(subPosMap, linePosMap);
 
   const typedLines: MapLineWithType[] = lines.map((l) => ({
     ...l,
@@ -214,7 +223,7 @@ function render(args: RenderArgs): void {
           labelsVisible: false,
           labelSize: 11,
           labelColor: [0, 0, 0, 255],
-          lineFullPath: false,
+          lineFullPath: true,
           lineParallelPath: true,
           showLineFlow: true,
           areFlowsValid: true,
