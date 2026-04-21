@@ -69,12 +69,14 @@ fields are:
 | `SWITCH` | `switch_id` (str), `open` (bool) | — |
 | `TERMINALS_CONNECTION` | `element_id` (str), `opening` (bool) | `side` (`"NONE"` / `"ONE"` / `"TWO"`) |
 | `GENERATOR_ACTIVE_POWER` | `generator_id` (str), `is_relative` (bool), `active_power` (float, MW) | — |
+| `LOAD_ACTIVE_POWER` | `load_id` (str), `is_relative` (bool), `active_power` (float, MW) | — |
 | `PHASE_TAP_CHANGER_POSITION` | `transformer_id` (str), `is_relative` (bool), `tap_position` (int) | `side` |
+| `RATIO_TAP_CHANGER_POSITION` | `transformer_id` (str), `is_relative` (bool), `tap_position` (int) | `side` |
+| `SHUNT_COMPENSATOR_POSITION` | `shunt_id` (str), `section` (int) | — |
 
 Adding a new action type means: extend `_ACTION_TYPES` in
-`security_analysis.py`, add a branch in `_render_action_form_fields`, and add
-a matching branch in `state._apply_action`. Common candidates: `LOAD_ACTIVE_POWER`,
-`RATIO_TAP_CHANGER_POSITION`, `SHUNT_COMPENSATOR_POSITION`.
+`security_analysis.py`, add a branch in `_render_action_form_fields` and in
+`_action_summary`, and add a matching branch in `state._apply_action`.
 
 ### Operator strategy shape
 

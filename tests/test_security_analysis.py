@@ -611,6 +611,30 @@ def test_action_summary_ptc():
     assert "PTC" in s and "T1" in s and "=3" in s
 
 
+def test_action_summary_load():
+    s = _action_summary({
+        "action_id": "a5", "type": "LOAD_ACTIVE_POWER",
+        "load_id": "LD1", "is_relative": True, "active_power": 15.0,
+    })
+    assert "LOAD P" in s and "LD1" in s and "Δ15" in s
+
+
+def test_action_summary_rtc():
+    s = _action_summary({
+        "action_id": "a6", "type": "RATIO_TAP_CHANGER_POSITION",
+        "transformer_id": "T2", "is_relative": True, "tap_position": -2,
+    })
+    assert "RTC" in s and "T2" in s and "Δ-2" in s
+
+
+def test_action_summary_shunt():
+    s = _action_summary({
+        "action_id": "a7", "type": "SHUNT_COMPENSATOR_POSITION",
+        "shunt_id": "SH1", "section": 2,
+    })
+    assert "SHUNT" in s and "SH1" in s and "section=2" in s
+
+
 def _ids_fixture():
     return {
         "branches": ["L1"],
@@ -620,7 +644,10 @@ def _ids_fixture():
         "voltage_levels": ["VL1"],
         "switches": ["SW1"],
         "generators": ["G1"],
+        "loads": ["LD1"],
+        "shunt_compensators": ["SH1"],
         "phase_tap_changers": ["T1"],
+        "ratio_tap_changers": ["T2"],
         "connectables": ["L1", "G1"],
     }
 
@@ -803,6 +830,40 @@ def test_apply_action_ptc():
     args, kwargs = analysis.add_phase_tap_changer_position_action.call_args
     assert args == ("a", "T1", False, 3)
     assert kwargs["side"].name == "NONE"
+
+
+def test_apply_action_load():
+    analysis = MagicMock()
+    _apply_action(analysis, {
+        "action_id": "a", "type": "LOAD_ACTIVE_POWER",
+        "load_id": "LD1", "is_relative": False, "active_power": 20.0,
+    })
+    analysis.add_load_active_power_action.assert_called_once_with(
+        "a", "LD1", False, 20.0,
+    )
+
+
+def test_apply_action_rtc():
+    analysis = MagicMock()
+    _apply_action(analysis, {
+        "action_id": "a", "type": "RATIO_TAP_CHANGER_POSITION",
+        "transformer_id": "T2", "is_relative": True, "tap_position": -1,
+        "side": "ONE",
+    })
+    args, kwargs = analysis.add_ratio_tap_changer_position_action.call_args
+    assert args == ("a", "T2", True, -1)
+    assert kwargs["side"].name == "ONE"
+
+
+def test_apply_action_shunt():
+    analysis = MagicMock()
+    _apply_action(analysis, {
+        "action_id": "a", "type": "SHUNT_COMPENSATOR_POSITION",
+        "shunt_id": "SH1", "section": 2,
+    })
+    analysis.add_shunt_compensator_position_action.assert_called_once_with(
+        "a", "SH1", 2,
+    )
 
 
 def test_apply_action_unknown_raises():

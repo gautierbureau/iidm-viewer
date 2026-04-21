@@ -2012,8 +2012,12 @@ def _apply_action(analysis, action: dict) -> None:
     - ``SWITCH``: ``switch_id``, ``open``
     - ``TERMINALS_CONNECTION``: ``element_id``, ``opening``, optional ``side``
     - ``GENERATOR_ACTIVE_POWER``: ``generator_id``, ``is_relative``, ``active_power``
+    - ``LOAD_ACTIVE_POWER``: ``load_id``, ``is_relative``, ``active_power``
     - ``PHASE_TAP_CHANGER_POSITION``: ``transformer_id``, ``is_relative``, ``tap_position``,
       optional ``side``
+    - ``RATIO_TAP_CHANGER_POSITION``: ``transformer_id``, ``is_relative``, ``tap_position``,
+      optional ``side``
+    - ``SHUNT_COMPENSATOR_POSITION``: ``shunt_id``, ``section``
     """
     from pypowsybl._pypowsybl import Side
 
@@ -2039,6 +2043,13 @@ def _apply_action(analysis, action: dict) -> None:
             bool(action["is_relative"]),
             float(action["active_power"]),
         )
+    elif atype == "LOAD_ACTIVE_POWER":
+        analysis.add_load_active_power_action(
+            action_id,
+            action["load_id"],
+            bool(action["is_relative"]),
+            float(action["active_power"]),
+        )
     elif atype == "PHASE_TAP_CHANGER_POSITION":
         analysis.add_phase_tap_changer_position_action(
             action_id,
@@ -2046,6 +2057,20 @@ def _apply_action(analysis, action: dict) -> None:
             bool(action["is_relative"]),
             int(action["tap_position"]),
             side=side,
+        )
+    elif atype == "RATIO_TAP_CHANGER_POSITION":
+        analysis.add_ratio_tap_changer_position_action(
+            action_id,
+            action["transformer_id"],
+            bool(action["is_relative"]),
+            int(action["tap_position"]),
+            side=side,
+        )
+    elif atype == "SHUNT_COMPENSATOR_POSITION":
+        analysis.add_shunt_compensator_position_action(
+            action_id,
+            action["shunt_id"],
+            int(action["section"]),
         )
     else:
         raise ValueError(f"Unsupported action type: {atype!r}")
