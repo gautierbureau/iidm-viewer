@@ -11,7 +11,10 @@ _ACTION_TYPES = [
     "SWITCH",
     "TERMINALS_CONNECTION",
     "GENERATOR_ACTIVE_POWER",
+    "LOAD_ACTIVE_POWER",
     "PHASE_TAP_CHANGER_POSITION",
+    "RATIO_TAP_CHANGER_POSITION",
+    "SHUNT_COMPENSATOR_POSITION",
 ]
 _CONDITION_TYPES = [
     "TRUE_CONDITION",
@@ -46,9 +49,14 @@ def _get_ids(network) -> dict[str, list[str]]:
         vls = list(raw.get_voltage_levels(attributes=[]).index)
         switches = list(raw.get_switches(attributes=[]).index)
         gens = list(raw.get_generators(attributes=[]).index)
+        loads = list(raw.get_loads(attributes=[]).index)
+        shunts = list(raw.get_shunt_compensators(attributes=[]).index)
         # Transformers with a phase tap changer
         ptc_df = raw.get_phase_tap_changers(attributes=[])
         ptc_ids = sorted(set(ptc_df.index)) if not ptc_df.empty else []
+        # Transformers with a ratio tap changer
+        rtc_df = raw.get_ratio_tap_changers(attributes=[])
+        rtc_ids = sorted(set(rtc_df.index)) if not rtc_df.empty else []
         return {
             "branches": sorted(lines + t2w),
             "lines": sorted(lines),
@@ -57,7 +65,10 @@ def _get_ids(network) -> dict[str, list[str]]:
             "voltage_levels": sorted(vls),
             "switches": sorted(switches),
             "generators": sorted(gens),
+            "loads": sorted(loads),
+            "shunt_compensators": sorted(shunts),
             "phase_tap_changers": ptc_ids,
+            "ratio_tap_changers": rtc_ids,
             # "connectable" elements (terminals-connection action targets):
             # in practice, lines + 2WTs + generators are the most common.
             "connectables": sorted(lines + t2w + gens),
@@ -358,11 +369,28 @@ def _action_summary(action: dict) -> str:
             f"`{aid}` — **GEN P** `{action['generator_id']}` "
             f"{rel}{action['active_power']:g} MW"
         )
+    if atype == "LOAD_ACTIVE_POWER":
+        rel = "Δ" if action.get("is_relative") else "="
+        return (
+            f"`{aid}` — **LOAD P** `{action['load_id']}` "
+            f"{rel}{action['active_power']:g} MW"
+        )
     if atype == "PHASE_TAP_CHANGER_POSITION":
         rel = "Δ" if action.get("is_relative") else "="
         return (
             f"`{aid}` — **PTC** `{action['transformer_id']}` "
             f"{rel}{action['tap_position']}"
+        )
+    if atype == "RATIO_TAP_CHANGER_POSITION":
+        rel = "Δ" if action.get("is_relative") else "="
+        return (
+            f"`{aid}` — **RTC** `{action['transformer_id']}` "
+            f"{rel}{action['tap_position']}"
+        )
+    if atype == "SHUNT_COMPENSATOR_POSITION":
+        return (
+            f"`{aid}` — **SHUNT** `{action['shunt_id']}` "
+            f"section={action['section']}"
         )
     return f"`{aid}` — **{atype}**"
 
@@ -413,6 +441,27 @@ def _render_action_form_fields(atype: str, ids: dict) -> dict | None:
             "is_relative": bool(is_relative),
             "active_power": float(active_power),
         }
+    if atype == "LOAD_ACTIVE_POWER":
+        if not ids["loads"]:
+            st.info("No loads in this network.")
+            return None
+        load_id = st.selectbox("Load", ids["loads"], key="sa_act_load_id")
+        is_relative = st.checkbox(
+            "Relative change (tick) vs. absolute (untick)",
+            value=True,
+            key="sa_act_load_rel",
+        )
+        active_power = st.number_input(
+            "Active power (MW)",
+            value=-10.0,
+            step=10.0,
+            key="sa_act_load_p",
+        )
+        return {
+            "load_id": load_id,
+            "is_relative": bool(is_relative),
+            "active_power": float(active_power),
+        }
     if atype == "PHASE_TAP_CHANGER_POSITION":
         if not ids["phase_tap_changers"]:
             st.info("No phase tap changers in this network.")
@@ -439,6 +488,53 @@ def _render_action_form_fields(atype: str, ids: dict) -> dict | None:
             "is_relative": bool(is_relative),
             "tap_position": int(tap_position),
             "side": side,
+        }
+    if atype == "RATIO_TAP_CHANGER_POSITION":
+        if not ids["ratio_tap_changers"]:
+            st.info("No ratio tap changers in this network.")
+            return None
+        tx_id = st.selectbox(
+            "Transformer",
+            ids["ratio_tap_changers"],
+            key="sa_act_rtc_id",
+        )
+        is_relative = st.checkbox(
+            "Relative change (tick) vs. absolute (untick)",
+            value=False,
+            key="sa_act_rtc_rel",
+        )
+        tap_position = st.number_input(
+            "Tap position",
+            value=0,
+            step=1,
+            key="sa_act_rtc_tap",
+        )
+        side = st.selectbox("Side (3WTs only)", _SIDES, index=0, key="sa_act_rtc_side")
+        return {
+            "transformer_id": tx_id,
+            "is_relative": bool(is_relative),
+            "tap_position": int(tap_position),
+            "side": side,
+        }
+    if atype == "SHUNT_COMPENSATOR_POSITION":
+        if not ids["shunt_compensators"]:
+            st.info("No shunt compensators in this network.")
+            return None
+        shunt_id = st.selectbox(
+            "Shunt compensator",
+            ids["shunt_compensators"],
+            key="sa_act_shunt_id",
+        )
+        section = st.number_input(
+            "Section count",
+            value=0,
+            step=1,
+            min_value=0,
+            key="sa_act_shunt_sec",
+        )
+        return {
+            "shunt_id": shunt_id,
+            "section": int(section),
         }
     return {}
 
