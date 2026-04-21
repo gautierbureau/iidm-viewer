@@ -1193,3 +1193,215 @@ def test_run_security_analysis_operator_strategy_violation_condition(xiidm_uploa
         operator_strategies=strategies,
     )
     assert "operator_strategies" in results
+
+
+# ---------------------------------------------------------------------------
+# JSON import / export
+# ---------------------------------------------------------------------------
+
+
+def test_persist_uploaded_json_writes_files_and_records_state():
+    from iidm_viewer.security_analysis import _persist_uploaded_json
+
+    f1 = MagicMock()
+    f1.name = "contingencies.json"
+    f1.getvalue.return_value = b'{"version": "1.0"}'
+    f2 = MagicMock()
+    f2.name = "more.json"
+    f2.getvalue.return_value = b'[]'
+
+    state = {}
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = state
+        added = _persist_uploaded_json([f1, f2], "_sa_x")
+    assert added == 2
+    entries = state["_sa_x"]
+    assert [e["name"] for e in entries] == ["contingencies.json", "more.json"]
+    import os
+    for e in entries:
+        with open(e["path"], "rb") as fh:
+            assert fh.read() in (b'{"version": "1.0"}', b'[]')
+        os.unlink(e["path"])
+
+
+def test_persist_uploaded_json_skips_duplicates():
+    from iidm_viewer.security_analysis import _persist_uploaded_json
+
+    f = MagicMock()
+    f.name = "dup.json"
+    f.getvalue.return_value = b'{}'
+    state = {}
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = state
+        first = _persist_uploaded_json([f], "_sa_y")
+        second = _persist_uploaded_json([f], "_sa_y")
+    assert first == 1
+    assert second == 0
+    assert len(state["_sa_y"]) == 1
+    import os
+    os.unlink(state["_sa_y"][0]["path"])
+
+
+def test_render_json_upload_section_stores_paths_on_load():
+    from iidm_viewer.security_analysis import _render_json_upload_section
+
+    f = MagicMock()
+    f.name = "x.json"
+    f.getvalue.return_value = b'{}'
+    state: dict = {}
+
+    def button_spy(label, *args, **kwargs):
+        # Only the Load button should fire; the Remove rows rendered after a
+        # successful load must not be clicked by the same mock.
+        return kwargs.get("key") == "_sa_cj_load_btn"
+
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = state
+        mock_st.expander.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.file_uploader.return_value = [f]
+        mock_st.button.side_effect = button_spy
+        _render_json_upload_section(
+            label="Upload",
+            state_key="_sa_cj",
+            help_text="",
+            uploader_gen_key="_sa_cj_gen",
+        )
+    assert len(state["_sa_cj"]) == 1
+    assert state["_sa_cj"][0]["name"] == "x.json"
+    assert state["_sa_cj_gen"] == 1
+    import os
+    os.unlink(state["_sa_cj"][0]["path"])
+
+
+def test_render_json_upload_section_no_files_warns():
+    from iidm_viewer.security_analysis import _render_json_upload_section
+
+    state: dict = {}
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = state
+        mock_st.expander.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.file_uploader.return_value = []
+        mock_st.button.return_value = True
+        _render_json_upload_section(
+            label="Upload",
+            state_key="_sa_cj2",
+            help_text="",
+            uploader_gen_key="_sa_cj2_gen",
+        )
+    mock_st.warning.assert_called()
+    assert state.get("_sa_cj2", []) == []
+
+
+def test_render_config_tab_forwards_json_paths_to_run():
+    contingencies = [{"id": "N1_L1", "element_id": "L1"}]
+    sa_results = {
+        "pre_status": "CONVERGED",
+        "pre_violations": pd.DataFrame(),
+        "post": {},
+        "operator_strategies": {},
+        "contingencies": contingencies,
+    }
+    net = MagicMock()
+    state = {
+        "_sa_contingencies": contingencies,
+        "_sa_contingencies_json_files": [
+            {"name": "c.json", "path": "/tmp/c.json"},
+        ],
+        "_sa_actions_json_files": [
+            {"name": "a.json", "path": "/tmp/a.json"},
+        ],
+        "_sa_operator_strategies_json_files": [
+            {"name": "s.json", "path": "/tmp/s.json"},
+        ],
+    }
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._render_contingencies_subtab"), \
+         patch("iidm_viewer.security_analysis._render_monitored_subtab"), \
+         patch("iidm_viewer.security_analysis._render_limit_reductions_subtab"), \
+         patch("iidm_viewer.security_analysis._render_actions_subtab"), \
+         patch("iidm_viewer.security_analysis._render_operator_strategies_subtab"), \
+         patch(
+             "iidm_viewer.security_analysis.run_security_analysis",
+             return_value=sa_results,
+         ) as mock_run:
+        mock_st.session_state = state
+        mock_st.tabs.return_value = (_cm(), _cm(), _cm(), _cm(), _cm())
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.button.return_value = True
+        mock_st.spinner.return_value = _cm()
+        _render_config_tab(net)
+    _, kwargs = mock_run.call_args
+    assert kwargs["contingencies_json_paths"] == ["/tmp/c.json"]
+    assert kwargs["actions_json_paths"] == ["/tmp/a.json"]
+    assert kwargs["operator_strategies_json_paths"] == ["/tmp/s.json"]
+
+
+def test_render_config_tab_run_button_enabled_with_json_only():
+    """When no form contingencies but a JSON file is uploaded, the run
+    button must be enabled (contingency source is present)."""
+    net = MagicMock()
+    state = {
+        "_sa_contingencies": [],
+        "_sa_contingencies_json_files": [
+            {"name": "c.json", "path": "/tmp/c.json"},
+        ],
+    }
+    captured = {}
+
+    def button_spy(label, *args, **kwargs):
+        if kwargs.get("key") == "sa_run_btn":
+            captured["disabled"] = kwargs.get("disabled")
+        return False
+
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._render_contingencies_subtab"), \
+         patch("iidm_viewer.security_analysis._render_monitored_subtab"), \
+         patch("iidm_viewer.security_analysis._render_limit_reductions_subtab"), \
+         patch("iidm_viewer.security_analysis._render_actions_subtab"), \
+         patch("iidm_viewer.security_analysis._render_operator_strategies_subtab"):
+        mock_st.session_state = state
+        mock_st.tabs.return_value = (_cm(), _cm(), _cm(), _cm(), _cm())
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.button.side_effect = button_spy
+        _render_config_tab(net)
+    assert captured.get("disabled") is False
+
+
+def test_render_results_tab_renders_download_when_json_export_present():
+    results = _converged_results()
+    results["json_export"] = b'{"pre":"CONVERGED"}'
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = {"_sa_results": results}
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.slider.return_value = 0
+        mock_st.text_input.return_value = ""
+        mock_st.selectbox.return_value = "N1_L1"
+        _render_results_tab()
+    mock_st.download_button.assert_called()
+    _, kwargs = mock_st.download_button.call_args
+    assert kwargs.get("data") == b'{"pre":"CONVERGED"}'
+
+
+def test_render_results_tab_no_download_when_json_export_missing():
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = {"_sa_results": _converged_results()}
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.slider.return_value = 0
+        mock_st.text_input.return_value = ""
+        mock_st.selectbox.return_value = "N1_L1"
+        _render_results_tab()
+    mock_st.download_button.assert_not_called()
+
+
+def test_run_security_analysis_json_export_returned(xiidm_upload):
+    pytest.importorskip("pypowsybl.security")
+    network = load_network(xiidm_upload)
+    contingencies = build_n1_contingencies(network, "Lines")[:1]
+    results = run_security_analysis(network, contingencies)
+    assert "json_export" in results
+    assert isinstance(results["json_export"], (bytes, bytearray))
+    assert len(results["json_export"]) > 0
+    import json
+    json.loads(results["json_export"])

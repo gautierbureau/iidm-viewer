@@ -6,7 +6,7 @@
 |---|---|
 | `app.py` tab "Security Analysis" | "Run Security Analysis" button in the Configuration sub-tab |
 
-## Execution — `state.run_security_analysis(network, contingencies, monitored_elements=None, limit_reductions=None)`
+## Execution — `state.run_security_analysis(network, contingencies, monitored_elements=None, limit_reductions=None, actions=None, operator_strategies=None, contingencies_json_paths=None, actions_json_paths=None, operator_strategies_json_paths=None)`
 
 All pypowsybl calls happen inside `_run_sa` on the worker thread. Results
 (pre/post DataFrames, monitored-element DataFrames and status strings) are
@@ -18,12 +18,16 @@ is not safe to access from the worker.
 
 Inside the worker, the analysis is composed in this order:
 
-1. `add_single_element_contingency` for each contingency
-2. `add_monitored_elements(...)` for each monitored-element rule
-3. `add_limit_reductions(pd.DataFrame(...).set_index("limit_type"))` if any are defined
-4. `_apply_action(...)` for each action — see the dispatcher below
-5. `add_operator_strategy(...)` for each operator strategy
-6. `run_ac(raw, parameters=params)`
+1. `add_single_element_contingency` / `add_multiple_elements_contingency` for each dict contingency
+2. `add_contingencies_from_json_file(path)` for each path in `contingencies_json_paths`
+3. `add_monitored_elements(...)` for each monitored-element rule
+4. `add_limit_reductions(pd.DataFrame(...).set_index("limit_type"))` if any are defined
+5. `_apply_action(...)` for each action — see the dispatcher below
+6. `add_actions_from_json_file(path)` for each path in `actions_json_paths`
+7. `add_operator_strategy(...)` for each operator strategy
+8. `add_operator_strategies_from_json_file(path)` for each path in `operator_strategies_json_paths`
+9. `run_ac(raw, parameters=params)`
+10. `result.export_to_json(tempfile)` → bytes stashed in `result["json_export"]`
 
 The result is split per contingency: monitored `branch_results`, `bus_results`
 and `three_windings_transformer_results` come back as multi-indexed DataFrames
@@ -148,6 +152,37 @@ outside the form so adjustments immediately narrow the multiselect options;
 the enriched DataFrame is cached in `_sa_manual_df_cache` per
 `(id(network), manual_type)`.
 
+## JSON import / export
+
+The Configuration sub-tabs for Contingencies, Actions and Operator strategies
+each expose an "Upload JSON file(s)" expander that delegates to
+`_render_json_upload_section(label, state_key, help_text, uploader_gen_key)`.
+Uploaded `UploadedFile` objects are persisted to tempfiles by
+`_persist_uploaded_json(files, state_key)` and their paths are recorded in
+session state as `[{"name": str, "path": str}, ...]`. The file uploader
+widget is keyed with an incrementing generation counter so it resets after
+a successful load, matching the pattern used by the top-level network
+uploader in `app.py`.
+
+At run time, `_render_config_tab` extracts the persisted paths via
+`_json_paths(state_key)` and forwards them to `run_security_analysis` as
+`contingencies_json_paths` / `actions_json_paths` /
+`operator_strategies_json_paths`. The worker calls the matching
+`add_*_from_json_file(path)` method so pypowsybl parses the files natively —
+we never inspect or reshape their contents.
+
+The run button stays enabled as long as **any** contingency source is
+present (either a dict contingency or at least one JSON file).
+
+After `run_ac`, the worker writes `result.export_to_json(tempfile)`, reads
+the bytes, deletes the tempfile, and returns the bytes under
+`results["json_export"]`. The Results tab exposes a `st.download_button`
+for those bytes (only when the key is present).
+
+JSON-imported contingencies that don't appear in the form list are still
+rendered in the Results summary DataFrame (marked `(from JSON)`) and in the
+drill-down selectbox.
+
 ## UI structure — `security_analysis.py`
 
 ```
@@ -160,7 +195,8 @@ render_security_analysis(network)
 │   │   │   └── multiselect: nominal voltage filter (defaults to ≥ 380 kV)
 │   │   ├── manual form (type selector + FILTERS expander + element multiselect
 │   │   │       + grouping) and list of manual entries with per-row Remove
-│   │   ├── caption: <auto> + <manual> = <total> contingencies
+│   │   ├── expander: "Upload contingency JSON file(s)"
+│   │   ├── caption: <auto> + <manual> + <json> counts
 │   │   └── expander: preview composed contingency table
 │   ├── sub-tab "Monitored elements"
 │   │   ├── form: context (ALL/NONE/SPECIFIC) + contingency picker + id multiselects
@@ -174,15 +210,20 @@ render_security_analysis(network)
 │   │   ├── selectbox: action type (SWITCH / TERMINALS_CONNECTION /
 │   │   │       GENERATOR_ACTIVE_POWER / PHASE_TAP_CHANGER_POSITION)
 │   │   ├── form: action_id + type-specific fields
+│   │   ├── expander: "Upload action JSON file(s)"
 │   │   └── list of actions with per-row Remove (Remove also drops the action
 │   │       from any operator strategy that referenced it)
 │   ├── sub-tab "Operator strategies"
 │   │   ├── form: strategy_id + contingency selector + action multiselect +
 │   │   │       condition selector
+│   │   ├── expander: "Upload operator-strategy JSON file(s)"
 │   │   └── list of strategies with per-row Remove button
 │   └── footer row: metrics (contingencies / monitored / reductions /
 │                 actions / strategies) + button "Run Security Analysis"
+│                 (enabled as long as any contingency source — form dicts
+│                  or uploaded JSON — is present)
 └── tab "Results"
+    ├── download_button: "Download results (JSON)" (when json_export is set)
     ├── subheader: Pre-contingency state
     │   ├── metric: base case status
     │   ├── metric: pre-contingency violation count
@@ -215,6 +256,10 @@ Results are stored in `_sa_results` and survive reruns within the session.
 | `_sa_actions` | `_render_actions_subtab` | `_render_config_tab` → `run_security_analysis`; `_render_operator_strategies_subtab` |
 | `_sa_operator_strategies` | `_render_operator_strategies_subtab` | `_render_config_tab` → `run_security_analysis` |
 | `_sa_id_cache` | `_get_ids` (one worker call per session) | `_render_monitored_subtab`, `_render_actions_subtab` |
+| `_sa_contingencies_json_files` | `_render_json_upload_section` (Contingencies) | `_render_config_tab` → `run_security_analysis` |
+| `_sa_actions_json_files` | `_render_json_upload_section` (Actions) | `_render_config_tab` → `run_security_analysis` |
+| `_sa_operator_strategies_json_files` | `_render_json_upload_section` (Operator strategies) | `_render_config_tab` → `run_security_analysis` |
+| `_sa_*_json_uploader_gen` | `_render_json_upload_section` (incremented after each successful load to reset the uploader) | `_render_json_upload_section` |
 | `_sa_results` | `_render_config_tab` (after successful run) | `_render_results_tab` |
 
 ## Limit violations DataFrame columns (pypowsybl)
