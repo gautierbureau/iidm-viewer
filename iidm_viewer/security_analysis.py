@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 import streamlit as st
 import pandas as pd
 
@@ -146,6 +149,98 @@ def _contingencies_list() -> list[dict]:
     return st.session_state.get("_sa_contingencies", [])
 
 
+# --- JSON file upload helpers ---
+
+def _persist_uploaded_json(files, state_key: str) -> int:
+    """Write each UploadedFile to a tempfile, record ``(name, path)`` in state.
+
+    Returns the number of newly-persisted files. Skips files whose name is
+    already present.
+    """
+    entries: list[dict] = st.session_state.setdefault(state_key, [])
+    existing = {e["name"] for e in entries}
+    added = 0
+    for f in files or []:
+        if f.name in existing:
+            continue
+        fd, path = tempfile.mkstemp(suffix=".json", prefix="sa_upload_")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(f.getvalue())
+        except Exception:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
+        entries.append({"name": f.name, "path": path})
+        existing.add(f.name)
+        added += 1
+    return added
+
+
+def _json_paths(state_key: str) -> list[str]:
+    return [e["path"] for e in st.session_state.get(state_key, [])]
+
+
+def _render_json_upload_section(
+    label: str,
+    state_key: str,
+    help_text: str,
+    uploader_gen_key: str,
+) -> None:
+    """Render a collapsible section to upload and manage JSON files.
+
+    Uploaded files are persisted to tempfiles and their paths are stored in
+    ``st.session_state[state_key]`` as ``[{"name": str, "path": str}, ...]``.
+    The uploader widget is keyed with an incrementing generation counter so
+    it resets after a successful load.
+    """
+    entries: list[dict] = st.session_state.setdefault(state_key, [])
+    if uploader_gen_key not in st.session_state:
+        st.session_state[uploader_gen_key] = 0
+
+    with st.expander(label, expanded=False):
+        st.caption(help_text)
+        gen = st.session_state[uploader_gen_key]
+        uploaded = st.file_uploader(
+            "JSON file(s)",
+            type=["json"],
+            accept_multiple_files=True,
+            key=f"{state_key}_uploader_{gen}",
+        )
+        if st.button("Load", key=f"{state_key}_load_btn"):
+            if not uploaded:
+                st.warning("No file selected.")
+            else:
+                try:
+                    added = _persist_uploaded_json(uploaded, state_key)
+                except Exception as exc:
+                    st.error(f"Failed to persist upload: {exc}")
+                else:
+                    st.session_state[uploader_gen_key] += 1
+                    if added:
+                        st.success(f"Loaded {added} file(s).")
+                        st.rerun()
+                    else:
+                        st.warning("All selected files were already loaded.")
+
+        if entries:
+            st.caption(f"{len(entries)} JSON file(s) loaded")
+            for i, e in enumerate(list(entries)):
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    st.markdown(f"`{e['name']}`")
+                with col2:
+                    if st.button("Remove", key=f"{state_key}_rm_{i}"):
+                        try:
+                            os.unlink(e["path"])
+                        except OSError:
+                            pass
+                        entries.pop(i)
+                        st.rerun()
+
+
 # --- Configuration: Contingencies sub-tab ---
 
 def _render_contingencies_subtab(network):
@@ -286,15 +381,32 @@ def _render_contingencies_subtab(network):
                         manual.pop(i)
                         st.rerun()
 
-    # --- Section C: composed list --------------------------------------
+    # --- Section C: JSON import -----------------------------------------
+    st.markdown("**Import contingencies from JSON**")
+    _render_json_upload_section(
+        label="Upload contingency JSON file(s)",
+        state_key="_sa_contingencies_json_files",
+        help_text=(
+            "Files are passed to `add_contingencies_from_json_file` at run "
+            "time. Use pypowsybl's native JSON contingency format."
+        ),
+        uploader_gen_key="_sa_contingencies_json_uploader_gen",
+    )
+    json_files = st.session_state.get("_sa_contingencies_json_files", [])
+
+    # --- Section D: composed list --------------------------------------
     contingencies = list(auto) + list(manual)
     st.session_state["_sa_contingencies"] = contingencies
 
     auto_label = "N-1" if mode == "N-1" else "N-2"
-    if contingencies:
+    if contingencies or json_files:
+        bits = [f"{len(auto)} auto ({auto_label})", f"{len(manual)} manual"]
+        if json_files:
+            bits.append(f"{len(json_files)} JSON file(s)")
         st.caption(
-            f"{len(auto)} auto ({auto_label}) + {len(manual)} manual = "
-            f"{len(contingencies)} contingencies to be simulated"
+            " + ".join(bits)
+            + f" — {len(contingencies)} dict contingencies (JSON entries "
+            "added on run)"
         )
         with st.expander("Preview contingencies", expanded=False):
             preview = [
@@ -767,8 +879,19 @@ def _render_actions_subtab(network):
             entries.append({"action_id": action_id.strip(), "type": atype, **extra})
             st.rerun()
 
+    _render_json_upload_section(
+        label="Upload action JSON file(s)",
+        state_key="_sa_actions_json_files",
+        help_text=(
+            "Files are passed to `add_actions_from_json_file` at run time. "
+            "Action IDs in these files can be referenced by operator "
+            "strategies defined here or loaded from JSON."
+        ),
+        uploader_gen_key="_sa_actions_json_uploader_gen",
+    )
+
     if not entries:
-        st.info("No actions defined.")
+        st.info("No form-defined actions. JSON-imported actions will still be used.")
         return
 
     st.caption(f"{len(entries)} action(s) defined")
@@ -885,8 +1008,19 @@ def _render_operator_strategies_subtab(network=None):
                 })
                 st.rerun()
 
+    _render_json_upload_section(
+        label="Upload operator-strategy JSON file(s)",
+        state_key="_sa_operator_strategies_json_files",
+        help_text=(
+            "Files are passed to `add_operator_strategies_from_json_file` "
+            "at run time. Strategies can reference contingencies and actions "
+            "loaded either from the forms above or from JSON."
+        ),
+        uploader_gen_key="_sa_operator_strategies_json_uploader_gen",
+    )
+
     if not entries:
-        st.info("No operator strategies defined.")
+        st.info("No form-defined strategies. JSON-imported strategies will still be used.")
         return
 
     st.caption(f"{len(entries)} strategy(ies) defined")
@@ -953,23 +1087,42 @@ def _render_config_tab(network):
     reductions = st.session_state.get("_sa_limit_reductions", [])
     actions = st.session_state.get("_sa_actions", [])
     strategies = st.session_state.get("_sa_operator_strategies", [])
+    contingencies_json_paths = _json_paths("_sa_contingencies_json_files")
+    actions_json_paths = _json_paths("_sa_actions_json_files")
+    strategies_json_paths = _json_paths("_sa_operator_strategies_json_files")
 
     cols = st.columns(6)
-    cols[0].metric("Contingencies", len(contingencies))
+    cols[0].metric(
+        "Contingencies",
+        len(contingencies),
+        delta=f"+{len(contingencies_json_paths)} JSON" if contingencies_json_paths else None,
+    )
     cols[1].metric("Monitored", len(monitored))
     cols[2].metric("Reductions", len(reductions))
-    cols[3].metric("Actions", len(actions))
-    cols[4].metric("Strategies", len(strategies))
+    cols[3].metric(
+        "Actions",
+        len(actions),
+        delta=f"+{len(actions_json_paths)} JSON" if actions_json_paths else None,
+    )
+    cols[4].metric(
+        "Strategies",
+        len(strategies),
+        delta=f"+{len(strategies_json_paths)} JSON" if strategies_json_paths else None,
+    )
 
+    has_contingency_source = bool(contingencies) or bool(contingencies_json_paths)
     with cols[5]:
         if st.button(
             "Run Security Analysis",
             key="sa_run_btn",
             type="primary",
-            disabled=not contingencies,
+            disabled=not has_contingency_source,
         ):
             with st.spinner(
-                f"Running security analysis ({len(contingencies)} contingencies)…"
+                f"Running security analysis ({len(contingencies)} contingencies"
+                + (f" + {len(contingencies_json_paths)} JSON file(s)"
+                   if contingencies_json_paths else "")
+                + ")…"
             ):
                 try:
                     results = run_security_analysis(
@@ -979,12 +1132,12 @@ def _render_config_tab(network):
                         limit_reductions=reductions,
                         actions=actions,
                         operator_strategies=strategies,
+                        contingencies_json_paths=contingencies_json_paths,
+                        actions_json_paths=actions_json_paths,
+                        operator_strategies_json_paths=strategies_json_paths,
                     )
                     st.session_state["_sa_results"] = results
-                    st.success(
-                        f"Security analysis complete — "
-                        f"{len(contingencies)} contingencies evaluated."
-                    )
+                    st.success("Security analysis complete.")
                 except Exception as exc:
                     st.error(f"Security analysis failed: {exc}")
 
@@ -1069,6 +1222,17 @@ def _render_results_tab():
     pre_violations: pd.DataFrame = results.get("pre_violations", pd.DataFrame())
     post: dict = results.get("post", {})
 
+    json_export = results.get("json_export")
+    if json_export:
+        st.download_button(
+            "Download results (JSON)",
+            data=json_export,
+            file_name="security_analysis_result.json",
+            mime="application/json",
+            key="sa_results_json_dl",
+            help="Native pypowsybl SecurityAnalysisResult JSON export.",
+        )
+
     # Pre-contingency summary
     st.subheader("Pre-contingency state")
     col1, col2 = st.columns(2)
@@ -1091,15 +1255,31 @@ def _render_results_tab():
         st.info("No post-contingency results available.")
         return
 
+    form_ids = {c["id"] for c in contingencies}
     rows = []
     for c in contingencies:
         cid = c["id"]
         cr = post.get(cid, {})
         viol_df: pd.DataFrame = cr.get("limit_violations", pd.DataFrame())
+        eids = c.get("element_ids") or ([c["element_id"]] if "element_id" in c else [])
         rows.append(
             {
                 "Contingency": cid,
-                "Element": c["element_id"],
+                "Element": ", ".join(eids),
+                "Status": cr.get("status", "UNKNOWN"),
+                "Violations": 0 if viol_df.empty else len(viol_df),
+            }
+        )
+    # Contingencies loaded from JSON files are not in the form list, so show
+    # them with whatever id came back in the result dict.
+    for cid, cr in post.items():
+        if cid in form_ids:
+            continue
+        viol_df = cr.get("limit_violations", pd.DataFrame())
+        rows.append(
+            {
+                "Contingency": cid,
+                "Element": "(from JSON)",
                 "Status": cr.get("status", "UNKNOWN"),
                 "Violations": 0 if viol_df.empty else len(viol_df),
             }
@@ -1132,7 +1312,9 @@ def _render_results_tab():
     # Drill-down
     st.subheader("Contingency detail")
 
-    contingency_options = [c["id"] for c in contingencies]
+    form_ids = [c["id"] for c in contingencies]
+    extra_ids = [cid for cid in post.keys() if cid not in set(form_ids)]
+    contingency_options = form_ids + sorted(extra_ids)
     id_filter = st.text_input(
         "Filter by contingency ID (substring, case-insensitive)",
         key="sa_contingency_filter",

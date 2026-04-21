@@ -2107,6 +2107,9 @@ def run_security_analysis(
     limit_reductions: list[dict] | None = None,
     actions: list[dict] | None = None,
     operator_strategies: list[dict] | None = None,
+    contingencies_json_paths: list[str] | None = None,
+    actions_json_paths: list[str] | None = None,
+    operator_strategies_json_paths: list[str] | None = None,
 ) -> dict:
     """Run AC security analysis on the worker thread.
 
@@ -2185,6 +2188,9 @@ def run_security_analysis(
     limit_reductions = limit_reductions or []
     actions = actions or []
     operator_strategies = operator_strategies or []
+    contingencies_json_paths = contingencies_json_paths or []
+    actions_json_paths = actions_json_paths or []
+    operator_strategies_json_paths = operator_strategies_json_paths or []
 
     def _run_sa():
         import pypowsybl.security as sa
@@ -2199,6 +2205,8 @@ def run_security_analysis(
                 analysis.add_single_element_contingency(eids[0], c["id"])
             elif len(eids) > 1:
                 analysis.add_multiple_elements_contingency(eids, c["id"])
+        for p in contingencies_json_paths:
+            analysis.add_contingencies_from_json_file(p)
 
         for me in monitored_elements:
             ctx_name = me.get("contingency_context_type", "ALL")
@@ -2219,6 +2227,8 @@ def run_security_analysis(
 
         for action in actions:
             _apply_action(analysis, action)
+        for p in actions_json_paths:
+            analysis.add_actions_from_json_file(p)
 
         for strat in operator_strategies:
             cond_name = strat.get("condition_type", "TRUE_CONDITION")
@@ -2238,6 +2248,8 @@ def run_security_analysis(
                 violation_subject_ids=vsubjects,
                 violation_types=vtypes,
             )
+        for p in operator_strategies_json_paths:
+            analysis.add_operator_strategies_from_json_file(p)
 
         lf_params = lf.Parameters(**generic)
         if provider:
@@ -2245,6 +2257,23 @@ def run_security_analysis(
         params = sa.Parameters(load_flow_parameters=lf_params)
 
         result = analysis.run_ac(raw, parameters=params)
+
+        # Serialize the native pypowsybl JSON view so the caller can download
+        # it after the result object goes out of scope on the worker.
+        import tempfile as _tempfile
+        import os as _os
+
+        with _tempfile.NamedTemporaryFile(suffix=".json", delete=False) as _tf:
+            _json_path = _tf.name
+        try:
+            result.export_to_json(_json_path)
+            with open(_json_path, "rb") as _fh:
+                json_export_bytes = _fh.read()
+        finally:
+            try:
+                _os.unlink(_json_path)
+            except OSError:
+                pass
 
         # Serialize all results before they leave the worker thread
         pre_result = result.pre_contingency_result
@@ -2321,6 +2350,7 @@ def run_security_analysis(
             "post": post,
             "operator_strategies": os_results,
             "contingencies": contingencies,
+            "json_export": json_export_bytes,
         }
 
     return run(_run_sa)
