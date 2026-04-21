@@ -7,7 +7,7 @@ sidebar:  file uploader → vl_selector → Run LF button + ⚙ params button
 tabs:     Overview | Network Map | Network Area Diagram | Single Line Diagram
           | Data Explorer Components | Data Explorer Extensions
           | Reactive Capability Curves | Operational Limits
-          | Pmax Visualization | Voltage Analysis
+          | Pmax Visualization | Voltage Analysis | Injection Map
 ```
 
 Each tab has a dedicated render function. `app.py` passes `(network, selected_vl)`
@@ -166,6 +166,23 @@ map** (Leaflet — separate renderer from the main Network Map, see
 tables (shunts, SVCs). No `selected_vl` input — the voltage map has
 its own nominal-voltage filter because the pu color scale only makes
 sense within one voltage class.
+
+### Injection Map — `injection_map.render_injection_map`
+
+Geographical map of **net active or reactive power injection per
+substation**. Colors substations green when they export (generation
+> load) and red when they import (load > generation); marker size
+scales with the absolute net injection. Active/reactive is a radio
+toggle, view can be switched between one-marker-per-substation and
+a continuous gradient.
+
+Shares the Leaflet scaffolding with the Voltage Analysis map —
+both call `leaflet_scalar_map.render_scalar_map`. Only works when
+the network has a `substationPosition` extension. Substations with
+no voltage level at or above 63 kV (distribution) are hidden.
+
+See [injection-map.md](injection-map.md) for the sign-convention
+details and the extraction pipeline.
 
 ### Operational Limits — `operational_limits.render_operational_limits`
 

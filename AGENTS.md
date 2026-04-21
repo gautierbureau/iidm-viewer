@@ -146,7 +146,9 @@ pypowsybl → result wrapped and handed back.
 | `extensions_explorer.py` | Extensions tab | [docs/tabs.md](docs/tabs.md) |
 | `pmax_visualization.py` | Pmax (P = V₁·V₂/X) transmission-limit tab | [docs/pmax-visualization.md](docs/pmax-visualization.md) |
 | `voltage_analysis.py` | Voltage Analysis tab: bus voltages, reactive compensation | [docs/voltage-analysis.md](docs/voltage-analysis.md) |
-| `voltage_map.py` | Leaflet voltage-deviation map inside Voltage Analysis; reusable scaffolding for other scalar-on-substation maps | [docs/voltage-analysis.md](docs/voltage-analysis.md) |
+| `voltage_map.py` | Leaflet voltage-deviation map inside Voltage Analysis | [docs/voltage-analysis.md](docs/voltage-analysis.md) |
+| `injection_map.py` | Leaflet net-injection map (P/Q per substation) — Injection Map tab | [docs/injection-map.md](docs/injection-map.md) |
+| `leaflet_scalar_map.py` | Shared Leaflet scalar-on-substation renderer (`DivergingColorScale`, `get_substation_positions`, `render_scalar_map`) used by `voltage_map` and `injection_map` | [docs/voltage-analysis.md § Shared scalar-on-substation renderer](docs/voltage-analysis.md#shared-scalar-on-substation-renderer---leaflet_scalar_mappy) |
 | `cli.py` | `iidm-viewer` entry-point shim | — |
 
 ### Quick-start by task
@@ -160,6 +162,8 @@ pypowsybl → result wrapped and handed back.
 | Change the filter system | [docs/filters.md](docs/filters.md) |
 | Change the network map | [docs/network-map.md](docs/network-map.md) |
 | Change the Voltage Analysis tab or its geographical voltage map | [docs/voltage-analysis.md](docs/voltage-analysis.md) |
+| Change the Injection Map tab | [docs/injection-map.md](docs/injection-map.md) |
+| Add a new scalar-on-substation Leaflet map (reusing the shared renderer) | [docs/voltage-analysis.md § Shared scalar-on-substation renderer](docs/voltage-analysis.md#shared-scalar-on-substation-renderer---leaflet_scalar_mappy) |
 | Change the Pmax Visualization tab | [docs/pmax-visualization.md](docs/pmax-visualization.md) |
 
 ## 4. Troubleshooting segfaults
