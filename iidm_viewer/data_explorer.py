@@ -53,6 +53,8 @@ from iidm_viewer.filters import (
 PRIORITY_COLUMNS: dict[str, list[str]] = {
     "Generators": ["target_p", "target_q", "target_v", "connected", "voltage_regulator_on", "p", "q", "regulated_element_id"],
     "Loads": ["p0", "q0", "connected", "p", "q"],
+    "Static VAR Compensators": ["regulation_mode", "voltage_setpoint", "reactive_power_setpoint", "connected", "regulated_element_id"],
+    "VSC Converter Stations": ["target_v", "target_q", "voltage_regulator_on", "connected", "regulated_element_id"],
     "Lines": ["connected1", "connected2"],
     "2-Winding Transformers": ["connected1", "connected2"],
     "3-Winding Transformers": ["connected1", "connected2", "connected3"],
