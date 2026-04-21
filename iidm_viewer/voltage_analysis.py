@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 
+from iidm_viewer.voltage_map import render_voltage_map
+
 
 def _vl_nominal_v(network) -> pd.DataFrame:
     """Return a voltage_level_id → nominal_v lookup without session-state caching.
@@ -285,6 +287,9 @@ def render_voltage_analysis(network):
         return
 
     _render_voltage_section(buses)
+
+    st.divider()
+    render_voltage_map(network)
 
     st.divider()
 
