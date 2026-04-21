@@ -5,7 +5,7 @@ A Streamlit web app for visualising and exploring electrical power networks in [
 ## Installation
 
 ```bash
-pip install iidm-viewer
+pip install iidm_viewer
 ```
 
 Or from source:
