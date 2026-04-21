@@ -2164,7 +2164,7 @@ def run_security_analysis(
         import pypowsybl.security as sa
         import pypowsybl.loadflow as lf
         from pypowsybl.flowdecomposition import ContingencyContextType
-        from pypowsybl._pypowsybl import ConditionType
+        from pypowsybl._pypowsybl import ConditionType, ViolationType
 
         analysis = sa.create_analysis()
         for c in contingencies:
@@ -2193,11 +2193,20 @@ def run_security_analysis(
         for strat in operator_strategies:
             cond_name = strat.get("condition_type", "TRUE_CONDITION")
             cond = ConditionType.__members__.get(cond_name, ConditionType.TRUE_CONDITION)
+            vtype_names = strat.get("violation_types") or []
+            vtypes = [
+                ViolationType.__members__[n]
+                for n in vtype_names
+                if n in ViolationType.__members__
+            ] or None
+            vsubjects = list(strat.get("violation_subject_ids") or []) or None
             analysis.add_operator_strategy(
                 strat["operator_strategy_id"],
                 strat["contingency_id"],
                 list(strat["action_ids"]),
                 condition_type=cond,
+                violation_subject_ids=vsubjects,
+                violation_types=vtypes,
             )
 
         lf_params = lf.Parameters(**generic)

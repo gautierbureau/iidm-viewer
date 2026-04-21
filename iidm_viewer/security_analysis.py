@@ -22,6 +22,13 @@ _CONDITION_TYPES = [
     "ALL_VIOLATION_CONDITION",
     "AT_LEAST_ONE_VIOLATION_CONDITION",
 ]
+_VIOLATION_TYPES = [
+    "CURRENT",
+    "ACTIVE_POWER",
+    "APPARENT_POWER",
+    "LOW_VOLTAGE",
+    "HIGH_VOLTAGE",
+]
 _SIDES = ["NONE", "ONE", "TWO"]
 
 
@@ -603,7 +610,7 @@ def _render_actions_subtab(network):
 
 # --- Configuration: Operator strategies sub-tab ---
 
-def _render_operator_strategies_subtab():
+def _render_operator_strategies_subtab(network=None):
     st.subheader("Operator strategies")
     st.caption(
         "Group actions into a post-contingency strategy. Each strategy is "
@@ -623,6 +630,21 @@ def _render_operator_strategies_subtab():
             "and one action (in the Actions sub-tab) to build a strategy."
         )
     else:
+        # Condition-type selectbox is outside the form so violation fields
+        # show/hide immediately on change.
+        condition_type = st.selectbox(
+            "Condition type",
+            options=_CONDITION_TYPES,
+            index=0,
+            key="sa_strat_condition",
+            help=(
+                "TRUE_CONDITION: always apply. "
+                "ANY/ALL/AT_LEAST_ONE_VIOLATION_CONDITION: apply only if "
+                "post-contingency limit violations match the subject/type filters."
+            ),
+        )
+        needs_filters = condition_type != "TRUE_CONDITION"
+
         with st.form("sa_strat_form", clear_on_submit=True):
             strat_id = st.text_input(
                 "Strategy ID (unique)",
@@ -639,17 +661,27 @@ def _render_operator_strategies_subtab():
                 options=action_ids,
                 key="sa_strat_actions",
             )
-            condition_type = st.selectbox(
-                "Condition type",
-                options=_CONDITION_TYPES,
-                index=0,
-                key="sa_strat_condition",
-                help=(
-                    "TRUE_CONDITION: always apply. "
-                    "ANY/ALL/AT_LEAST_ONE_VIOLATION_CONDITION: apply only if "
-                    "post-contingency limit violations match."
-                ),
-            )
+            if needs_filters:
+                ids = _get_ids(network) if network is not None else {}
+                subject_options = sorted(
+                    set(ids.get("branches", []))
+                    | set(ids.get("three_windings_transformers", []))
+                    | set(ids.get("voltage_levels", []))
+                )
+                violation_subject_ids = st.multiselect(
+                    "Violation subject IDs (empty = any element)",
+                    options=subject_options,
+                    key="sa_strat_vsubj",
+                    help="Only violations on these elements count toward the condition.",
+                )
+                violation_types = st.multiselect(
+                    "Violation types (empty = any type)",
+                    options=_VIOLATION_TYPES,
+                    key="sa_strat_vtypes",
+                )
+            else:
+                violation_subject_ids = []
+                violation_types = []
             submitted = st.form_submit_button("Add operator strategy")
 
         if submitted:
@@ -666,6 +698,8 @@ def _render_operator_strategies_subtab():
                     "contingency_id": contingency_id,
                     "action_ids": selected_actions,
                     "condition_type": condition_type,
+                    "violation_subject_ids": list(violation_subject_ids),
+                    "violation_types": list(violation_types),
                 })
                 st.rerun()
 
@@ -678,13 +712,23 @@ def _render_operator_strategies_subtab():
         with st.container(border=True):
             col1, col2 = st.columns([5, 1])
             with col1:
-                st.markdown(
+                cond = s.get("condition_type", "TRUE_CONDITION")
+                lines = [
                     f"`{s['operator_strategy_id']}` — triggered by "
-                    f"**`{s['contingency_id']}`**  \n"
-                    f"**Condition:** {s.get('condition_type', 'TRUE_CONDITION')}  \n"
+                    f"**`{s['contingency_id']}`**",
+                    f"**Condition:** {cond}",
                     f"**Actions ({len(s['action_ids'])}):** "
-                    f"{', '.join(f'`{a}`' for a in s['action_ids'])}"
-                )
+                    + ", ".join(f"`{a}`" for a in s["action_ids"]),
+                ]
+                subj = s.get("violation_subject_ids") or []
+                vtypes = s.get("violation_types") or []
+                if subj:
+                    lines.append(
+                        "**Subjects:** " + ", ".join(f"`{x}`" for x in subj)
+                    )
+                if vtypes:
+                    lines.append("**Violation types:** " + ", ".join(vtypes))
+                st.markdown("  \n".join(lines))
             with col2:
                 if st.button("Remove", key=f"sa_strat_rm_{i}"):
                     entries.pop(i)
@@ -719,7 +763,7 @@ def _render_config_tab(network):
     with sub_act:
         _render_actions_subtab(network)
     with sub_strat:
-        _render_operator_strategies_subtab()
+        _render_operator_strategies_subtab(network)
 
     st.divider()
     contingencies = _contingencies_list()

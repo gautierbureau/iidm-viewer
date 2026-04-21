@@ -86,6 +86,8 @@ Adding a new action type means: extend `_ACTION_TYPES` in
 | `contingency_id` | str | Must match an entry in `contingencies` |
 | `action_ids` | list[str] | Applied in list order |
 | `condition_type` | str | `TRUE_CONDITION` (default) or one of the violation conditions |
+| `violation_subject_ids` | list[str] | Empty/missing → any element (only used when condition is violation-based) |
+| `violation_types` | list[str] | Subset of `CURRENT` / `ACTIVE_POWER` / `APPARENT_POWER` / `LOW_VOLTAGE` / `HIGH_VOLTAGE`; empty → any type |
 
 ## Contingency building — `state.build_n1_contingencies(network, element_type, nominal_v_set)`
 
