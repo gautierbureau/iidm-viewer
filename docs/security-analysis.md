@@ -140,6 +140,14 @@ element or as a single grouped N-k contingency. Manual entries live in
 `_sa_manual_contingencies` and are concatenated with the auto list to form
 the authoritative `_sa_contingencies`.
 
+On large networks the raw id list per type can be unwieldy, so the form
+reuses the Components explorer filter stack (`iidm_viewer.filters` —
+`FILTERS`, `build_vl_lookup`, `enrich_with_joins`, `render_filters`) via a
+`_get_filterable_df(network, manual_type)` helper. The filter expander sits
+outside the form so adjustments immediately narrow the multiselect options;
+the enriched DataFrame is cached in `_sa_manual_df_cache` per
+`(id(network), manual_type)`.
+
 ## UI structure — `security_analysis.py`
 
 ```
@@ -150,8 +158,8 @@ render_security_analysis(network)
 │   │   │   ├── radio: N-1 / N-2
 │   │   │   ├── selectbox: element type (Lines / 2-Winding Transformers)
 │   │   │   └── multiselect: nominal voltage filter (defaults to ≥ 380 kV)
-│   │   ├── manual form (type selector + element multiselect + grouping)
-│   │   │       and list of manual entries with per-row Remove
+│   │   ├── manual form (type selector + FILTERS expander + element multiselect
+│   │   │       + grouping) and list of manual entries with per-row Remove
 │   │   ├── caption: <auto> + <manual> = <total> contingencies
 │   │   └── expander: preview composed contingency table
 │   ├── sub-tab "Monitored elements"
@@ -201,6 +209,7 @@ Results are stored in `_sa_results` and survive reruns within the session.
 |---|---|---|
 | `_sa_contingencies` | `_render_contingencies_subtab` (rebuilt each render = auto + manual) | `_render_config_tab`, `_render_monitored_subtab`, `_render_operator_strategies_subtab` |
 | `_sa_manual_contingencies` | `_render_contingencies_subtab` (manual form) | `_render_contingencies_subtab` |
+| `_sa_manual_df_cache` | `_get_filterable_df` (one pypowsybl+join call per `(network, type)`) | `_render_contingencies_subtab` |
 | `_sa_monitored` | `_render_monitored_subtab` | `_render_config_tab` → `run_security_analysis` |
 | `_sa_limit_reductions` | `_render_limit_reductions_subtab` | `_render_config_tab` → `run_security_analysis` |
 | `_sa_actions` | `_render_actions_subtab` | `_render_config_tab` → `run_security_analysis`; `_render_operator_strategies_subtab` |
