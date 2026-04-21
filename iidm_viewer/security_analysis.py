@@ -7,6 +7,19 @@ from iidm_viewer.state import build_n1_contingencies, run_security_analysis
 
 _ELEMENT_TYPES = ["Lines", "2-Winding Transformers"]
 _CTX_TYPES = ["ALL", "NONE", "SPECIFIC"]
+_ACTION_TYPES = [
+    "SWITCH",
+    "TERMINALS_CONNECTION",
+    "GENERATOR_ACTIVE_POWER",
+    "PHASE_TAP_CHANGER_POSITION",
+]
+_CONDITION_TYPES = [
+    "TRUE_CONDITION",
+    "ANY_VIOLATION_CONDITION",
+    "ALL_VIOLATION_CONDITION",
+    "AT_LEAST_ONE_VIOLATION_CONDITION",
+]
+_SIDES = ["NONE", "ONE", "TWO"]
 
 
 def _get_nominal_voltages(network) -> list[float]:
@@ -18,7 +31,7 @@ def _get_nominal_voltages(network) -> list[float]:
 
 
 def _get_ids(network) -> dict[str, list[str]]:
-    """Fetch branch/VL/3WT id lists in a single worker call, cached per network."""
+    """Fetch element id lists in a single worker call, cached per network."""
     cache = st.session_state.get("_sa_id_cache")
     if cache is not None:
         return cache
@@ -27,13 +40,27 @@ def _get_ids(network) -> dict[str, list[str]]:
 
     def _gather():
         lines = list(raw.get_lines(attributes=[]).index)
-        t2w = list(raw.get_2_windings_transformers(attributes=[]).index)
+        t2w_df = raw.get_2_windings_transformers(attributes=[])
+        t2w = list(t2w_df.index)
         t3w = list(raw.get_3_windings_transformers(attributes=[]).index)
         vls = list(raw.get_voltage_levels(attributes=[]).index)
+        switches = list(raw.get_switches(attributes=[]).index)
+        gens = list(raw.get_generators(attributes=[]).index)
+        # Transformers with a phase tap changer
+        ptc_df = raw.get_phase_tap_changers(attributes=[])
+        ptc_ids = sorted(set(ptc_df.index)) if not ptc_df.empty else []
         return {
             "branches": sorted(lines + t2w),
-            "voltage_levels": sorted(vls),
+            "lines": sorted(lines),
+            "two_windings_transformers": sorted(t2w),
             "three_windings_transformers": sorted(t3w),
+            "voltage_levels": sorted(vls),
+            "switches": sorted(switches),
+            "generators": sorted(gens),
+            "phase_tap_changers": ptc_ids,
+            # "connectable" elements (terminals-connection action targets):
+            # in practice, lines + 2WTs + generators are the most common.
+            "connectables": sorted(lines + t2w + gens),
         }
 
     cache = run(_gather)
@@ -311,11 +338,280 @@ def _render_limit_reductions_subtab():
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 
+# --- Configuration: Actions sub-tab ---
+
+def _action_summary(action: dict) -> str:
+    """One-line human description of an action dict."""
+    atype = action["type"]
+    aid = action["action_id"]
+    if atype == "SWITCH":
+        verb = "open" if action.get("open") else "close"
+        return f"`{aid}` — **SWITCH** {verb} `{action['switch_id']}`"
+    if atype == "TERMINALS_CONNECTION":
+        verb = "open" if action.get("opening", True) else "close"
+        side = action.get("side", "NONE")
+        extra = "" if side == "NONE" else f" (side {side})"
+        return f"`{aid}` — **TERMINALS** {verb} `{action['element_id']}`{extra}"
+    if atype == "GENERATOR_ACTIVE_POWER":
+        rel = "Δ" if action.get("is_relative") else "="
+        return (
+            f"`{aid}` — **GEN P** `{action['generator_id']}` "
+            f"{rel}{action['active_power']:g} MW"
+        )
+    if atype == "PHASE_TAP_CHANGER_POSITION":
+        rel = "Δ" if action.get("is_relative") else "="
+        return (
+            f"`{aid}` — **PTC** `{action['transformer_id']}` "
+            f"{rel}{action['tap_position']}"
+        )
+    return f"`{aid}` — **{atype}**"
+
+
+def _render_action_form_fields(atype: str, ids: dict) -> dict | None:
+    """Render type-specific fields; return the extra dict or None on error.
+
+    Returns None when the selected element list is empty so the caller can
+    surface a clear message rather than letting the selectbox raise.
+    """
+    if atype == "SWITCH":
+        if not ids["switches"]:
+            st.info("No switches in this network.")
+            return None
+        switch_id = st.selectbox("Switch", ids["switches"], key="sa_act_switch_id")
+        open_ = st.checkbox("Open switch", value=True, key="sa_act_switch_open")
+        return {"switch_id": switch_id, "open": bool(open_)}
+    if atype == "TERMINALS_CONNECTION":
+        if not ids["connectables"]:
+            st.info("No connectable elements in this network.")
+            return None
+        element_id = st.selectbox(
+            "Element (line / 2WT / generator)",
+            ids["connectables"],
+            key="sa_act_term_id",
+        )
+        side = st.selectbox("Side", _SIDES, index=0, key="sa_act_term_side")
+        opening = st.checkbox("Open (disconnect)", value=True, key="sa_act_term_open")
+        return {"element_id": element_id, "side": side, "opening": bool(opening)}
+    if atype == "GENERATOR_ACTIVE_POWER":
+        if not ids["generators"]:
+            st.info("No generators in this network.")
+            return None
+        gen_id = st.selectbox("Generator", ids["generators"], key="sa_act_gen_id")
+        is_relative = st.checkbox(
+            "Relative change (tick) vs. absolute (untick)",
+            value=True,
+            key="sa_act_gen_rel",
+        )
+        active_power = st.number_input(
+            "Active power (MW)",
+            value=-10.0,
+            step=10.0,
+            key="sa_act_gen_p",
+        )
+        return {
+            "generator_id": gen_id,
+            "is_relative": bool(is_relative),
+            "active_power": float(active_power),
+        }
+    if atype == "PHASE_TAP_CHANGER_POSITION":
+        if not ids["phase_tap_changers"]:
+            st.info("No phase tap changers in this network.")
+            return None
+        tx_id = st.selectbox(
+            "Transformer",
+            ids["phase_tap_changers"],
+            key="sa_act_ptc_id",
+        )
+        is_relative = st.checkbox(
+            "Relative change (tick) vs. absolute (untick)",
+            value=False,
+            key="sa_act_ptc_rel",
+        )
+        tap_position = st.number_input(
+            "Tap position",
+            value=0,
+            step=1,
+            key="sa_act_ptc_tap",
+        )
+        side = st.selectbox("Side (3WTs only)", _SIDES, index=0, key="sa_act_ptc_side")
+        return {
+            "transformer_id": tx_id,
+            "is_relative": bool(is_relative),
+            "tap_position": int(tap_position),
+            "side": side,
+        }
+    return {}
+
+
+def _render_actions_subtab(network):
+    st.subheader("Remedial actions")
+    st.caption(
+        "Define atomic actions that can later be grouped into an operator "
+        "strategy. Each action gets a unique id."
+    )
+
+    entries: list[dict] = st.session_state.setdefault("_sa_actions", [])
+    ids = _get_ids(network)
+
+    # Action-type selectbox is outside the form so type-specific fields
+    # re-render immediately on change.
+    atype = st.selectbox(
+        "Action type",
+        options=_ACTION_TYPES,
+        key="sa_act_type",
+    )
+
+    with st.form("sa_actions_form", clear_on_submit=True):
+        action_id = st.text_input(
+            "Action ID (unique)",
+            key="sa_act_id",
+            placeholder="e.g. open_L1 or gen_down",
+        )
+        extra = _render_action_form_fields(atype, ids)
+        submitted = st.form_submit_button("Add action")
+
+    if submitted:
+        existing_ids = {a["action_id"] for a in entries}
+        if extra is None:
+            st.warning("Cannot build this action — no matching element in the network.")
+        elif not action_id.strip():
+            st.warning("Action ID is required.")
+        elif action_id in existing_ids:
+            st.warning(f"Action ID '{action_id}' already exists.")
+        else:
+            entries.append({"action_id": action_id.strip(), "type": atype, **extra})
+            st.rerun()
+
+    if not entries:
+        st.info("No actions defined.")
+        return
+
+    st.caption(f"{len(entries)} action(s) defined")
+    for i, e in enumerate(entries):
+        with st.container(border=True):
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                st.markdown(_action_summary(e))
+            with col2:
+                if st.button("Remove", key=f"sa_act_rm_{i}"):
+                    entries.pop(i)
+                    # Also drop the action from any strategies that reference it
+                    for strat in st.session_state.get("_sa_operator_strategies", []):
+                        if e["action_id"] in strat.get("action_ids", []):
+                            strat["action_ids"] = [
+                                a for a in strat["action_ids"]
+                                if a != e["action_id"]
+                            ]
+                    st.rerun()
+
+
+# --- Configuration: Operator strategies sub-tab ---
+
+def _render_operator_strategies_subtab():
+    st.subheader("Operator strategies")
+    st.caption(
+        "Group actions into a post-contingency strategy. Each strategy is "
+        "triggered by one contingency and applies the listed actions when "
+        "its condition is met."
+    )
+
+    entries: list[dict] = st.session_state.setdefault("_sa_operator_strategies", [])
+    contingencies = _contingencies_list()
+    actions = st.session_state.get("_sa_actions", [])
+    action_ids = [a["action_id"] for a in actions]
+    contingency_ids = [c["id"] for c in contingencies]
+
+    if not contingency_ids or not action_ids:
+        st.info(
+            "Define at least one contingency (in the Contingencies sub-tab) "
+            "and one action (in the Actions sub-tab) to build a strategy."
+        )
+    else:
+        with st.form("sa_strat_form", clear_on_submit=True):
+            strat_id = st.text_input(
+                "Strategy ID (unique)",
+                key="sa_strat_id",
+                placeholder="e.g. strat_open_line",
+            )
+            contingency_id = st.selectbox(
+                "Triggered by contingency",
+                options=contingency_ids,
+                key="sa_strat_cid",
+            )
+            selected_actions = st.multiselect(
+                "Actions to apply (in order)",
+                options=action_ids,
+                key="sa_strat_actions",
+            )
+            condition_type = st.selectbox(
+                "Condition type",
+                options=_CONDITION_TYPES,
+                index=0,
+                key="sa_strat_condition",
+                help=(
+                    "TRUE_CONDITION: always apply. "
+                    "ANY/ALL/AT_LEAST_ONE_VIOLATION_CONDITION: apply only if "
+                    "post-contingency limit violations match."
+                ),
+            )
+            submitted = st.form_submit_button("Add operator strategy")
+
+        if submitted:
+            existing_ids = {s["operator_strategy_id"] for s in entries}
+            if not strat_id.strip():
+                st.warning("Strategy ID is required.")
+            elif strat_id in existing_ids:
+                st.warning(f"Strategy ID '{strat_id}' already exists.")
+            elif not selected_actions:
+                st.warning("Pick at least one action.")
+            else:
+                entries.append({
+                    "operator_strategy_id": strat_id.strip(),
+                    "contingency_id": contingency_id,
+                    "action_ids": selected_actions,
+                    "condition_type": condition_type,
+                })
+                st.rerun()
+
+    if not entries:
+        st.info("No operator strategies defined.")
+        return
+
+    st.caption(f"{len(entries)} strategy(ies) defined")
+    for i, s in enumerate(entries):
+        with st.container(border=True):
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                st.markdown(
+                    f"`{s['operator_strategy_id']}` — triggered by "
+                    f"**`{s['contingency_id']}`**  \n"
+                    f"**Condition:** {s.get('condition_type', 'TRUE_CONDITION')}  \n"
+                    f"**Actions ({len(s['action_ids'])}):** "
+                    f"{', '.join(f'`{a}`' for a in s['action_ids'])}"
+                )
+            with col2:
+                if st.button("Remove", key=f"sa_strat_rm_{i}"):
+                    entries.pop(i)
+                    st.rerun()
+
+
 # --- Configuration tab (run button + sub-tabs) ---
 
 def _render_config_tab(network):
-    sub_cont, sub_mon, sub_lr = st.tabs(
-        ["Contingencies", "Monitored elements", "Limit reductions"]
+    (
+        sub_cont,
+        sub_mon,
+        sub_lr,
+        sub_act,
+        sub_strat,
+    ) = st.tabs(
+        [
+            "Contingencies",
+            "Monitored elements",
+            "Limit reductions",
+            "Actions",
+            "Operator strategies",
+        ]
     )
 
     with sub_cont:
@@ -324,18 +620,26 @@ def _render_config_tab(network):
         _render_monitored_subtab(network)
     with sub_lr:
         _render_limit_reductions_subtab()
+    with sub_act:
+        _render_actions_subtab(network)
+    with sub_strat:
+        _render_operator_strategies_subtab()
 
     st.divider()
     contingencies = _contingencies_list()
     monitored = st.session_state.get("_sa_monitored", [])
     reductions = st.session_state.get("_sa_limit_reductions", [])
+    actions = st.session_state.get("_sa_actions", [])
+    strategies = st.session_state.get("_sa_operator_strategies", [])
 
-    cols = st.columns(4)
+    cols = st.columns(6)
     cols[0].metric("Contingencies", len(contingencies))
-    cols[1].metric("Monitored rules", len(monitored))
-    cols[2].metric("Limit reductions", len(reductions))
+    cols[1].metric("Monitored", len(monitored))
+    cols[2].metric("Reductions", len(reductions))
+    cols[3].metric("Actions", len(actions))
+    cols[4].metric("Strategies", len(strategies))
 
-    with cols[3]:
+    with cols[5]:
         if st.button(
             "Run Security Analysis",
             key="sa_run_btn",
@@ -351,6 +655,8 @@ def _render_config_tab(network):
                         contingencies,
                         monitored_elements=monitored,
                         limit_reductions=reductions,
+                        actions=actions,
+                        operator_strategies=strategies,
                     )
                     st.session_state["_sa_results"] = results
                     st.success(
@@ -409,6 +715,22 @@ def _render_monitored_post(cr: dict):
     if not t3.empty:
         st.markdown("**3-winding transformers**")
         st.dataframe(t3, use_container_width=True)
+
+
+def _render_operator_strategy_block(sid: str, sr: dict):
+    """Render one operator-strategy result block (status + violations + monitored)."""
+    status = sr.get("status", "UNKNOWN")
+    viol = sr.get("limit_violations", pd.DataFrame())
+    status_color = "green" if status == "CONVERGED" else "red"
+    actions_str = ", ".join(f"`{a}`" for a in sr.get("action_ids", []))
+    st.markdown(
+        f"`{sid}` — **Status:** :{status_color}[{status}]  \n"
+        f"**Actions:** {actions_str or '(none)'}"
+    )
+    if not viol.empty:
+        st.caption(f"{len(viol)} limit violation(s) after the strategy")
+        st.dataframe(viol, use_container_width=True, hide_index=True)
+    _render_monitored_post(sr)
 
 
 def _render_results_tab():
@@ -522,6 +844,18 @@ def _render_results_tab():
         st.success("No limit violations for this contingency.")
 
     _render_monitored_post(cr)
+
+    # Operator strategies that target this contingency
+    os_results: dict = results.get("operator_strategies", {})
+    matching = [
+        (sid, sr) for sid, sr in os_results.items()
+        if sr.get("contingency_id") == selected_contingency
+    ]
+    if matching:
+        st.subheader("Operator strategies for this contingency")
+        for sid, sr in matching:
+            with st.container(border=True):
+                _render_operator_strategy_block(sid, sr)
 
 
 def render_security_analysis(network):

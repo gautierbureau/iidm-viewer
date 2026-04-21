@@ -20,8 +20,10 @@ Inside the worker, the analysis is composed in this order:
 
 1. `add_single_element_contingency` for each contingency
 2. `add_monitored_elements(...)` for each monitored-element rule
-3. `add_limit_reductions(pd.DataFrame(limit_reductions))` if any are defined
-4. `run_ac(raw, parameters=params)`
+3. `add_limit_reductions(pd.DataFrame(...).set_index("limit_type"))` if any are defined
+4. `_apply_action(...)` for each action — see the dispatcher below
+5. `add_operator_strategy(...)` for each operator strategy
+6. `run_ac(raw, parameters=params)`
 
 The result is split per contingency: monitored `branch_results`, `bus_results`
 and `three_windings_transformer_results` come back as multi-indexed DataFrames
@@ -56,6 +58,32 @@ passed to `add_limit_reductions`:
 | `min_temporary_duration` / `max_temporary_duration` | `int` (s) | Optional, only when `temporary=True` |
 | `country` | `str` | Optional, 2-letter code |
 | `min_voltage` / `max_voltage` | `float` (kV) | Optional range filter |
+
+### Action dict shape (dispatched by `_apply_action`)
+
+All entries share `{"action_id": str, "type": <ACTION_TYPE>}`. Type-specific
+fields are:
+
+| `type` | Required fields | Optional fields |
+|---|---|---|
+| `SWITCH` | `switch_id` (str), `open` (bool) | — |
+| `TERMINALS_CONNECTION` | `element_id` (str), `opening` (bool) | `side` (`"NONE"` / `"ONE"` / `"TWO"`) |
+| `GENERATOR_ACTIVE_POWER` | `generator_id` (str), `is_relative` (bool), `active_power` (float, MW) | — |
+| `PHASE_TAP_CHANGER_POSITION` | `transformer_id` (str), `is_relative` (bool), `tap_position` (int) | `side` |
+
+Adding a new action type means: extend `_ACTION_TYPES` in
+`security_analysis.py`, add a branch in `_render_action_form_fields`, and add
+a matching branch in `state._apply_action`. Common candidates: `LOAD_ACTIVE_POWER`,
+`RATIO_TAP_CHANGER_POSITION`, `SHUNT_COMPENSATOR_POSITION`.
+
+### Operator strategy shape
+
+| Key | Type | Notes |
+|---|---|---|
+| `operator_strategy_id` | str | Unique |
+| `contingency_id` | str | Must match an entry in `contingencies` |
+| `action_ids` | list[str] | Applied in list order |
+| `condition_type` | str | `TRUE_CONDITION` (default) or one of the violation conditions |
 
 ## Contingency building — `state.build_n1_contingencies(network, element_type, nominal_v_set)`
 
@@ -95,8 +123,18 @@ render_security_analysis(network)
 │   │   ├── form: value, permanent/temporary flags, duration window,
 │   │   │       country, voltage window
 │   │   └── list of reductions (+ expander with preview DataFrame)
-│   └── footer row: metrics (contingencies / monitored / reductions)
-│                 + button "Run Security Analysis"
+│   ├── sub-tab "Actions"
+│   │   ├── selectbox: action type (SWITCH / TERMINALS_CONNECTION /
+│   │   │       GENERATOR_ACTIVE_POWER / PHASE_TAP_CHANGER_POSITION)
+│   │   ├── form: action_id + type-specific fields
+│   │   └── list of actions with per-row Remove (Remove also drops the action
+│   │       from any operator strategy that referenced it)
+│   ├── sub-tab "Operator strategies"
+│   │   ├── form: strategy_id + contingency selector + action multiselect +
+│   │   │       condition selector
+│   │   └── list of strategies with per-row Remove button
+│   └── footer row: metrics (contingencies / monitored / reductions /
+│                 actions / strategies) + button "Run Security Analysis"
 └── tab "Results"
     ├── subheader: Pre-contingency state
     │   ├── metric: base case status
@@ -111,7 +149,9 @@ render_security_analysis(network)
         ├── text_input: filter by contingency ID
         ├── selectbox: select one contingency
         ├── dataframe: limit violations for selected contingency
-        └── dataframes: monitored branches/buses/3WTs for this contingency
+        ├── dataframes: monitored branches/buses/3WTs for this contingency
+        └── operator-strategy blocks (status + violations + monitored)
+                for any strategy targeting the selected contingency
 ```
 
 Results are stored in `_sa_results` and survive reruns within the session.
@@ -120,10 +160,12 @@ Results are stored in `_sa_results` and survive reruns within the session.
 
 | Key | Set by | Read by |
 |---|---|---|
-| `_sa_contingencies` | `_render_contingencies_subtab` (rebuilt each render) | `_render_config_tab`, `_render_monitored_subtab` |
+| `_sa_contingencies` | `_render_contingencies_subtab` (rebuilt each render) | `_render_config_tab`, `_render_monitored_subtab`, `_render_operator_strategies_subtab` |
 | `_sa_monitored` | `_render_monitored_subtab` | `_render_config_tab` → `run_security_analysis` |
 | `_sa_limit_reductions` | `_render_limit_reductions_subtab` | `_render_config_tab` → `run_security_analysis` |
-| `_sa_id_cache` | `_get_ids` (one worker call per session) | `_render_monitored_subtab` |
+| `_sa_actions` | `_render_actions_subtab` | `_render_config_tab` → `run_security_analysis`; `_render_operator_strategies_subtab` |
+| `_sa_operator_strategies` | `_render_operator_strategies_subtab` | `_render_config_tab` → `run_security_analysis` |
+| `_sa_id_cache` | `_get_ids` (one worker call per session) | `_render_monitored_subtab`, `_render_actions_subtab` |
 | `_sa_results` | `_render_config_tab` (after successful run) | `_render_results_tab` |
 
 ## Limit violations DataFrame columns (pypowsybl)
