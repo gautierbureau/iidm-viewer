@@ -290,6 +290,99 @@ through `run()`.
 
 See `injection_map.py` for a worked example.
 
+## Migrating to the MapLibre GL / deck.gl stack (optional)
+
+The Leaflet renderer was chosen because it fits in a one-shot
+`st.components.v1.html` iframe with no build step — see
+[§ Why Leaflet and not the main Network Map stack](#why-leaflet-and-not-the-main-network-map-stack).
+If a future need justifies the extra complexity (tens of thousands
+of markers, a real GPU heatmap, click-driven cross-tab navigation, or
+a single unified map stack across the app), here is the migration
+path.
+
+### Target stack
+
+Same as the **Network Map** tab: MapLibre GL basemap + deck.gl
+layers, packaged as a Vite-built custom Streamlit component. The
+powsybl library `@powsybl/network-map-layers` is built on top of
+this stack but **does not expose a per-element scalar-color hook**
+(it colors by fixed nominal-voltage palette via
+`getNominalVoltageColor`). Two options:
+
+1. **Direct deck.gl** — drop `@powsybl/network-map-layers` and render
+   a `ScatterplotLayer` (+ optional `HeatmapLayer`) on top of a bare
+   MapLibre GL basemap. Smaller dependency surface, full control over
+   color. Recommended.
+2. **Fork / extend `@powsybl/network-map-layers`** — add a
+   `getSubstationColor` prop and upstream it. Keeps the stack aligned
+   with Network Map but depends on a library change.
+
+### Phased plan
+
+**Phase 1 — new custom component, same Python API.**
+
+- Scaffold `iidm_viewer/frontend/scalar_map_component/` by copying
+  `map_component/` (Vite + TypeScript + the `dist/` output convention).
+- In `src/main.ts`, initialise a `maplibre-gl` map with an OSM raster
+  style (cheapest migration) or a vector style later; overlay a deck.gl
+  `ScatterplotLayer` fed by the incoming `records` prop.
+- Translate `DivergingColorScale` into a `getFillColor` callback. The
+  math is the same `lerp(mid, target, |t|)` as today's JS template — move
+  it into `src/color.ts` and keep it tested.
+- Create `iidm_viewer/scalar_map_component.py` as a
+  `declare_component("scalar_map", path=".../dist")` wrapper, mirroring
+  `map_component.py`.
+- Rewrite `leaflet_scalar_map.render_scalar_map` to call that
+  component instead of formatting `_LEAFLET_HTML`. Keep the Python
+  signature byte-for-byte identical so `voltage_map.py` and
+  `injection_map.py` don't need to change.
+- Rename the module to `scalar_map.py` once the Leaflet version is
+  gone; keep a deprecation re-export during the transition.
+
+**Phase 2 — genuine gradient mode.**
+
+- Replace the overlapping translucent `L.circle` approximation with a
+  deck.gl `HeatmapLayer` (GPU-accelerated, density-weighted) — use
+  `getWeight = r.value` for signed weighting and a diverging
+  `colorRange`. This is the single biggest visual/perf win and the
+  main reason to migrate.
+
+**Phase 3 — two-way interaction.**
+
+- Wire `onClick` / `onHover` to `setComponentValue` with a payload
+  like `{"type": "scalar-map-click", "id": substation_id, "ts": …}`
+  — same protocol NAD / SLD use (see
+  [tabs.md § NAD](tabs.md#network-area-diagram--diagramsrender_nad_tab)).
+- On the Python side, `voltage_map.py` / `injection_map.py` can then
+  write `selected_vl` or switch tabs, enabling e.g. "click a red
+  substation → jump to the Single Line Diagram".
+
+**Phase 4 — unify with Network Map.**
+
+- Once the direct-deck.gl path is solid, consider folding the scalar
+  layer into `map_component` so a single iframe shows the whole grid
+  *and* a scalar overlay toggle. Requires the
+  `@powsybl/network-map-layers` fork from option 2 above, or a two-layer
+  composition inside `map_component/src/main.ts`.
+
+### Costs to weigh before starting
+
+- **Build system:** a second Vite/TS frontend in the repo, another
+  `dist/` bundle shipped in the wheel, another `npm run build` step
+  before PRs touch this code.
+- **Cold start:** MapLibre GL + deck.gl bundles are ~1 MB gzipped; the
+  iframe takes longer to first paint than the 50 KB Leaflet script.
+- **Feature regressions to avoid:** today's Leaflet renderer serves
+  HTML tooltips out of the box (`bindTooltip`). In deck.gl you wire
+  `getTooltip` on the `Deck` instance and render Popups via MapLibre —
+  make sure the HTML in `_build_tooltip` still renders correctly
+  (tables, `<b>`, `<i>`).
+- **Scale today:** the transport-network views show ≤ a few thousand
+  substations. Leaflet is fine at that size — migrate only when a
+  concrete need (perf, interaction, or a real heatmap) emerges.
+
+Until then the simpler Leaflet path wins on maintenance cost.
+
 ## Tests
 
 `tests/test_voltage_map.py`:
