@@ -179,18 +179,18 @@ EDITABLE_COMPONENTS: dict[str, tuple[str, list[str]]] = {
     "Loads": ("update_loads", ["p0", "q0", "connected"]),
     "Generators": (
         "update_generators",
-        ["target_p", "target_v", "target_q", "voltage_regulator_on", "connected"],
+        ["target_p", "target_v", "target_q", "voltage_regulator_on", "regulated_element_id", "connected"],
     ),
     "Batteries": ("update_batteries", ["target_p", "target_q", "connected"]),
     "Switches": ("update_switches", ["open"]),
     "Shunt Compensators": ("update_shunt_compensators", ["section_count", "connected"]),
     "Static VAR Compensators": (
         "update_static_var_compensators",
-        ["regulation_mode", "voltage_setpoint", "reactive_power_setpoint", "connected"],
+        ["regulation_mode", "voltage_setpoint", "reactive_power_setpoint", "regulated_element_id", "connected"],
     ),
     "VSC Converter Stations": (
         "update_vsc_converter_stations",
-        ["target_v", "target_q", "voltage_regulator_on", "connected"],
+        ["target_v", "target_q", "voltage_regulator_on", "regulated_element_id", "connected"],
     ),
     "LCC Converter Stations": (
         "update_lcc_converter_stations",
