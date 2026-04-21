@@ -23,6 +23,7 @@ from iidm_viewer.network_map import render_network_map
 from iidm_viewer.pmax_visualization import render_pmax_visualization
 from iidm_viewer.voltage_analysis import render_voltage_analysis
 from iidm_viewer.security_analysis import render_security_analysis
+from iidm_viewer.short_circuit_analysis import render_short_circuit_analysis
 
 
 st.set_page_config(page_title="IIDM Viewer", layout="wide", page_icon="⚡")
@@ -134,7 +135,7 @@ if network is None:
     )
     st.stop()
 
-tab_overview, tab_map, tab_nad, tab_sld, tab_components, tab_extensions, tab_rcc, tab_limits, tab_pmax, tab_voltage, tab_sa = st.tabs(
+tab_overview, tab_map, tab_nad, tab_sld, tab_components, tab_extensions, tab_rcc, tab_limits, tab_pmax, tab_voltage, tab_sa, tab_sc = st.tabs(
     [
         "Overview",
         "Network Map",
@@ -147,6 +148,7 @@ tab_overview, tab_map, tab_nad, tab_sld, tab_components, tab_extensions, tab_rcc
         "Pmax Visualization",
         "Voltage Analysis",
         "Security Analysis",
+        "Short Circuit Analysis",
     ]
 )
 
@@ -182,3 +184,6 @@ with tab_voltage:
 
 with tab_sa:
     render_security_analysis(network)
+
+with tab_sc:
+    render_short_circuit_analysis(network)
