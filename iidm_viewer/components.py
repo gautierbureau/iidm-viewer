@@ -26,8 +26,12 @@ def vl_selector(network):
     # widget is instantiated. Without this, a NAD/SLD click that writes
     # selected_vl from the tab callback is clobbered on the next rerun
     # because the sidebar runs first and the stale widget state wins.
+    # When selected_vl is None (network just reloaded), force the widget
+    # to the first option so the stale frontend value cannot be restored.
     if current in options and st.session_state.get("vl_selectbox") != current:
         st.session_state.vl_selectbox = current
+    elif current is None and options:
+        st.session_state.vl_selectbox = options[0]
 
     selected = st.selectbox(
         "Voltage Level",
