@@ -144,6 +144,7 @@ pypowsybl → result wrapped and handed back.
 | `operational_limits.py` | Loading % table + per-element limit chart | [docs/tabs.md](docs/tabs.md) |
 | `reactive_curves.py` | Generator reactive capability curve chart | [docs/tabs.md](docs/tabs.md) |
 | `extensions_explorer.py` | Extensions tab | [docs/tabs.md](docs/tabs.md) |
+| `pmax_visualization.py` | Pmax (P = V₁·V₂/X) transmission-limit tab | [docs/pmax-visualization.md](docs/pmax-visualization.md) |
 | `voltage_analysis.py` | Voltage Analysis tab: bus voltages, reactive compensation | [docs/voltage-analysis.md](docs/voltage-analysis.md) |
 | `voltage_map.py` | Leaflet voltage-deviation map inside Voltage Analysis; reusable scaffolding for other scalar-on-substation maps | [docs/voltage-analysis.md](docs/voltage-analysis.md) |
 | `cli.py` | `iidm-viewer` entry-point shim | — |
@@ -159,6 +160,7 @@ pypowsybl → result wrapped and handed back.
 | Change the filter system | [docs/filters.md](docs/filters.md) |
 | Change the network map | [docs/network-map.md](docs/network-map.md) |
 | Change the Voltage Analysis tab or its geographical voltage map | [docs/voltage-analysis.md](docs/voltage-analysis.md) |
+| Change the Pmax Visualization tab | [docs/pmax-visualization.md](docs/pmax-visualization.md) |
 
 ## 4. Troubleshooting segfaults
 
