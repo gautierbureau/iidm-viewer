@@ -12,6 +12,7 @@ from iidm_viewer.state import (
 )
 from iidm_viewer.security_analysis import (
     _action_summary,
+    _get_filterable_df,
     _render_actions_subtab,
     _render_config_tab,
     _render_contingencies_subtab,
@@ -503,6 +504,78 @@ def test_render_contingencies_subtab_manual_grouped_nk():
     assert state["_sa_manual_contingencies"] == [
         {"id": "grouped_outage", "element_ids": ["L1", "L2"]},
     ]
+
+
+# ---------------------------------------------------------------------------
+# _get_filterable_df + filter integration in manual form
+# ---------------------------------------------------------------------------
+
+
+def test_get_filterable_df_caches_per_network_and_type():
+    net = MagicMock()
+    df = pd.DataFrame({"p": [1.0, 2.0]}, index=pd.Index(["L1", "L2"], name="id"))
+    net.get_lines.return_value = df
+    net.get_lines.__name__ = "get_lines"
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis.build_vl_lookup",
+               return_value=pd.DataFrame(
+                   columns=["id", "substation_id", "nominal_v", "country"])), \
+         patch(
+             "iidm_viewer.security_analysis.enrich_with_joins",
+             side_effect=lambda d, _: d,
+         ):
+        mock_st.session_state = {}
+        first = _get_filterable_df(net, "Lines")
+        second = _get_filterable_df(net, "Lines")
+    assert list(first.index) == ["L1", "L2"]
+    assert second is first  # cached object reused
+    net.get_lines.assert_called_once_with(all_attributes=True)
+
+
+def test_get_filterable_df_empty_returns_empty_dataframe():
+    net = MagicMock()
+    net.get_generators.return_value = pd.DataFrame()
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = {}
+        out = _get_filterable_df(net, "Generators")
+    assert out.empty
+
+
+def test_render_contingencies_subtab_manual_options_come_from_filtered_df():
+    """Manual multiselect options reflect the filtered DataFrame index, not
+    the raw id list from _get_ids."""
+    net = MagicMock()
+    state: dict = {}
+    raw_df = pd.DataFrame({"p": [1.0, 2.0, 3.0]},
+                          index=pd.Index(["L1", "L2", "L3"], name="id"))
+    narrowed = raw_df.loc[["L2"]]
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[]), \
+         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()), \
+         patch("iidm_viewer.security_analysis._get_filterable_df", return_value=raw_df), \
+         patch("iidm_viewer.security_analysis.render_filters", return_value=narrowed) as mock_flt, \
+         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]), \
+         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=[]):
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.container.return_value = _cm()
+        mock_st.radio.side_effect = ["N-1", "One contingency per element (N-1)"]
+        mock_st.selectbox.side_effect = ["Lines", "Lines"]
+        mock_st.multiselect.return_value = []
+        mock_st.text_input.return_value = ""
+        mock_st.form_submit_button.return_value = False
+        mock_st.expander.return_value = _cm()
+        _render_contingencies_subtab(net)
+    mock_flt.assert_called_once()
+    # multiselect for manual ids called with the narrowed index (["L2"])
+    id_multiselect_calls = [
+        call for call in mock_st.multiselect.call_args_list
+        if call.kwargs.get("key") == "sa_manual_ids"
+        or (len(call.args) >= 1 and "lines to include" in str(call.args[0]).lower())
+    ]
+    assert id_multiselect_calls
+    options = id_multiselect_calls[0].kwargs.get("options") or id_multiselect_calls[0].args[1]
+    assert list(options) == ["L2"]
 
 
 def test_render_contingencies_subtab_manual_grouped_requires_id():

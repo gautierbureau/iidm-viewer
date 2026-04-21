@@ -2,6 +2,12 @@ import streamlit as st
 import pandas as pd
 
 from iidm_viewer.powsybl_worker import run
+from iidm_viewer.filters import (
+    FILTERS,
+    build_vl_lookup,
+    enrich_with_joins,
+    render_filters,
+)
 from iidm_viewer.state import (
     build_n1_contingencies,
     build_n2_contingencies,
@@ -22,6 +28,12 @@ _MANUAL_TYPE_IDS_KEY = {
     "2-Winding Transformers": "two_windings_transformers",
     "3-Winding Transformers": "three_windings_transformers",
     "Generators": "generators",
+}
+_MANUAL_TYPE_GETTERS = {
+    "Lines": "get_lines",
+    "2-Winding Transformers": "get_2_windings_transformers",
+    "3-Winding Transformers": "get_3_windings_transformers",
+    "Generators": "get_generators",
 }
 _MANUAL_GROUPINGS = ["One contingency per element (N-1)", "Single grouped contingency (N-k)"]
 _CTX_TYPES = ["ALL", "NONE", "SPECIFIC"]
@@ -104,6 +116,32 @@ def _get_ids(network) -> dict[str, list[str]]:
     return cache
 
 
+def _get_filterable_df(network, manual_type: str) -> pd.DataFrame:
+    """Fetch (via worker) and enrich the component DataFrame for *manual_type*.
+
+    Cached per network so the pypowsybl call + VL/substation join only runs
+    once per type. Returns an empty DataFrame if the type has no getter or
+    the network has no elements of that type.
+    """
+    cache = st.session_state.setdefault("_sa_manual_df_cache", {})
+    key = (id(network), manual_type)
+    if key in cache:
+        return cache[key]
+
+    getter = _MANUAL_TYPE_GETTERS.get(manual_type)
+    if not getter:
+        cache[key] = pd.DataFrame()
+        return cache[key]
+
+    df = getattr(network, getter)(all_attributes=True)
+    if df is None or df.empty:
+        cache[key] = pd.DataFrame()
+        return cache[key]
+
+    cache[key] = enrich_with_joins(df, build_vl_lookup(network))
+    return cache[key]
+
+
 def _contingencies_list() -> list[dict]:
     return st.session_state.get("_sa_contingencies", [])
 
@@ -162,9 +200,24 @@ def _render_contingencies_subtab(network):
         options=_MANUAL_TYPES,
         key="sa_manual_type",
     )
-    type_ids = ids.get(_MANUAL_TYPE_IDS_KEY[manual_type], [])
+
+    # Filters are rendered outside the form so changing them re-renders the
+    # multiselect options immediately.
+    type_df = _get_filterable_df(network, manual_type)
+    if type_df.empty:
+        type_ids = ids.get(_MANUAL_TYPE_IDS_KEY[manual_type], [])
+    else:
+        filter_cols = FILTERS.get(manual_type, [])
+        filtered_df = render_filters(
+            type_df,
+            filter_cols,
+            key_prefix=f"sa_manual_flt_{manual_type}",
+            label=f"Filter {manual_type.lower()}",
+        )
+        type_ids = list(filtered_df.index.astype(str))
 
     with st.form("sa_manual_contingency_form", clear_on_submit=True):
+        st.caption(f"{len(type_ids)} {manual_type.lower()} available after filtering")
         selected_ids = st.multiselect(
             f"Pick {manual_type.lower()} to include",
             options=type_ids,
