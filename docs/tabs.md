@@ -7,6 +7,7 @@ sidebar:  file uploader → vl_selector → Run LF button + ⚙ params button
 tabs:     Overview | Network Map | Network Area Diagram | Single Line Diagram
           | Data Explorer Components | Data Explorer Extensions
           | Reactive Capability Curves | Operational Limits
+          | Pmax Visualization | Voltage Analysis
 ```
 
 Each tab has a dedicated render function. `app.py` passes `(network, selected_vl)`
@@ -143,6 +144,15 @@ for the capability boundary plus:
 - green diamond for `(target_p, target_q)`
 
 VL filter and generic Generator filters from `filters.py` are available.
+
+### Voltage Analysis — `voltage_analysis.render_voltage_analysis`
+
+Bus voltages grouped by nominal level, a **geographical voltage-deviation
+map** (Leaflet — separate renderer from the main Network Map, see
+[voltage-analysis.md](voltage-analysis.md)), and reactive-compensation
+tables (shunts, SVCs). No `selected_vl` input — the voltage map has
+its own nominal-voltage filter because the pu color scale only makes
+sense within one voltage class.
 
 ### Operational Limits — `operational_limits.render_operational_limits`
 
