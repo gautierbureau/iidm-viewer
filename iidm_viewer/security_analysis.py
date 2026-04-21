@@ -2,10 +2,28 @@ import streamlit as st
 import pandas as pd
 
 from iidm_viewer.powsybl_worker import run
-from iidm_viewer.state import build_n1_contingencies, run_security_analysis
+from iidm_viewer.state import (
+    build_n1_contingencies,
+    build_n2_contingencies,
+    run_security_analysis,
+)
 
 
 _ELEMENT_TYPES = ["Lines", "2-Winding Transformers"]
+_AUTO_MODES = ["N-1", "N-2"]
+_MANUAL_TYPES = [
+    "Lines",
+    "2-Winding Transformers",
+    "3-Winding Transformers",
+    "Generators",
+]
+_MANUAL_TYPE_IDS_KEY = {
+    "Lines": "lines",
+    "2-Winding Transformers": "two_windings_transformers",
+    "3-Winding Transformers": "three_windings_transformers",
+    "Generators": "generators",
+}
+_MANUAL_GROUPINGS = ["One contingency per element (N-1)", "Single grouped contingency (N-k)"]
 _CTX_TYPES = ["ALL", "NONE", "SPECIFIC"]
 _ACTION_TYPES = [
     "SWITCH",
@@ -95,6 +113,14 @@ def _contingencies_list() -> list[dict]:
 def _render_contingencies_subtab(network):
     st.subheader("Contingency configuration")
 
+    # --- Section A: automatic builder (N-1 / N-2) -----------------------
+    st.markdown("**Automatic builder**")
+    mode = st.radio(
+        "Generation mode",
+        options=_AUTO_MODES,
+        horizontal=True,
+        key="sa_auto_mode",
+    )
     element_type = st.selectbox(
         "Element type",
         options=_ELEMENT_TYPES,
@@ -102,7 +128,6 @@ def _render_contingencies_subtab(network):
     )
 
     nom_voltages = _get_nominal_voltages(network)
-
     if nom_voltages:
         default_v = [v for v in nom_voltages if v >= 380.0]
         selected_voltages = st.multiselect(
@@ -118,21 +143,125 @@ def _render_contingencies_subtab(network):
 
     nominal_v_set = set(selected_voltages) if selected_voltages else None
 
-    contingencies = build_n1_contingencies(network, element_type, nominal_v_set)
+    if mode == "N-1":
+        auto = build_n1_contingencies(network, element_type, nominal_v_set)
+    else:
+        auto = build_n2_contingencies(network, element_type, nominal_v_set)
+
+    # --- Section B: manual contingencies --------------------------------
+    st.markdown("**Manual contingencies**")
+    st.caption(
+        "Pick any subset of elements of a given type and add them as one "
+        "or several contingencies alongside the automatic ones."
+    )
+    manual: list[dict] = st.session_state.setdefault("_sa_manual_contingencies", [])
+    ids = _get_ids(network)
+
+    manual_type = st.selectbox(
+        "Element type",
+        options=_MANUAL_TYPES,
+        key="sa_manual_type",
+    )
+    type_ids = ids.get(_MANUAL_TYPE_IDS_KEY[manual_type], [])
+
+    with st.form("sa_manual_contingency_form", clear_on_submit=True):
+        selected_ids = st.multiselect(
+            f"Pick {manual_type.lower()} to include",
+            options=type_ids,
+            key="sa_manual_ids",
+        )
+        grouping = st.radio(
+            "Grouping",
+            options=_MANUAL_GROUPINGS,
+            index=0,
+            key="sa_manual_grouping",
+        )
+        group_id = st.text_input(
+            "Contingency id (for single grouped mode)",
+            key="sa_manual_group_id",
+            placeholder="e.g. N2_outage_southwest",
+        )
+        submitted = st.form_submit_button("Add manual contingencies")
+
+    if submitted:
+        if not selected_ids:
+            st.warning("Pick at least one element.")
+        elif grouping == _MANUAL_GROUPINGS[0]:
+            existing = {c["id"] for c in manual}
+            added = 0
+            for eid in selected_ids:
+                cid = f"N1_{eid}"
+                if cid in existing:
+                    continue
+                manual.append({
+                    "id": cid,
+                    "element_id": eid,
+                    "element_ids": [eid],
+                })
+                existing.add(cid)
+                added += 1
+            if added:
+                st.rerun()
+            else:
+                st.warning("All selected elements were already added.")
+        else:
+            cid = group_id.strip()
+            if not cid:
+                st.warning("A contingency id is required for grouped mode.")
+            elif any(c["id"] == cid for c in manual):
+                st.warning(f"Contingency id '{cid}' already exists.")
+            else:
+                manual.append({
+                    "id": cid,
+                    "element_ids": list(selected_ids),
+                })
+                st.rerun()
+
+    if manual:
+        st.caption(f"{len(manual)} manual contingency(ies) defined")
+        for i, c in enumerate(list(manual)):
+            with st.container(border=True):
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    eids = c.get("element_ids") or ([c["element_id"]] if "element_id" in c else [])
+                    st.markdown(
+                        f"`{c['id']}` — "
+                        f"{', '.join(f'`{x}`' for x in eids)}"
+                    )
+                with col2:
+                    if st.button("Remove", key=f"sa_manual_rm_{i}"):
+                        manual.pop(i)
+                        st.rerun()
+
+    # --- Section C: composed list --------------------------------------
+    contingencies = list(auto) + list(manual)
     st.session_state["_sa_contingencies"] = contingencies
 
+    auto_label = "N-1" if mode == "N-1" else "N-2"
     if contingencies:
-        st.caption(f"{len(contingencies)} N-1 contingencies to be simulated")
+        st.caption(
+            f"{len(auto)} auto ({auto_label}) + {len(manual)} manual = "
+            f"{len(contingencies)} contingencies to be simulated"
+        )
         with st.expander("Preview contingencies", expanded=False):
+            preview = [
+                {
+                    "id": c["id"],
+                    "element_ids": ", ".join(
+                        c.get("element_ids") or ([c["element_id"]] if "element_id" in c else [])
+                    ),
+                }
+                for c in contingencies
+            ]
             st.dataframe(
-                pd.DataFrame(contingencies),
+                pd.DataFrame(preview),
                 use_container_width=True,
                 hide_index=True,
             )
     else:
         st.info(
-            "No elements match the current filter. "
-            "Adjust the nominal voltage selection or element type."
+            "No contingencies yet — adjust the automatic filter above or add "
+            "a manual contingency."
         )
 
 
