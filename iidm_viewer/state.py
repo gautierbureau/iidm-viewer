@@ -2027,33 +2027,24 @@ def run_security_analysis(network, contingencies: list[dict]) -> dict:
 
         analysis = sa.create_analysis()
         for c in contingencies:
-            analysis.add_single_element_contingency(c["id"], c["element_id"])
+            analysis.add_single_element_contingency(c["element_id"], c["id"])
 
         lf_params = lf.Parameters(**generic)
         if provider:
             lf_params.provider_parameters = {k: str(v) for k, v in provider.items()}
         params = sa.Parameters(load_flow_parameters=lf_params)
 
-        result = sa.run_ac(raw, analysis, parameters=params)
+        result = analysis.run_ac(raw, parameters=params)
 
         # Serialize all results before they leave the worker thread
         pre_result = result.pre_contingency_result
-        pre_viol = pre_result.limit_violations
-        if pre_viol is None:
-            pre_viol = pd.DataFrame()
-        else:
-            pre_viol = pre_viol.reset_index(drop=True)
+        pre_viol = pd.DataFrame(pre_result.limit_violations)
 
         post: dict = {}
         for cid, cr in result.post_contingency_results.items():
-            viol = cr.limit_violations
-            if viol is None:
-                viol = pd.DataFrame()
-            else:
-                viol = viol.reset_index(drop=True)
             post[cid] = {
                 "status": cr.status.name,
-                "limit_violations": viol,
+                "limit_violations": pd.DataFrame(cr.limit_violations),
             }
 
         return {
@@ -2139,12 +2130,10 @@ def run_short_circuit_analysis(network, faults: list[dict], sc_params: dict | No
 
         analysis = sc.create_analysis()
         for f in faults:
-            ft = sc.FaultType[f.get("fault_type", "THREE_PHASE")]
-            analysis.add_fault(f["id"], f["element_id"], fault_type=ft)
+            analysis.set_bus_fault(f["id"], f["element_id"], 0.0, 0.0)
 
-        study_type = sc.StudyType[sc_params.get("study_type", "SUB_TRANSIENT")]
         params = sc.Parameters(
-            study_type=study_type,
+            study_type=sc.ShortCircuitStudyType[sc_params.get("study_type", "SUB_TRANSIENT")],
             with_feeder_result=sc_params.get("with_feeder_result", True),
             with_limit_violations=sc_params.get("with_limit_violations", True),
             min_voltage_drop_proportional_threshold=float(
@@ -2152,30 +2141,47 @@ def run_short_circuit_analysis(network, faults: list[dict], sc_params: dict | No
             ),
         )
 
-        result = sc.run(raw, analysis, parameters=params)
+        result = analysis.run(raw, parameters=params)
 
         # Serialize all results before they leave the worker thread
+        fr_df = result.fault_results          # DataFrame indexed by fault_id
+        feeder_df_all = result.feeder_results  # flat DataFrame, may be multi-indexed
+        viol_df_all = result.limit_violations  # flat DataFrame, may be multi-indexed
+
+        def _filter_by_fault(df: pd.DataFrame, fid: str) -> pd.DataFrame:
+            if df.empty:
+                return pd.DataFrame()
+            try:
+                if isinstance(df.index, pd.MultiIndex):
+                    lvl_vals = df.index.get_level_values(0)
+                    return df[lvl_vals == fid].reset_index(drop=True)
+                return df[df.index == fid].reset_index(drop=True)
+            except Exception:
+                return pd.DataFrame()
+
         fault_results: dict = {}
-        for fid, fr in result.fault_results.items():
-            feeder_df = getattr(fr, "feeder_results", None)
-            if feeder_df is None:
-                feeder_df = pd.DataFrame()
+        for f in faults:
+            fid = f["id"]
+            if fid in fr_df.index:
+                row = fr_df.loc[fid]
+                status_val = row.get("status", "UNKNOWN")
+                status_str = status_val.name if hasattr(status_val, "name") else str(status_val)
+                pwr_raw = row.get("short_circuit_power", None)
+                pwr = float(pwr_raw) if pwr_raw is not None and pd.notna(pwr_raw) else None
+                cur_raw = row.get("current", None)
+                cur_a = float(cur_raw) if cur_raw is not None and pd.notna(cur_raw) else None
+                cur_ka = cur_a / 1000.0 if cur_a is not None else None
             else:
-                feeder_df = feeder_df.reset_index(drop=True)
+                status_str = "UNKNOWN"
+                pwr = None
+                cur_ka = None
 
-            viol_df = getattr(fr, "limit_violations", None)
-            if viol_df is None:
-                viol_df = pd.DataFrame()
-            else:
-                viol_df = viol_df.reset_index(drop=True)
-
-            raw_current = getattr(fr, "current", None)
             fault_results[fid] = {
-                "status": fr.status.name,
-                "short_circuit_power_mva": getattr(fr, "short_circuit_power_mva", None),
-                "current_kA": float(raw_current) / 1000.0 if raw_current is not None else None,
-                "feeder_results": feeder_df,
-                "limit_violations": viol_df,
+                "status": status_str,
+                "short_circuit_power_mva": pwr,
+                "current_kA": cur_ka,
+                "feeder_results": _filter_by_fault(feeder_df_all, fid),
+                "limit_violations": _filter_by_fault(viol_df_all, fid),
             }
 
         return {
