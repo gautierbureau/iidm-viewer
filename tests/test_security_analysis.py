@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from iidm_viewer.state import (
     build_n1_contingencies,
+    build_n2_contingencies,
     load_network,
     run_security_analysis,
 )
@@ -136,8 +137,45 @@ def test_build_n1_contingencies_voltage_filter_match_on_vl2():
 
 
 # ---------------------------------------------------------------------------
+# build_n2_contingencies
+# ---------------------------------------------------------------------------
+
+
+def test_build_n2_contingencies_returns_unordered_pairs(xiidm_upload):
+    network = load_network(xiidm_upload)
+    n1 = build_n1_contingencies(network, "Lines")
+    n2 = build_n2_contingencies(network, "Lines")
+    n = len(n1)
+    assert len(n2) == n * (n - 1) // 2
+    # Each entry has two element ids and an N2_ prefix
+    for c in n2:
+        assert c["id"].startswith("N2_")
+        assert "element_ids" in c and len(c["element_ids"]) == 2
+        a, b = c["element_ids"]
+        assert a < b
+
+
+def test_build_n2_contingencies_respects_voltage_filter(xiidm_upload):
+    network = load_network(xiidm_upload)
+    # pick a voltage that yields zero N-1 ⇒ zero N-2
+    assert build_n2_contingencies(network, "Lines", {9_999.0}) == []
+
+
+# ---------------------------------------------------------------------------
 # run_security_analysis — integration tests
 # ---------------------------------------------------------------------------
+
+
+def test_run_security_analysis_n2_dispatches_multiple_elements(xiidm_upload):
+    """Two-element contingency should route through add_multiple_elements_contingency."""
+    pytest.importorskip("pypowsybl.security")
+    network = load_network(xiidm_upload)
+    n1 = build_n1_contingencies(network, "Lines")[:2]
+    ids = [c["element_id"] for c in n1]
+    multi = [{"id": f"N2_{ids[0]}_{ids[1]}", "element_ids": ids}]
+    results = run_security_analysis(network, multi)
+    assert "post" in results
+    assert f"N2_{ids[0]}_{ids[1]}" in results["post"]
 
 
 def test_run_security_analysis_pre_converged(xiidm_upload):
@@ -355,27 +393,137 @@ def test_render_contingencies_subtab_empty_shows_info():
     net = MagicMock()
     with patch("iidm_viewer.security_analysis.st") as mock_st, \
          patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[132.0]), \
-         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]):
+         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()), \
+         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]), \
+         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=[]):
         mock_st.session_state = {}
+        mock_st.form.return_value = _cm()
+        mock_st.radio.return_value = "N-1"
         mock_st.selectbox.return_value = "Lines"
         mock_st.multiselect.return_value = []
+        mock_st.text_input.return_value = ""
+        mock_st.form_submit_button.return_value = False
         _render_contingencies_subtab(net)
     mock_st.info.assert_called()
 
 
 def test_render_contingencies_subtab_stores_in_session():
-    contingencies = [{"id": "N1_L1", "element_id": "L1"}]
+    contingencies = [{"id": "N1_L1", "element_id": "L1", "element_ids": ["L1"]}]
     net = MagicMock()
     with patch("iidm_viewer.security_analysis.st") as mock_st, \
          patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[132.0]), \
-         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=contingencies):
+         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()), \
+         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=contingencies), \
+         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=[]):
         mock_st.session_state = {}
+        mock_st.form.return_value = _cm()
+        mock_st.radio.return_value = "N-1"
         mock_st.selectbox.return_value = "Lines"
         mock_st.multiselect.return_value = [132.0]
+        mock_st.text_input.return_value = ""
+        mock_st.form_submit_button.return_value = False
         mock_st.expander.return_value = _cm()
         _render_contingencies_subtab(net)
     assert mock_st.session_state["_sa_contingencies"] == contingencies
     mock_st.caption.assert_called()
+
+
+def test_render_contingencies_subtab_n2_mode_uses_n2_builder():
+    net = MagicMock()
+    n2 = [
+        {"id": "N2_L1_L2", "element_ids": ["L1", "L2"]},
+        {"id": "N2_L1_L3", "element_ids": ["L1", "L3"]},
+    ]
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[132.0]), \
+         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()), \
+         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]), \
+         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=n2) as mock_n2:
+        mock_st.session_state = {}
+        mock_st.form.return_value = _cm()
+        mock_st.radio.return_value = "N-2"
+        mock_st.selectbox.return_value = "Lines"
+        mock_st.multiselect.return_value = []
+        mock_st.text_input.return_value = ""
+        mock_st.form_submit_button.return_value = False
+        mock_st.expander.return_value = _cm()
+        _render_contingencies_subtab(net)
+    mock_n2.assert_called_once()
+    assert mock_st.session_state["_sa_contingencies"] == n2
+
+
+def test_render_contingencies_subtab_manual_n1_per_element():
+    net = MagicMock()
+    state: dict = {}
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[]), \
+         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()), \
+         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]), \
+         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=[]):
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.container.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.radio.side_effect = ["N-1", "One contingency per element (N-1)"]
+        # selectbox: auto element type, manual element type
+        mock_st.selectbox.side_effect = ["Lines", "Lines"]
+        mock_st.multiselect.return_value = ["L1"]
+        mock_st.text_input.return_value = ""
+        mock_st.form_submit_button.return_value = True
+        mock_st.button.return_value = False
+        mock_st.expander.return_value = _cm()
+        _render_contingencies_subtab(net)
+    assert state["_sa_manual_contingencies"] == [
+        {"id": "N1_L1", "element_id": "L1", "element_ids": ["L1"]},
+    ]
+    assert state["_sa_contingencies"] == state["_sa_manual_contingencies"]
+
+
+def test_render_contingencies_subtab_manual_grouped_nk():
+    net = MagicMock()
+    ids = dict(_ids_fixture(), lines=["L1", "L2", "L3"])
+    state: dict = {}
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[]), \
+         patch("iidm_viewer.security_analysis._get_ids", return_value=ids), \
+         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]), \
+         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=[]):
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.container.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.radio.side_effect = ["N-1", "Single grouped contingency (N-k)"]
+        mock_st.selectbox.side_effect = ["Lines", "Lines"]
+        mock_st.multiselect.return_value = ["L1", "L2"]
+        mock_st.text_input.return_value = "grouped_outage"
+        mock_st.form_submit_button.return_value = True
+        mock_st.button.return_value = False
+        mock_st.expander.return_value = _cm()
+        _render_contingencies_subtab(net)
+    assert state["_sa_manual_contingencies"] == [
+        {"id": "grouped_outage", "element_ids": ["L1", "L2"]},
+    ]
+
+
+def test_render_contingencies_subtab_manual_grouped_requires_id():
+    net = MagicMock()
+    state: dict = {}
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[]), \
+         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()), \
+         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]), \
+         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=[]):
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.radio.side_effect = ["N-1", "Single grouped contingency (N-k)"]
+        mock_st.selectbox.side_effect = ["Lines", "Lines"]
+        mock_st.multiselect.return_value = ["L1"]
+        mock_st.text_input.return_value = ""
+        mock_st.form_submit_button.return_value = True
+        mock_st.expander.return_value = _cm()
+        _render_contingencies_subtab(net)
+    assert state.get("_sa_manual_contingencies") == []
+    mock_st.warning.assert_called()
 
 
 def test_render_monitored_subtab_empty_shows_info():

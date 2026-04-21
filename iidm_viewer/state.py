@@ -1999,7 +1999,31 @@ def build_n1_contingencies(
             return False
         elem_df = elem_df[elem_df.apply(_matches, axis=1)]
 
-    return [{"id": f"N1_{eid}", "element_id": eid} for eid in elem_df.index]
+    return [
+        {"id": f"N1_{eid}", "element_id": eid, "element_ids": [eid]}
+        for eid in elem_df.index
+    ]
+
+
+def build_n2_contingencies(
+    network,
+    element_type: str,
+    nominal_v_set: set | None = None,
+) -> list[dict]:
+    """Build N-2 contingency definitions for every unique pair of elements
+    of *element_type* whose terminals touch one of *nominal_v_set*.
+
+    Pairs are unordered (A, B) with A < B by element id. Returns a list of
+    ``{"id": "N2_<a>_<b>", "element_ids": [a, b]}``.
+    """
+    from itertools import combinations
+
+    n1 = build_n1_contingencies(network, element_type, nominal_v_set)
+    ids = sorted(c["element_id"] for c in n1)
+    return [
+        {"id": f"N2_{a}_{b}", "element_ids": [a, b]}
+        for a, b in combinations(ids, 2)
+    ]
 
 
 def _apply_action(analysis, action: dict) -> None:
@@ -2168,7 +2192,11 @@ def run_security_analysis(
 
         analysis = sa.create_analysis()
         for c in contingencies:
-            analysis.add_single_element_contingency(c["element_id"], c["id"])
+            eids = list(c.get("element_ids") or ([c["element_id"]] if "element_id" in c else []))
+            if len(eids) == 1:
+                analysis.add_single_element_contingency(eids[0], c["id"])
+            elif len(eids) > 1:
+                analysis.add_multiple_elements_contingency(eids, c["id"])
 
         for me in monitored_elements:
             ctx_name = me.get("contingency_context_type", "ALL")

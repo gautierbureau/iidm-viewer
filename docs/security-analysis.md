@@ -89,25 +89,56 @@ Adding a new action type means: extend `_ACTION_TYPES` in
 | `violation_subject_ids` | list[str] | Empty/missing → any element (only used when condition is violation-based) |
 | `violation_types` | list[str] | Subset of `CURRENT` / `ACTIVE_POWER` / `APPARENT_POWER` / `LOW_VOLTAGE` / `HIGH_VOLTAGE`; empty → any type |
 
-## Contingency building — `state.build_n1_contingencies(network, element_type, nominal_v_set)`
+## Contingency building
+
+### Contingency dict shape
+
+Every contingency has a unique `id` and a list of `element_ids`. The
+Contingencies sub-tab composes the list from an automatic builder and an
+optional manual list:
+
+| Key | Type | Notes |
+|---|---|---|
+| `id` | str | Unique within the run |
+| `element_ids` | list[str] | One entry = N-1; two or more = N-k |
+| `element_id` | str | Back-compat alias for N-1 entries (equals `element_ids[0]`) |
+
+Inside the worker, `state.run_security_analysis` dispatches on list length:
+`len(element_ids) == 1` → `add_single_element_contingency`, otherwise
+`add_multiple_elements_contingency`.
+
+### `state.build_n1_contingencies(network, element_type, nominal_v_set=None)`
+
+Returns one N-1 entry per element of `element_type` whose terminals touch
+`nominal_v_set`:
 
 ```python
-def build_n1_contingencies(network, element_type, nominal_v_set=None):
-    raw = object.__getattribute__(network, "_obj")
-
-    def _gather():
-        elem_df = getattr(raw, getter)(attributes=vl_cols)
-        vl_df = raw.get_voltage_levels(attributes=["nominal_v"]) if nominal_v_set else None
-        return elem_df, vl_df
-
-    elem_df, vl_df = run(_gather)
-    # filter by nominal_v_set, then return [{"id": "N1_<id>", "element_id": id}, ...]
+[{"id": f"N1_{eid}", "element_id": eid, "element_ids": [eid]} for eid in ...]
 ```
 
 Both the element table and VL table are fetched in a single `run()` call to
-avoid two round-trips to the worker. The resulting list is a plain Python
-structure that drives both the preview count and the `run_security_analysis`
-call.
+avoid two round-trips to the worker.
+
+### `state.build_n2_contingencies(network, element_type, nominal_v_set=None)`
+
+Calls `build_n1_contingencies` to enumerate eligible elements, then returns
+every unique unordered pair `(a, b)` with `a < b`:
+
+```python
+[{"id": f"N2_{a}_{b}", "element_ids": [a, b]} for (a, b) in combinations(ids, 2)]
+```
+
+The combinatorics can grow fast — pair count is `n * (n - 1) / 2` where `n`
+is the number of filtered elements — so narrow the voltage filter before
+running.
+
+### Manual contingencies
+
+The sub-tab also exposes a form to pick any subset of elements of a given
+type (Lines / 2WTs / 3WTs / Generators) and add them either as one N-1 per
+element or as a single grouped N-k contingency. Manual entries live in
+`_sa_manual_contingencies` and are concatenated with the auto list to form
+the authoritative `_sa_contingencies`.
 
 ## UI structure — `security_analysis.py`
 
@@ -115,10 +146,14 @@ call.
 render_security_analysis(network)
 ├── tab "Configuration"
 │   ├── sub-tab "Contingencies"
-│   │   ├── selectbox: element type (Lines / 2-Winding Transformers)
-│   │   ├── multiselect: nominal voltage filter (defaults to ≥ 380 kV)
-│   │   ├── caption: N contingencies to be simulated
-│   │   └── expander: preview contingency table
+│   │   ├── automatic builder
+│   │   │   ├── radio: N-1 / N-2
+│   │   │   ├── selectbox: element type (Lines / 2-Winding Transformers)
+│   │   │   └── multiselect: nominal voltage filter (defaults to ≥ 380 kV)
+│   │   ├── manual form (type selector + element multiselect + grouping)
+│   │   │       and list of manual entries with per-row Remove
+│   │   ├── caption: <auto> + <manual> = <total> contingencies
+│   │   └── expander: preview composed contingency table
 │   ├── sub-tab "Monitored elements"
 │   │   ├── form: context (ALL/NONE/SPECIFIC) + contingency picker + id multiselects
 │   │   │       (branches, voltage levels, 3WTs)
@@ -164,7 +199,8 @@ Results are stored in `_sa_results` and survive reruns within the session.
 
 | Key | Set by | Read by |
 |---|---|---|
-| `_sa_contingencies` | `_render_contingencies_subtab` (rebuilt each render) | `_render_config_tab`, `_render_monitored_subtab`, `_render_operator_strategies_subtab` |
+| `_sa_contingencies` | `_render_contingencies_subtab` (rebuilt each render = auto + manual) | `_render_config_tab`, `_render_monitored_subtab`, `_render_operator_strategies_subtab` |
+| `_sa_manual_contingencies` | `_render_contingencies_subtab` (manual form) | `_render_contingencies_subtab` |
 | `_sa_monitored` | `_render_monitored_subtab` | `_render_config_tab` → `run_security_analysis` |
 | `_sa_limit_reductions` | `_render_limit_reductions_subtab` | `_render_config_tab` → `run_security_analysis` |
 | `_sa_actions` | `_render_actions_subtab` | `_render_config_tab` → `run_security_analysis`; `_render_operator_strategies_subtab` |
@@ -186,9 +222,12 @@ Results are stored in `_sa_results` and survive reruns within the session.
 | `value` | Actual flow/current |
 | `side` | `ONE` or `TWO` |
 
-## Extending to N-2 / custom contingencies
+## Extending to custom contingency builders
 
-The architecture is contingency-list-driven: `build_n1_contingencies` is a
-builder that returns `list[dict]`. New builders (N-2, manual definition form,
-filtered by substation, etc.) can produce the same shape and feed the same
-`run_security_analysis` without changing the results rendering.
+The architecture is contingency-list-driven: every builder returns
+`list[dict]` with the shape documented above. Existing builders cover N-1
+(`build_n1_contingencies`), N-2 pairs (`build_n2_contingencies`), and the
+Contingencies sub-tab's manual form (grouped N-k from a picked subset). New
+builders (filtered by substation, common-mode outages, imported from a CSV,
+etc.) produce the same shape and feed the same `run_security_analysis`
+without changing the results rendering.
