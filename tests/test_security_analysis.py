@@ -751,8 +751,8 @@ def test_render_operator_strategies_subtab_submit_appends():
         mock_st.container.return_value = _cm()
         mock_st.columns.side_effect = _mock_columns
         mock_st.text_input.return_value = "strat1"
-        # selectbox: contingency, then condition_type
-        mock_st.selectbox.side_effect = ["N1_L1", "TRUE_CONDITION"]
+        # selectbox order: condition_type (outside form), then contingency (inside form)
+        mock_st.selectbox.side_effect = ["TRUE_CONDITION", "N1_L1"]
         mock_st.multiselect.return_value = ["a1"]
         mock_st.form_submit_button.return_value = True
         mock_st.button.return_value = False
@@ -762,8 +762,36 @@ def test_render_operator_strategies_subtab_submit_appends():
         "contingency_id": "N1_L1",
         "action_ids": ["a1"],
         "condition_type": "TRUE_CONDITION",
+        "violation_subject_ids": [],
+        "violation_types": [],
     }]
     mock_st.rerun.assert_called()
+
+
+def test_render_operator_strategies_subtab_violation_condition_captures_filters():
+    state = {
+        "_sa_contingencies": [{"id": "N1_L1", "element_id": "L1"}],
+        "_sa_actions": [
+            {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
+        ],
+    }
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()):
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.container.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.text_input.return_value = "strat1"
+        mock_st.selectbox.side_effect = ["ANY_VIOLATION_CONDITION", "N1_L1"]
+        # multiselect order: actions, violation_subject_ids, violation_types
+        mock_st.multiselect.side_effect = [["a1"], ["L1"], ["CURRENT"]]
+        mock_st.form_submit_button.return_value = True
+        mock_st.button.return_value = False
+        _render_operator_strategies_subtab(network=MagicMock())
+    s = state["_sa_operator_strategies"][0]
+    assert s["condition_type"] == "ANY_VIOLATION_CONDITION"
+    assert s["violation_subject_ids"] == ["L1"]
+    assert s["violation_types"] == ["CURRENT"]
 
 
 def test_render_operator_strategies_subtab_no_actions_warns():
@@ -777,7 +805,7 @@ def test_render_operator_strategies_subtab_no_actions_warns():
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.text_input.return_value = "strat1"
-        mock_st.selectbox.side_effect = ["N1_L1", "TRUE_CONDITION"]
+        mock_st.selectbox.side_effect = ["TRUE_CONDITION", "N1_L1"]
         mock_st.multiselect.return_value = []
         mock_st.form_submit_button.return_value = True
         _render_operator_strategies_subtab()
@@ -909,3 +937,38 @@ def test_run_security_analysis_operator_strategy_round_trip(xiidm_upload):
     assert isinstance(osr["status"], str) and osr["status"]
     assert osr["contingency_id"] == cid
     assert osr["action_ids"] == ["gen_down"]
+
+
+def test_run_security_analysis_operator_strategy_violation_condition(xiidm_upload):
+    """Violation-gated condition with subject/type filters: verifies that
+    ``violation_subject_ids`` and ``violation_types`` reach pypowsybl without
+    being rejected."""
+    pytest.importorskip("pypowsybl.security")
+    network = load_network(xiidm_upload)
+    contingencies = build_n1_contingencies(network, "Lines")[:1]
+    cid = contingencies[0]["id"]
+    line_id = contingencies[0]["element_id"]
+    gens = network.get_generators(attributes=[])
+    gen_id = list(gens.index)[0]
+    actions = [{
+        "action_id": "gen_down",
+        "type": "GENERATOR_ACTIVE_POWER",
+        "generator_id": gen_id,
+        "is_relative": True,
+        "active_power": -10.0,
+    }]
+    strategies = [{
+        "operator_strategy_id": "strat_v",
+        "contingency_id": cid,
+        "action_ids": ["gen_down"],
+        "condition_type": "ANY_VIOLATION_CONDITION",
+        "violation_subject_ids": [line_id],
+        "violation_types": ["CURRENT"],
+    }]
+    results = run_security_analysis(
+        network,
+        contingencies,
+        actions=actions,
+        operator_strategies=strategies,
+    )
+    assert "operator_strategies" in results
