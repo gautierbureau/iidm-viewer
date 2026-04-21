@@ -56,8 +56,19 @@ def test_render_interactive_sld_forwards_args_and_returns_component_value():
     assert kwargs["svg"] == "<svg/>"
     assert kwargs["metadata"] == '{"nodes":[]}'
     assert kwargs["height"] == 500
+    assert kwargs["svgType"] == "voltage-level"
     assert kwargs["key"] == "k"
     assert kwargs["default"] is None
+
+
+def test_render_interactive_sld_forwards_substation_svg_type():
+    import iidm_viewer.sld_component as m
+    importlib.reload(m)
+
+    with mock.patch.object(m, "_component") as comp:
+        comp.return_value = None
+        m.render_interactive_sld("<svg/>", "{}", svg_type="substation", key="k2")
+    assert comp.call_args.kwargs["svgType"] == "substation"
 
 
 def test_bundle_wires_streamlit_protocol_and_library_callback():
@@ -87,6 +98,7 @@ def test_bundle_wires_streamlit_protocol_and_library_callback():
         "isStreamlitMessage",
         "sld-vl-click",
         "voltage-level",
+        "substation",
         "onNextVoltageCallback",
     ):
         assert needle in js, f"missing from bundle: {needle!r}"

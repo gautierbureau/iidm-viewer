@@ -205,17 +205,67 @@ def render_nad_tab(network, selected_vl):
             st.rerun()
 
 
+def _get_substation_id(network, vl_id: str) -> str | None:
+    """Return the substation id for ``vl_id``, or None on any failure."""
+    try:
+        vls = network.get_voltage_levels().reset_index()
+        row = vls[vls["id"].astype(str) == str(vl_id)]
+        if row.empty:
+            return None
+        sid = row.iloc[0].get("substation_id")
+        return str(sid) if sid else None
+    except Exception:
+        return None
+
+
+def _substation_has_multiple_vls(network, substation_id: str) -> bool:
+    """Return True if ``substation_id`` contains more than one voltage level."""
+    try:
+        vls = network.get_voltage_levels().reset_index()
+        return len(vls[vls["substation_id"].astype(str) == str(substation_id)]) > 1
+    except Exception:
+        return False
+
+
 def render_sld_tab(network, selected_vl):
     from pypowsybl.network import SldParameters
     if not selected_vl:
         st.info("Select a voltage level in the sidebar to display the Single Line Diagram.")
         return
 
+    # Clear substation-expand state when the primary VL changes.
+    if st.session_state.get("_sld_last_vl") != selected_vl:
+        st.session_state["_sld_last_vl"] = selected_vl
+        st.session_state["sld_show_substation"] = False
+
+    show_substation = bool(st.session_state.get("sld_show_substation", False))
+
+    # Determine the container to render and the svgType for the viewer.
+    if show_substation:
+        substation_id = _get_substation_id(network, selected_vl)
+        container_id = substation_id or selected_vl
+        svg_type = "substation" if substation_id else "voltage-level"
+    else:
+        container_id = selected_vl
+        svg_type = "voltage-level"
+        substation_id = _get_substation_id(network, selected_vl)
+
+    # Expand / collapse button (only shown when the substation has >1 VL).
+    if substation_id and _substation_has_multiple_vls(network, substation_id):
+        if show_substation:
+            if st.button("Collapse to voltage level", key="sld_collapse_btn"):
+                st.session_state["sld_show_substation"] = False
+                st.rerun()
+        else:
+            if st.button("Expand to substation", key="sld_expand_btn"):
+                st.session_state["sld_show_substation"] = True
+                st.rerun()
+
     with st.spinner("Generating Single Line Diagram..."):
         try:
             sld_params = SldParameters(use_name=True, tooltip_enabled=True)
             sld = network.get_single_line_diagram(
-                selected_vl,
+                container_id,
                 parameters=sld_params,
             )
             svg = sld.svg
@@ -228,7 +278,8 @@ def render_sld_tab(network, selected_vl):
         svg=svg,
         metadata=metadata,
         height=700,
-        key=f"sld_{selected_vl}",
+        svg_type=svg_type,
+        key=f"sld_{container_id}",
     )
 
     _render_bus_legend(network, selected_vl, svg)

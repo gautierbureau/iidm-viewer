@@ -26,11 +26,18 @@ _COMPONENT_DIR = os.path.join(
 _component = components.declare_component("iidm_sld", path=_COMPONENT_DIR)
 
 
-def render_interactive_sld(svg: str, metadata: str, height: int = 700, key: str = "sld"):
+def render_interactive_sld(
+    svg: str,
+    metadata: str,
+    height: int = 700,
+    svg_type: str = "voltage-level",
+    key: str = "sld",
+):
     return _component(
         svg=svg,
         metadata=metadata,
         height=height,
+        svgType=svg_type,
         default=None,
         key=key,
     )
