@@ -180,91 +180,115 @@ Network Map has the same limitation — see
 2. Filters to `nominal_v ≥ TRANSPORT_NOMINAL_V_THRESHOLD`.
 3. Emits an info message if the filter leaves nothing, or if no
    load-flow voltages are present.
-4. Builds the three Streamlit controls.
+4. Builds the three Streamlit controls (nominal-voltage filter,
+   icons/gradient, full-scale pu).
 5. Calls `_prepare_display_records(records, sel_nom, min_nominal)` to
    apply the nominal-voltage filter and compute `v_pu`.
-6. Formats `_LEAFLET_HTML` with `records`, `mode`, `v_range`, and
-   `gradient_radius_m`, and hands it to `st.components.v1.html`.
+6. Builds a `DivergingColorScale(center=1.0, range=v_range,
+   mid=pale-yellow, low=blue, high=red)` and hands the records to the
+   shared `leaflet_scalar_map.render_scalar_map`, which owns the JS
+   template and iframe injection.
 
-### Leaflet JS contract
+See [the shared renderer section](#shared-scalar-on-substation-renderer---leaflet_scalar_mappy)
+below for the Leaflet JS contract.
 
-The iframe script reads four template variables:
+---
 
-| JS var | Python side | Role |
-|---|---|---|
-| `records` | `display` list (after filters) | one marker per entry |
-| `mode`    | `"icons"` or `"gradient"` | selects the rendering branch |
-| `vRange`  | `v_range` slider value | color-saturation range (±pu) |
-| `gradientRadiusMeters` | heuristic on `sel_nom` | radius of the blended circles in gradient mode (25 km for ≥200 kV / all-voltages, 12 km otherwise) |
+# Shared scalar-on-substation renderer — `leaflet_scalar_map.py`
 
-Color computation is entirely client-side:
+**Entry points:** `DivergingColorScale`, `get_substation_positions`,
+`render_scalar_map`, `default_legend_stops`.
+**Callers:** `voltage_map.py` (voltage deviation per VL, centered at
+1.0 pu) and `injection_map.py` (net active/reactive power per
+substation, centered at 0 MW). Both produce the same `records` shape
+and differ only in color anchors, legend stops, and tooltips.
 
-```js
-function divergingColor(v_pu) {
-  var t = clamp((v_pu - 1) / vRange, -1, 1);
-  var mid = [255, 255, 224];  // pale yellow at 1.0 pu
-  var lo  = [27,  74, 199];   // blue  at 1 - vRange
-  var hi  = [199, 27,  27];   // red   at 1 + vRange
-  var target = t < 0 ? lo : hi;
-  return lerp(mid, target, Math.abs(t));
+## Record shape
+
+```python
+{
+    "id":      str,                # stable id used for debugging only
+    "lat":     float,
+    "lon":     float,
+    "value":   float | None,       # None renders as a grey "no data" dot
+    "tooltip": str,                # optional HTML, shown on marker hover
+    "radius":  float,              # optional; overrides default in icons mode
 }
 ```
 
-The legend is a five-stop sample of `divergingColor` at
-`{-vRange, -vRange/2, 0, +vRange/2, +vRange}` plus a grey "no data"
-swatch for VLs whose `v_pu` is `null`.
+`tooltip` is raw HTML; the caller is responsible for escaping it.
+`radius` is ignored in gradient mode (the large translucent circles
+have a fixed `gradient_radius_m`; the tiny dots on top use a fixed
+3 px radius).
 
-## Reusing the Leaflet scaffolding for other scalar-on-substation maps
+## Color model — `DivergingColorScale`
 
-`voltage_map.py` is effectively a small generic **"scalar value per
-substation on top of Leaflet"** renderer with voltage-specific
-controls bolted on. To use it for another scalar (injection,
-short-circuit power, loading %, etc.) the refactoring path is:
+```python
+@dataclass(frozen=True)
+class DivergingColorScale:
+    center: float                      # "neutral" value (1.0 pu / 0 MW)
+    range: float                       # deviation that saturates color
+    mid_rgb: tuple[int, int, int]      # color at center
+    low_rgb: tuple[int, int, int]      # color at center - range
+    high_rgb: tuple[int, int, int]     # color at center + range
+```
 
-1. **Split the JS template.** `_LEAFLET_HTML` is parameterised only on
-   `records`, `mode`, `vRange`, `gradientRadiusMeters`. Move it into a
-   shared module (e.g. `iidm_viewer/leaflet_scalar_map.py`) that
-   exposes a function like:
+Color math runs client-side in the iframe:
 
-   ```python
-   def render_scalar_map(
-       records,            # list of {id, lat, lon, value, label, ...}
-       *, mode="icons",
-       color_fn="diverging",  # "diverging" | "sequential"
-       center=(46.6, 2.5), zoom=6,
-       legend_title="Value",
-       unit="",
-       value_range,           # (center, span) for diverging, (min, max) for sequential
-       tooltip_builder=None,  # optional lambda record -> str
-   ):
-       ...
-   ```
+```js
+t = clamp((value - scale.center) / scale.range, -1, 1);
+target = t < 0 ? scale.lo : scale.hi;
+color  = lerp(scale.mid, target, |t|);
+```
 
-2. **Parameterise the color function.** Today there's one hard-coded
-   `divergingColor` in JS. A shared renderer should accept a
-   color-map name (diverging blue-white-red, sequential viridis,
-   categorical) and the corresponding color stops, and pick the JS
-   branch accordingly.
+`null` / `undefined` / `NaN` values render as `rgba(160,160,160,0.35)`
+("no data"). The legend includes a grey swatch for that case.
 
-3. **Keep the cache shape generic.** The current cache key is
-   `_voltage_map_cache`; another tab should use its own key
-   (`_loading_map_cache`, `_sc_power_map_cache`) so they don't collide.
-   Extraction must still run on the worker thread via `run()`.
+## `render_scalar_map(records, *, …)`
 
-4. **Per-tab controls stay with the tab.** Keep the nominal-voltage
-   and full-scale widgets in `voltage_map.py`; a loading-percentage
-   map would have its own nominal-voltage filter + color-range widget
-   and would pre-compute values before calling the shared renderer.
+Options:
 
-5. **Substation positions are the only common extraction.** The
-   `substationPosition` extension lookup and `get_substations()` merge
-   in `_extract_voltage_map_data` is reusable verbatim. Extract it
-   into `iidm_viewer/geo.py` (`get_substation_positions(network) ->
-   dict[str, (lat, lon)]`) when a second caller appears.
+| Kwarg | Default | Purpose |
+|---|---|---|
+| `mode` | — | `"icons"` (one marker per record) or `"gradient"` (wide blended circles + small dots) |
+| `color_scale` | — | `DivergingColorScale` instance |
+| `legend_title` | — | bold header in the legend box |
+| `legend_subtitle` | `""` | smaller grey text below the title |
+| `legend_stops` | `default_legend_stops(color_scale)` | list of `(value, label)` tuples; five symmetrical stops by default |
+| `height` | 620 | iframe pixel height |
+| `center_latlon` | `(46.6, 2.5)` | initial view center — France; same default as the pre-`2dac287` map |
+| `zoom` | 6 | initial Leaflet zoom |
+| `gradient_radius_m` | 25 000 | blended-circle radius in gradient mode (meters) |
+| `default_icon_radius` | 7.0 | px radius when the record has no `radius` override |
 
-Until a second scalar-on-substation view exists, the inlined approach
-here is the simplest thing that works — the refactor should be driven
-by a concrete second use-case.
+## Substation-position helper — `get_substation_positions(network)`
+
+Runs on the pypowsybl worker, returns `{substation_id: (lat, lon)}`
+for every row of the `substationPosition` extension that has
+in-range coordinates. Returns `{}` when the extension is missing or
+empty — callers typically do `if not positions: return` and surface a
+friendly info message.
+
+Both `voltage_map._extract_voltage_map_data` and
+`injection_map._extract_injection_data` call it; they do their own
+per-VL / per-substation aggregation on top and route everything
+through `run()`.
+
+## How to add a new scalar-on-substation map
+
+1. Write a `_extract_X_data(network)` that calls
+   `get_substation_positions` first and returns `None` if it is empty.
+   Do all pypowsybl work inside a nested `_extract()` passed to
+   `run()`.
+2. Cache the result in `st.session_state["_X_map_cache"]` with a
+   distinct key.
+3. Build the records (`{"id", "lat", "lon", "value", "tooltip"}`) and
+   a `DivergingColorScale` with appropriate anchors.
+4. Build `legend_stops` via `default_legend_stops(scale, unit=...,
+   signed=True/False)` or a custom list if the scale is not symmetric.
+5. Call `render_scalar_map`.
+
+See `injection_map.py` for a worked example.
 
 ## Tests
 
@@ -280,3 +304,11 @@ by a concrete second use-case.
   payload is JSON-serializable, `has_lf` is a bool
 - AppTest smoke: the Voltage Analysis tab renders without exception
   after uploading IEEE14
+
+`tests/test_leaflet_scalar_map.py`:
+
+- `DivergingColorScale` is a frozen dataclass
+- `default_legend_stops` returns five symmetrical stops around the
+  center, and respects `signed=True` (adds `+` / `-`)
+- `get_substation_positions` returns `{}` for networks without the
+  extension (blank, four-substations) and a populated dict for IEEE14

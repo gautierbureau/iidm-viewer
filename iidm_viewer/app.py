@@ -22,6 +22,7 @@ from iidm_viewer.operational_limits import render_operational_limits
 from iidm_viewer.network_map import render_network_map
 from iidm_viewer.pmax_visualization import render_pmax_visualization
 from iidm_viewer.voltage_analysis import render_voltage_analysis
+from iidm_viewer.injection_map import render_injection_map
 from iidm_viewer.security_analysis import render_security_analysis
 from iidm_viewer.short_circuit_analysis import render_short_circuit_analysis
 
@@ -120,7 +121,7 @@ with st.sidebar:
                 else:
                     st.warning(f"Load flow: {status}")
         with col_params:
-            if st.button("\u2699\ufe0f", key="lf_params_btn", help="Load Flow Parameters"):
+            if st.button("⚙️", key="lf_params_btn", help="Load Flow Parameters"):
                 show_lf_parameters_dialog()
         lf_status = st.session_state.pop("_lf_status_message", None)
         if lf_status:
@@ -142,7 +143,21 @@ if network is None:
     )
     st.stop()
 
-tab_overview, tab_map, tab_nad, tab_sld, tab_components, tab_extensions, tab_rcc, tab_limits, tab_pmax, tab_voltage, tab_sa, tab_sc = st.tabs(
+(
+    tab_overview,
+    tab_map,
+    tab_nad,
+    tab_sld,
+    tab_components,
+    tab_extensions,
+    tab_rcc,
+    tab_limits,
+    tab_pmax,
+    tab_voltage,
+    tab_injection,
+    tab_sa,
+    tab_sc,
+) = st.tabs(
     [
         "Overview",
         "Network Map",
@@ -154,6 +169,7 @@ tab_overview, tab_map, tab_nad, tab_sld, tab_components, tab_extensions, tab_rcc
         "Operational Limits",
         "Pmax Visualization",
         "Voltage Analysis",
+        "Injection Map",
         "Security Analysis",
         "Short Circuit Analysis",
     ]
@@ -188,6 +204,9 @@ with tab_pmax:
 
 with tab_voltage:
     render_voltage_analysis(network)
+
+with tab_injection:
+    render_injection_map(network)
 
 with tab_sa:
     render_security_analysis(network)

@@ -1,37 +1,39 @@
 """Geographical voltage map for the Voltage Analysis tab.
 
-Reuses the Leaflet-based approach from the pre-``2dac287`` era (before the
-main Network Map tab was rewritten on top of ``@powsybl/network-map-layers``)
-because voltage-deviation shading is not offered by that library.
-
-The map colours each voltage level by its per-unit voltage deviation from
-nominal (diverging blue-white-red scale). Substations without geographical
-coordinates are skipped. Voltage levels below ``TRANSPORT_NOMINAL_V_THRESHOLD``
-(63 kV by default) are filtered out because they are not part of the
-transport network and would clutter the map.
+Uses the shared Leaflet renderer in ``leaflet_scalar_map``. Each voltage
+level with a known substation position is drawn as a colored marker whose
+color encodes per-unit voltage deviation from nominal (diverging
+blue-white-red). Voltage levels below ``TRANSPORT_NOMINAL_V_THRESHOLD``
+(63 kV) are filtered out — the transport-network focus.
 
 Two render modes:
-- ``icons``    — one colored dot per substation at the geo position
-- ``gradient`` — overlapping translucent wide circles blending into a
-                 heatmap-like surface, with a small dot at each substation
+- ``icons``    — one colored dot per voltage level at its substation
+- ``gradient`` — wide translucent circles blending into a heatmap surface,
+                 with small dots on top for tooltips
 
-Data extraction runs on the pypowsybl worker thread and produces a dict of
-pure-Python primitives (lists, floats, strings) so the result can be safely
-cached in ``st.session_state`` across reruns on different threads.
+Data extraction runs on the pypowsybl worker thread; the result is a dict
+of pure-Python primitives cached in ``st.session_state`` so reruns on
+different threads don't re-query pypowsybl.
 """
 from __future__ import annotations
 
-import json
 import math
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as st_components
 
+from iidm_viewer.leaflet_scalar_map import (
+    DivergingColorScale,
+    render_scalar_map,
+)
 from iidm_viewer.powsybl_worker import run
 
 
 TRANSPORT_NOMINAL_V_THRESHOLD = 63.0  # kV — below this we don't show on the map
+
+_VOLTAGE_COLOR_SCALE_MID = (255, 255, 224)  # pale yellow at 1.0 pu
+_VOLTAGE_COLOR_SCALE_LOW = (27, 74, 199)    # blue — under-voltage
+_VOLTAGE_COLOR_SCALE_HIGH = (199, 27, 27)   # red — over-voltage
 
 
 def _extract_voltage_map_data(network) -> dict | None:
@@ -166,142 +168,42 @@ def _prepare_display_records(records, sel_nom, min_nominal):
     return out
 
 
-_LEAFLET_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<style>
-  body {{ margin: 0; font-family: sans-serif; }}
-  #map {{ width: 100%; height: {height}px; }}
-  .legend {{
-    background: white;
-    padding: 8px 12px;
-    border-radius: 5px;
-    box-shadow: 0 1px 5px rgba(0,0,0,0.3);
-    font-size: 12px;
-    line-height: 1.5;
-  }}
-</style>
-</head>
-<body>
-<div id="map"></div>
-<script>
-var records = {records};
-var mode = {mode};
-var vRange = {v_range};
-var gradientRadiusMeters = {gradient_radius_m};
+def _build_tooltip(r: dict) -> str:
+    html = (
+        f"<b>{r['vl_id']}</b><br>"
+        f"Substation: {r['substation_id']}<br>"
+        f"Nominal: {r['nominal_v']:.1f} kV<br>"
+    )
+    v_pu = r.get("v_pu")
+    if v_pu is not None and r.get("v_mag_mean") is not None:
+        dev_pct = (v_pu - 1.0) * 100.0
+        sign = "+" if dev_pct >= 0 else ""
+        html += (
+            f"Mean V: {r['v_mag_mean']:.2f} kV ({v_pu:.4f} pu)<br>"
+            f"Deviation: {sign}{dev_pct:.2f} %"
+        )
+    else:
+        html += "<i>No load-flow voltage</i>"
+    return html
 
-function lerp(a, b, t) {{ return a + (b - a) * t; }}
 
-function divergingColor(v_pu) {{
-  if (v_pu === null || v_pu === undefined || isNaN(v_pu)) {{
-    return [160, 160, 160, 0.35];
-  }}
-  var d = v_pu - 1.0;
-  var t = Math.max(-1, Math.min(1, d / vRange));
-  var mid = [255, 255, 224];  // pale yellow — easy to distinguish from OSM whites
-  var lo  = [27,  74,  199];  // blue  — under-voltage
-  var hi  = [199, 27,  27];   // red   — over-voltage
-  var target = t < 0 ? lo : hi;
-  var k = Math.abs(t);
-  return [
-    Math.round(lerp(mid[0], target[0], k)),
-    Math.round(lerp(mid[1], target[1], k)),
-    Math.round(lerp(mid[2], target[2], k)),
-    0.9
-  ];
-}}
+def _to_render_records(display):
+    """Turn internal voltage records into the shared renderer shape."""
+    out = []
+    for r in display:
+        out.append({
+            "id": r["vl_id"],
+            "lat": r["lat"],
+            "lon": r["lon"],
+            "value": r["v_pu"],
+            "tooltip": _build_tooltip(r),
+        })
+    return out
 
-function toRGBA(c, alpha) {{
-  var a = (alpha === undefined) ? c[3] : alpha;
-  return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')';
-}}
 
-// Start centered on France (same default as the pre-2dac287 Leaflet map).
-var map = L.map('map').setView([46.6, 2.5], 6);
-L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-  attribution: '&copy; OpenStreetMap contributors',
-  maxZoom: 18
-}}).addTo(map);
-
-function tooltipHtml(r) {{
-  var html = '<b>' + r.vl_id + '</b><br>' +
-    'Substation: ' + r.substation_id + '<br>' +
-    'Nominal: ' + r.nominal_v.toFixed(1) + ' kV<br>';
-  if (r.v_pu !== null && !isNaN(r.v_pu)) {{
-    html += 'Mean V: ' + r.v_mag_mean.toFixed(2) + ' kV' +
-            ' (' + r.v_pu.toFixed(4) + ' pu)<br>';
-    var dev = (r.v_pu - 1.0) * 100;
-    html += 'Deviation: ' + (dev >= 0 ? '+' : '') + dev.toFixed(2) + ' %';
-  }} else {{
-    html += '<i>No load-flow voltage</i>';
-  }}
-  return html;
-}}
-
-if (mode === 'gradient') {{
-  records.forEach(function(r) {{
-    if (r.v_pu === null || isNaN(r.v_pu)) return;
-    var c = divergingColor(r.v_pu);
-    L.circle([r.lat, r.lon], {{
-      radius: gradientRadiusMeters,
-      stroke: false,
-      fillColor: toRGBA(c, 0.35),
-      fillOpacity: 0.35
-    }}).addTo(map);
-  }});
-  records.forEach(function(r) {{
-    var c = divergingColor(r.v_pu);
-    var m = L.circleMarker([r.lat, r.lon], {{
-      radius: 3,
-      fillColor: toRGBA(c, 1.0),
-      color: '#222',
-      weight: 0.7,
-      fillOpacity: 0.95
-    }}).addTo(map);
-    m.bindTooltip(tooltipHtml(r));
-  }});
-}} else {{
-  records.forEach(function(r) {{
-    var c = divergingColor(r.v_pu);
-    var m = L.circleMarker([r.lat, r.lon], {{
-      radius: 7,
-      fillColor: toRGBA(c, 0.95),
-      color: '#333',
-      weight: 1,
-      fillOpacity: 0.95
-    }}).addTo(map);
-    m.bindTooltip(tooltipHtml(r));
-  }});
-}}
-
-var legend = L.control({{position: 'topright'}});
-legend.onAdd = function() {{
-  var div = L.DomUtil.create('div', 'legend');
-  var html = '<b>Voltage (pu)</b><br>' +
-    '<span style="font-size:10px;color:#555">center = 1.000 pu, full scale &plusmn;' +
-    vRange.toFixed(3) + '</span><br>';
-  var stops = [-1, -0.5, 0, 0.5, 1];
-  stops.forEach(function(t) {{
-    var v_pu = 1.0 + t * vRange;
-    var c = divergingColor(v_pu);
-    html += '<span style="display:inline-block;width:16px;height:12px;background:' +
-      toRGBA(c, 0.95) + ';margin-right:6px;vertical-align:middle;border:1px solid #999"></span>' +
-      v_pu.toFixed(3) + '<br>';
-  }});
-  html += '<span style="display:inline-block;width:16px;height:12px;background:rgba(160,160,160,0.35);margin-right:6px;vertical-align:middle;border:1px solid #999"></span>no data';
-  div.innerHTML = html;
-  return div;
-}};
-legend.addTo(map);
-
-setTimeout(function() {{ map.invalidateSize(); }}, 200);
-</script>
-</body>
-</html>
-"""
+def _voltage_legend_stops(v_range: float) -> list[tuple[float, str]]:
+    fractions = (-1.0, -0.5, 0.0, 0.5, 1.0)
+    return [(1.0 + f * v_range, f"{1.0 + f * v_range:.3f} pu") for f in fractions]
 
 
 def _get_cached_voltage_map_data(network):
@@ -397,14 +299,22 @@ def render_voltage_map(network):
 
     gradient_radius_m = 25000 if sel_nom is None or sel_nom >= 200 else 12000
 
-    html = _LEAFLET_HTML.format(
-        height=620,
-        records=json.dumps(display),
-        mode=json.dumps(mode),
-        v_range=json.dumps(float(v_range)),
-        gradient_radius_m=json.dumps(gradient_radius_m),
+    color_scale = DivergingColorScale(
+        center=1.0,
+        range=float(v_range),
+        mid_rgb=_VOLTAGE_COLOR_SCALE_MID,
+        low_rgb=_VOLTAGE_COLOR_SCALE_LOW,
+        high_rgb=_VOLTAGE_COLOR_SCALE_HIGH,
     )
-    st_components.html(html, height=640)
+    render_scalar_map(
+        _to_render_records(display),
+        mode=mode,
+        color_scale=color_scale,
+        legend_title="Voltage (pu)",
+        legend_subtitle=f"center = 1.000 pu, full scale ±{float(v_range):.3f}",
+        legend_stops=_voltage_legend_stops(float(v_range)),
+        gradient_radius_m=gradient_radius_m,
+    )
 
     with_v = [r for r in display if r["v_pu"] is not None]
     total = len(display)
