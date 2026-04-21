@@ -79,8 +79,14 @@ def test_shunt_compensation_returns_expected_columns(network_with_shunt):
     assert set(df.columns) >= {
         "id", "voltage_level_id", "nominal_v", "connected",
         "section_count", "max_section_count",
-        "current_q_mvar", "available_q_mvar", "total_q_mvar",
+        "current_q_mvar", "available_q_mvar", "total_q_mvar", "b_per_section",
     }
+
+
+def test_shunt_compensation_b_per_section_positive_for_capacitive(network_with_shunt):
+    df = _shunt_compensation(network_with_shunt)
+    row = df[df["id"] == _SHUNT_ID].iloc[0]
+    assert row["b_per_section"] == pytest.approx(_SHUNT_B_PER_SECTION, rel=1e-6)
 
 
 def test_shunt_compensation_current_q_estimated_without_lf(network_with_shunt):

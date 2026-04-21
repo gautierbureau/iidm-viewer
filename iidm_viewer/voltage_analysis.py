@@ -44,6 +44,8 @@ def _shunt_compensation(network) -> pd.DataFrame:
                        plus the current contribution of disconnected units
     total_q_mvar     — full capacity at max_section_count × (b/section_count) × nominal_v²
                        (NaN when section_count == 0 and no b_per_section column)
+    b_per_section    — susceptance per section; sign determines capacitive vs inductive
+                       (NaN when section_count == 0 and pypowsybl does not expose it)
     """
     try:
         shunts = network.get_shunt_compensators(all_attributes=True).reset_index()
@@ -59,9 +61,12 @@ def _shunt_compensation(network) -> pd.DataFrame:
     v2 = df["nominal_v"] ** 2
 
     # b is the total current susceptance (b_per_section × section_count).
-    # pypowsybl does not expose b_per_section on retrieval, so derive it.
+    # Derive b_per_section from it; fall back to the raw column that pypowsybl
+    # exposes for LINEAR models (available even when section_count == 0).
     sc = df["section_count"].replace(0, float("nan"))
     bps = df["b"] / sc  # NaN when section_count == 0
+    if "b_per_section" in df.columns:
+        bps = bps.fillna(df["b_per_section"])
 
     # Use q per element when available, fall back to b × nominal_v² estimate.
     # A network-wide has_lf flag would misclassify newly added shunts whose q
@@ -75,11 +80,12 @@ def _shunt_compensation(network) -> pd.DataFrame:
     available_from_sections = bps * remaining * v2
     disconnected_loss = df["current_q_mvar"].where(~df["connected"], other=0.0).fillna(0.0)
     df["available_q_mvar"] = available_from_sections + disconnected_loss
+    df["b_per_section"] = bps
 
     return df[[
         "id", "voltage_level_id", "connected", "section_count",
         "max_section_count", "nominal_v", "q",
-        "current_q_mvar", "available_q_mvar", "total_q_mvar",
+        "current_q_mvar", "available_q_mvar", "total_q_mvar", "b_per_section",
     ]]
 
 
@@ -183,27 +189,18 @@ def _render_voltage_section(buses: pd.DataFrame):
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
-def _render_shunt_section(shunts: pd.DataFrame):
-    st.subheader("Shunt compensators")
-    if shunts.empty:
-        st.info("No shunt compensators in this network.")
-        return
-
-    has_lf = shunts["q"].notna().any()
-    total_active = shunts.loc[shunts["connected"], "current_q_mvar"].sum()
-    total_available = shunts["available_q_mvar"].sum()
-    total_capacity = shunts["total_q_mvar"].sum()
+def _render_shunt_group(grp: pd.DataFrame, has_lf: bool):
+    total_active = grp.loc[grp["connected"], "current_q_mvar"].sum()
+    total_available = grp["available_q_mvar"].sum()
+    total_capacity = grp["total_q_mvar"].sum()
 
     mc1, mc2, mc3 = st.columns(3)
-    label_active = "Active injection (MVAr)" if has_lf else "Estimated injection (MVAr)"
+    label_active = "Active (MVAr)" if has_lf else "Estimated (MVAr)"
     mc1.metric(label_active, f"{total_active:.2f}")
     mc2.metric("Available not activated (MVAr)", f"{total_available:.2f}")
     mc3.metric("Total capacity (MVAr)", f"{total_capacity:.2f}")
 
-    if not has_lf:
-        st.caption("No load flow — injections estimated as b × nominal_v².")
-
-    display = shunts[[
+    display = grp[[
         "id", "voltage_level_id", "nominal_v", "connected",
         "section_count", "max_section_count",
         "current_q_mvar", "available_q_mvar", "total_q_mvar",
@@ -216,6 +213,37 @@ def _render_shunt_section(shunts: pd.DataFrame):
         "Current Q (MVAr)", "Available Q (MVAr)", "Total capacity (MVAr)",
     ]
     st.dataframe(display.sort_values("Nominal (kV)"), use_container_width=True, hide_index=True)
+
+
+def _render_shunt_section(shunts: pd.DataFrame):
+    st.subheader("Shunt compensators")
+    if shunts.empty:
+        st.info("No shunt compensators in this network.")
+        return
+
+    has_lf = shunts["q"].notna().any()
+    if not has_lf:
+        st.caption("No load flow — injections estimated as b × nominal_v².")
+
+    cap = shunts[shunts["b_per_section"] > 0]
+    ind = shunts[shunts["b_per_section"] < 0]
+    unk = shunts[shunts["b_per_section"].isna() | (shunts["b_per_section"] == 0)]
+
+    st.markdown("##### Capacitive (b > 0) — injects reactive power, raises voltage")
+    if cap.empty:
+        st.info("No capacitive shunt compensators in this network.")
+    else:
+        _render_shunt_group(cap, has_lf)
+
+    st.markdown("##### Inductive (b < 0) — absorbs reactive power, lowers voltage")
+    if ind.empty:
+        st.info("No inductive shunt compensators in this network.")
+    else:
+        _render_shunt_group(ind, has_lf)
+
+    if not unk.empty:
+        st.markdown("##### Unclassified (b per section unknown — fully disconnected)")
+        _render_shunt_group(unk, has_lf)
 
 
 def _render_svc_section(svcs: pd.DataFrame):
