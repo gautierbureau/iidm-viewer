@@ -1954,3 +1954,115 @@ def create_secondary_voltage_control(
 
     run(_do_create)
     st.session_state.pop("_vl_lookup_cache", None)
+
+
+# --- Security Analysis ---
+
+def build_n1_contingencies(
+    network,
+    element_type: str,
+    nominal_v_set: set | None = None,
+) -> list[dict]:
+    """Build N-1 contingency definitions for every element of *element_type*.
+
+    If *nominal_v_set* is provided, only include elements where at least one
+    terminal voltage level has a nominal_v in the set.  Both the element table
+    and the VL table are fetched in a single worker call.
+
+    Returns list of {"id": "N1_<element_id>", "element_id": element_id}.
+    """
+    if element_type == "Lines":
+        getter = "get_lines"
+    elif element_type == "2-Winding Transformers":
+        getter = "get_2_windings_transformers"
+    else:
+        return []
+
+    vl_cols = ["voltage_level1_id", "voltage_level2_id"]
+    raw = object.__getattribute__(network, "_obj")
+
+    def _gather():
+        elem_df = getattr(raw, getter)(attributes=vl_cols)
+        vl_df = raw.get_voltage_levels(attributes=["nominal_v"]) if nominal_v_set else None
+        return elem_df, vl_df
+
+    elem_df, vl_df = run(_gather)
+
+    if elem_df.empty:
+        return []
+
+    if nominal_v_set and vl_df is not None and not vl_df.empty:
+        def _matches(row):
+            for col in vl_cols:
+                vl_id = row.get(col)
+                if vl_id and vl_id in vl_df.index:
+                    if vl_df.at[vl_id, "nominal_v"] in nominal_v_set:
+                        return True
+            return False
+        elem_df = elem_df[elem_df.apply(_matches, axis=1)]
+
+    return [{"id": f"N1_{eid}", "element_id": eid} for eid in elem_df.index]
+
+
+def run_security_analysis(network, contingencies: list[dict]) -> dict:
+    """Run AC security analysis on the worker thread.
+
+    *contingencies* is a list of {"id": str, "element_id": str} dicts produced
+    by :func:`build_n1_contingencies` (or any compatible builder).
+
+    Returns a serialized dict safe for ``st.session_state``:
+        {
+            "pre_status":    str,
+            "pre_violations": DataFrame,
+            "post": {contingency_id: {"status": str, "limit_violations": DataFrame}},
+            "contingencies": list[dict],
+        }
+    """
+    from iidm_viewer.lf_parameters import get_lf_parameters
+
+    raw = object.__getattribute__(network, "_obj")
+    generic, provider = get_lf_parameters()
+
+    def _run_sa():
+        import pypowsybl.security as sa
+        import pypowsybl.loadflow as lf
+
+        analysis = sa.create_analysis()
+        for c in contingencies:
+            analysis.add_single_element_contingency(c["id"], c["element_id"])
+
+        lf_params = lf.Parameters(**generic)
+        if provider:
+            lf_params.provider_parameters = {k: str(v) for k, v in provider.items()}
+        params = sa.Parameters(load_flow_parameters=lf_params)
+
+        result = sa.run_ac(raw, analysis, parameters=params)
+
+        # Serialize all results before they leave the worker thread
+        pre_result = result.pre_contingency_result
+        pre_viol = pre_result.limit_violations
+        if pre_viol is None:
+            pre_viol = pd.DataFrame()
+        else:
+            pre_viol = pre_viol.reset_index(drop=True)
+
+        post: dict = {}
+        for cid, cr in result.post_contingency_results.items():
+            viol = cr.limit_violations
+            if viol is None:
+                viol = pd.DataFrame()
+            else:
+                viol = viol.reset_index(drop=True)
+            post[cid] = {
+                "status": cr.status.name,
+                "limit_violations": viol,
+            }
+
+        return {
+            "pre_status": pre_result.status.name,
+            "pre_violations": pre_viol,
+            "post": post,
+            "contingencies": contingencies,
+        }
+
+    return run(_run_sa)
