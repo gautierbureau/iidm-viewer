@@ -2066,3 +2066,123 @@ def run_security_analysis(network, contingencies: list[dict]) -> dict:
         }
 
     return run(_run_sa)
+
+
+# --- Short Circuit Analysis ---
+
+def build_bus_faults(
+    network,
+    nominal_v_set: set | None = None,
+    fault_type: str = "THREE_PHASE",
+) -> list[dict]:
+    """Build a bus-fault definition for every bus, optionally filtered by nominal voltage.
+
+    Both the bus table and the VL table are fetched in a single worker call.
+
+    Returns list of {"id": "SC_<bus_id>", "element_id": bus_id, "fault_type": fault_type}.
+    """
+    raw = object.__getattribute__(network, "_obj")
+
+    def _gather():
+        buses = raw.get_buses(attributes=["voltage_level_id"])
+        vl_df = raw.get_voltage_levels(attributes=["nominal_v"]) if nominal_v_set else None
+        return buses, vl_df
+
+    buses, vl_df = run(_gather)
+
+    if buses.empty:
+        return []
+
+    if nominal_v_set and vl_df is not None and not vl_df.empty:
+        def _matches(row):
+            vl_id = row.get("voltage_level_id")
+            if vl_id and vl_id in vl_df.index:
+                return vl_df.at[vl_id, "nominal_v"] in nominal_v_set
+            return False
+        buses = buses[buses.apply(_matches, axis=1)]
+
+    return [
+        {"id": f"SC_{bid}", "element_id": bid, "fault_type": fault_type}
+        for bid in buses.index
+    ]
+
+
+def run_short_circuit_analysis(network, faults: list[dict], sc_params: dict | None = None) -> dict:
+    """Run short circuit analysis on the worker thread.
+
+    *faults* is a list of {"id": str, "element_id": bus_id, "fault_type": str} dicts
+    produced by :func:`build_bus_faults` (or any compatible builder).
+
+    *sc_params* is a plain dict of scalar options read from the main thread:
+        {
+            "study_type": "SUB_TRANSIENT" | "TRANSIENT",
+            "with_feeder_result": bool,
+            "with_limit_violations": bool,
+            "min_voltage_drop_proportional_threshold": float,
+        }
+
+    Returns a serialized dict safe for ``st.session_state``:
+        {
+            "fault_results": {fault_id: {
+                "status": str,
+                "short_circuit_power_mva": float | None,
+                "current_kA": float | None,
+                "feeder_results": DataFrame,
+                "limit_violations": DataFrame,
+            }},
+            "faults": list[dict],
+        }
+    """
+    raw = object.__getattribute__(network, "_obj")
+    sc_params = sc_params or {}
+
+    def _run_sc():
+        import pypowsybl.shortcircuit as sc
+
+        analysis = sc.create_analysis()
+        for f in faults:
+            ft = sc.FaultType[f.get("fault_type", "THREE_PHASE")]
+            analysis.add_fault(f["id"], f["element_id"], fault_type=ft)
+
+        study_type = sc.StudyType[sc_params.get("study_type", "SUB_TRANSIENT")]
+        params = sc.Parameters(
+            study_type=study_type,
+            with_feeder_result=sc_params.get("with_feeder_result", True),
+            with_limit_violations=sc_params.get("with_limit_violations", True),
+            min_voltage_drop_proportional_threshold=float(
+                sc_params.get("min_voltage_drop_proportional_threshold", 0.0)
+            ),
+        )
+
+        result = sc.run(raw, analysis, parameters=params)
+
+        # Serialize all results before they leave the worker thread
+        fault_results: dict = {}
+        for fid, fr in result.fault_results.items():
+            feeder_df = getattr(fr, "feeder_results", None)
+            if feeder_df is None:
+                feeder_df = pd.DataFrame()
+            else:
+                feeder_df = feeder_df.reset_index(drop=True)
+
+            viol_df = getattr(fr, "limit_violations", None)
+            if viol_df is None:
+                viol_df = pd.DataFrame()
+            else:
+                viol_df = viol_df.reset_index(drop=True)
+
+            raw_current = getattr(fr, "current", None)
+            fault_results[fid] = {
+                "status": fr.status.name,
+                "short_circuit_power_mva": getattr(fr, "short_circuit_power_mva", None),
+                "current_kA": float(raw_current) / 1000.0 if raw_current is not None else None,
+                "feeder_results": feeder_df,
+                "limit_violations": viol_df,
+            }
+
+        return {
+            "fault_results": fault_results,
+            "faults": faults,
+        }
+
+    return run(_run_sc)
