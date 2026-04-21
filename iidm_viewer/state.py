@@ -2002,17 +2002,55 @@ def build_n1_contingencies(
     return [{"id": f"N1_{eid}", "element_id": eid} for eid in elem_df.index]
 
 
-def run_security_analysis(network, contingencies: list[dict]) -> dict:
+def run_security_analysis(
+    network,
+    contingencies: list[dict],
+    monitored_elements: list[dict] | None = None,
+    limit_reductions: list[dict] | None = None,
+) -> dict:
     """Run AC security analysis on the worker thread.
 
     *contingencies* is a list of {"id": str, "element_id": str} dicts produced
     by :func:`build_n1_contingencies` (or any compatible builder).
 
+    *monitored_elements* is an optional list of dicts, one per
+    ``add_monitored_elements`` call:
+        {
+            "contingency_context_type": "ALL" | "NONE" | "SPECIFIC",
+            "contingency_ids": list[str] | None,
+            "branch_ids": list[str] | None,
+            "voltage_level_ids": list[str] | None,
+            "three_windings_transformer_ids": list[str] | None,
+        }
+
+    *limit_reductions* is an optional list of dicts, one per reduction entry:
+        {
+            "limit_type": "CURRENT",
+            "permanent": bool,
+            "temporary": bool,
+            "value": float,
+            "contingency_context": "ALL" | "NONE" | "SPECIFIC" (optional),
+            "min_temporary_duration": int (optional),
+            "max_temporary_duration": int (optional),
+            "country": str (optional),
+            "min_voltage": float (optional),
+            "max_voltage": float (optional),
+        }
+
     Returns a serialized dict safe for ``st.session_state``:
         {
             "pre_status":    str,
             "pre_violations": DataFrame,
-            "post": {contingency_id: {"status": str, "limit_violations": DataFrame}},
+            "pre_branch_results": DataFrame,
+            "pre_bus_results": DataFrame,
+            "pre_3wt_results": DataFrame,
+            "post": {contingency_id: {
+                "status": str,
+                "limit_violations": DataFrame,
+                "branch_results": DataFrame,
+                "bus_results": DataFrame,
+                "three_windings_transformer_results": DataFrame,
+            }},
             "contingencies": list[dict],
         }
     """
@@ -2020,14 +2058,34 @@ def run_security_analysis(network, contingencies: list[dict]) -> dict:
 
     raw = object.__getattribute__(network, "_obj")
     generic, provider = get_lf_parameters()
+    monitored_elements = monitored_elements or []
+    limit_reductions = limit_reductions or []
 
     def _run_sa():
         import pypowsybl.security as sa
         import pypowsybl.loadflow as lf
+        from pypowsybl.flowdecomposition import ContingencyContextType
 
         analysis = sa.create_analysis()
         for c in contingencies:
             analysis.add_single_element_contingency(c["element_id"], c["id"])
+
+        for me in monitored_elements:
+            ctx_name = me.get("contingency_context_type", "ALL")
+            ctx = ContingencyContextType.__members__.get(ctx_name, ContingencyContextType.ALL)
+            analysis.add_monitored_elements(
+                contingency_context_type=ctx,
+                contingency_ids=me.get("contingency_ids") or None,
+                branch_ids=me.get("branch_ids") or None,
+                voltage_level_ids=me.get("voltage_level_ids") or None,
+                three_windings_transformer_ids=me.get("three_windings_transformer_ids") or None,
+            )
+
+        if limit_reductions:
+            # ``limit_type`` is the index column in pypowsybl's metadata; the
+            # C bridge rejects it as a regular column.
+            lr_df = pd.DataFrame(limit_reductions).set_index("limit_type")
+            analysis.add_limit_reductions(lr_df)
 
         lf_params = lf.Parameters(**generic)
         if provider:
@@ -2040,16 +2098,49 @@ def run_security_analysis(network, contingencies: list[dict]) -> dict:
         pre_result = result.pre_contingency_result
         pre_viol = pd.DataFrame(pre_result.limit_violations)
 
+        def _select(df: pd.DataFrame, fid: str | None) -> pd.DataFrame:
+            """Slice a per-contingency multi-indexed result DF down to one key.
+
+            The first level of the index is the contingency id (empty string for
+            the pre-contingency state). Returns an empty DataFrame if *df* is
+            empty or the key is absent.
+            """
+            if df is None or df.empty:
+                return pd.DataFrame()
+            try:
+                if isinstance(df.index, pd.MultiIndex):
+                    key = "" if fid is None else fid
+                    lvl0 = df.index.get_level_values(0)
+                    mask = lvl0 == key
+                    return df[mask].reset_index(level=0, drop=True)
+                return df.copy()
+            except Exception:
+                return pd.DataFrame()
+
+        branch_all = pd.DataFrame(result.branch_results) if result.branch_results is not None else pd.DataFrame()
+        bus_all = pd.DataFrame(result.bus_results) if result.bus_results is not None else pd.DataFrame()
+        t3w_all = (
+            pd.DataFrame(result.three_windings_transformer_results)
+            if result.three_windings_transformer_results is not None
+            else pd.DataFrame()
+        )
+
         post: dict = {}
         for cid, cr in result.post_contingency_results.items():
             post[cid] = {
                 "status": cr.status.name,
                 "limit_violations": pd.DataFrame(cr.limit_violations),
+                "branch_results": _select(branch_all, cid),
+                "bus_results": _select(bus_all, cid),
+                "three_windings_transformer_results": _select(t3w_all, cid),
             }
 
         return {
             "pre_status": pre_result.status.name,
             "pre_violations": pre_viol,
+            "pre_branch_results": _select(branch_all, None),
+            "pre_bus_results": _select(bus_all, None),
+            "pre_3wt_results": _select(t3w_all, None),
             "post": post,
             "contingencies": contingencies,
         }

@@ -11,6 +11,9 @@ from iidm_viewer.state import (
 )
 from iidm_viewer.security_analysis import (
     _render_config_tab,
+    _render_contingencies_subtab,
+    _render_limit_reductions_subtab,
+    _render_monitored_subtab,
     _render_results_tab,
 )
 
@@ -187,13 +190,75 @@ def test_run_security_analysis_empty_contingencies(xiidm_upload):
     assert results["post"] == {}
 
 
+def test_run_security_analysis_result_includes_monitored_keys(xiidm_upload):
+    """New monitored-element result keys are always present (possibly empty)."""
+    pytest.importorskip("pypowsybl.security")
+    network = load_network(xiidm_upload)
+    contingencies = build_n1_contingencies(network, "Lines")[:1]
+    results = run_security_analysis(network, contingencies)
+    assert {
+        "pre_branch_results",
+        "pre_bus_results",
+        "pre_3wt_results",
+    } <= set(results)
+    for entry in results["post"].values():
+        assert {
+            "branch_results",
+            "bus_results",
+            "three_windings_transformer_results",
+        } <= set(entry)
+
+
+def test_run_security_analysis_monitored_branches_populated(xiidm_upload):
+    """Declaring monitored branches returns non-empty branch_results."""
+    pytest.importorskip("pypowsybl.security")
+    network = load_network(xiidm_upload)
+    contingencies = build_n1_contingencies(network, "Lines")[:1]
+    lines = network.get_lines(attributes=[])
+    branch_ids = list(lines.index[:3])
+    monitored = [{
+        "contingency_context_type": "ALL",
+        "contingency_ids": None,
+        "branch_ids": branch_ids,
+        "voltage_level_ids": None,
+        "three_windings_transformer_ids": None,
+    }]
+    results = run_security_analysis(
+        network,
+        contingencies,
+        monitored_elements=monitored,
+    )
+    assert not results["pre_branch_results"].empty
+
+
+def test_run_security_analysis_limit_reduction_accepted(xiidm_upload):
+    """A limit reduction entry is accepted and the run still converges."""
+    pytest.importorskip("pypowsybl.security")
+    network = load_network(xiidm_upload)
+    contingencies = build_n1_contingencies(network, "Lines")[:1]
+    reductions = [{
+        "limit_type": "CURRENT",
+        "permanent": True,
+        "temporary": True,
+        "value": 0.9,
+        "contingency_context": "ALL",
+    }]
+    results = run_security_analysis(
+        network,
+        contingencies,
+        limit_reductions=reductions,
+    )
+    assert results["pre_status"] == "CONVERGED"
+
+
 # ---------------------------------------------------------------------------
 # Rendering — unit tests
 # ---------------------------------------------------------------------------
 
 
 def _mock_columns(n):
-    return [MagicMock() for _ in range(n)]
+    count = n if isinstance(n, int) else len(n)
+    return [MagicMock() for _ in range(count)]
 
 
 def _converged_results(violations=False):
@@ -275,36 +340,184 @@ def test_render_results_tab_id_filter_no_match_shows_info():
     mock_st.info.assert_called()
 
 
-def test_render_config_tab_no_contingencies_shows_info():
-    net = MagicMock()
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[132.0, 33.0]), \
-         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]):
-        mock_st.selectbox.return_value = "Lines"
-        mock_st.multiselect.return_value = []
-        _render_config_tab(net)
-    mock_st.info.assert_called()
-
-
-def test_render_config_tab_with_contingencies_shows_caption():
-    contingencies = [{"id": "N1_L1", "element_id": "L1"}]
-    net = MagicMock()
+def _cm():
     cm = MagicMock()
     cm.__enter__ = MagicMock(return_value=None)
     cm.__exit__ = MagicMock(return_value=False)
+    return cm
+
+
+def test_render_contingencies_subtab_empty_shows_info():
+    net = MagicMock()
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[132.0]), \
+         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]):
+        mock_st.session_state = {}
+        mock_st.selectbox.return_value = "Lines"
+        mock_st.multiselect.return_value = []
+        _render_contingencies_subtab(net)
+    mock_st.info.assert_called()
+
+
+def test_render_contingencies_subtab_stores_in_session():
+    contingencies = [{"id": "N1_L1", "element_id": "L1"}]
+    net = MagicMock()
     with patch("iidm_viewer.security_analysis.st") as mock_st, \
          patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[132.0]), \
          patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=contingencies):
+        mock_st.session_state = {}
         mock_st.selectbox.return_value = "Lines"
         mock_st.multiselect.return_value = [132.0]
-        mock_st.button.return_value = False
-        mock_st.expander.return_value = cm
-        _render_config_tab(net)
+        mock_st.expander.return_value = _cm()
+        _render_contingencies_subtab(net)
+    assert mock_st.session_state["_sa_contingencies"] == contingencies
     mock_st.caption.assert_called()
 
 
-def test_render_config_tab_run_button_triggers_analysis():
+def test_render_monitored_subtab_empty_shows_info():
+    net = MagicMock()
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch(
+             "iidm_viewer.security_analysis._get_ids",
+             return_value={
+                 "branches": ["L1"],
+                 "voltage_levels": ["VL1"],
+                 "three_windings_transformers": [],
+             },
+         ):
+        mock_st.session_state = {}
+        mock_st.form.return_value = _cm()
+        mock_st.selectbox.return_value = "ALL"
+        mock_st.multiselect.return_value = []
+        mock_st.form_submit_button.return_value = False
+        _render_monitored_subtab(net)
+    mock_st.info.assert_called()
+
+
+def test_render_monitored_subtab_form_submit_appends_entry():
+    net = MagicMock()
+    state: dict = {}
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch(
+             "iidm_viewer.security_analysis._get_ids",
+             return_value={
+                 "branches": ["L1"],
+                 "voltage_levels": [],
+                 "three_windings_transformers": [],
+             },
+         ):
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.container.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.selectbox.return_value = "ALL"
+        # multiselect order: branches, voltage_levels, 3WTs
+        mock_st.multiselect.side_effect = [["L1"], [], []]
+        mock_st.form_submit_button.return_value = True
+        mock_st.button.return_value = False  # avoid Remove-click in render loop
+        _render_monitored_subtab(net)
+    assert state["_sa_monitored"] == [{
+        "contingency_context_type": "ALL",
+        "contingency_ids": None,
+        "branch_ids": ["L1"],
+        "voltage_level_ids": None,
+        "three_windings_transformer_ids": None,
+    }]
+    mock_st.rerun.assert_called()
+
+
+def test_render_monitored_subtab_specific_requires_contingencies():
+    net = MagicMock()
+    state: dict = {"_sa_contingencies": [{"id": "N1_L1", "element_id": "L1"}]}
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch(
+             "iidm_viewer.security_analysis._get_ids",
+             return_value={
+                 "branches": ["L2"],
+                 "voltage_levels": [],
+                 "three_windings_transformers": [],
+             },
+         ):
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.selectbox.return_value = "SPECIFIC"
+        mock_st.multiselect.side_effect = [[], ["L2"], [], []]
+        mock_st.form_submit_button.return_value = True
+        _render_monitored_subtab(net)
+    assert state.get("_sa_monitored") == []
+    mock_st.warning.assert_called()
+
+
+def test_render_limit_reductions_subtab_empty_shows_info():
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = {}
+        mock_st.form.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.number_input.return_value = 0.9
+        mock_st.checkbox.return_value = True
+        mock_st.text_input.return_value = ""
+        mock_st.form_submit_button.return_value = False
+        _render_limit_reductions_subtab()
+    mock_st.info.assert_called()
+
+
+def test_render_limit_reductions_subtab_submit_appends_entry():
+    state: dict = {}
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.container.return_value = _cm()
+        mock_st.expander.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        # inputs: value=0.8, min_dur=0, max_dur=0, min_v=0, max_v=0
+        mock_st.number_input.side_effect = [0.8, 0, 0, 0, 0]
+        mock_st.checkbox.side_effect = [True, False]
+        mock_st.text_input.return_value = ""
+        mock_st.form_submit_button.return_value = True
+        mock_st.button.return_value = False  # avoid Remove-click in render loop
+        _render_limit_reductions_subtab()
+    assert state["_sa_limit_reductions"] == [{
+        "limit_type": "CURRENT",
+        "permanent": True,
+        "temporary": False,
+        "value": 0.8,
+        "contingency_context": "ALL",
+    }]
+    mock_st.rerun.assert_called()
+
+
+def test_render_limit_reductions_subtab_none_selected_warns():
+    state: dict = {}
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.number_input.side_effect = [0.8, 0, 0, 0, 0]
+        # Neither permanent nor temporary
+        mock_st.checkbox.side_effect = [False, False]
+        mock_st.text_input.return_value = ""
+        mock_st.form_submit_button.return_value = True
+        _render_limit_reductions_subtab()
+    assert state.get("_sa_limit_reductions") == []
+    mock_st.warning.assert_called()
+
+
+def test_render_config_tab_run_button_passes_monitored_and_reductions():
     contingencies = [{"id": "N1_L1", "element_id": "L1"}]
+    monitored = [{
+        "contingency_context_type": "ALL",
+        "contingency_ids": None,
+        "branch_ids": ["L1"],
+        "voltage_level_ids": None,
+        "three_windings_transformer_ids": None,
+    }]
+    reductions = [{
+        "limit_type": "CURRENT",
+        "permanent": True,
+        "temporary": True,
+        "value": 0.9,
+        "contingency_context": "ALL",
+    }]
     sa_results = {
         "pre_status": "CONVERGED",
         "pre_violations": pd.DataFrame(),
@@ -312,18 +525,28 @@ def test_render_config_tab_run_button_triggers_analysis():
         "contingencies": contingencies,
     }
     net = MagicMock()
-    cm = MagicMock()
-    cm.__enter__ = MagicMock(return_value=None)
-    cm.__exit__ = MagicMock(return_value=False)
+    state = {
+        "_sa_contingencies": contingencies,
+        "_sa_monitored": monitored,
+        "_sa_limit_reductions": reductions,
+    }
     with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[132.0]), \
-         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=contingencies), \
-         patch("iidm_viewer.security_analysis.run_security_analysis", return_value=sa_results):
-        mock_st.session_state = {}
-        mock_st.selectbox.return_value = "Lines"
-        mock_st.multiselect.return_value = [132.0]
-        mock_st.button.return_value = True   # "Run" clicked
-        mock_st.expander.return_value = cm
-        mock_st.spinner.return_value = cm
+         patch("iidm_viewer.security_analysis._render_contingencies_subtab"), \
+         patch("iidm_viewer.security_analysis._render_monitored_subtab"), \
+         patch("iidm_viewer.security_analysis._render_limit_reductions_subtab"), \
+         patch(
+             "iidm_viewer.security_analysis.run_security_analysis",
+             return_value=sa_results,
+         ) as mock_run:
+        mock_st.session_state = state
+        mock_st.tabs.return_value = (_cm(), _cm(), _cm())
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.button.return_value = True
+        mock_st.spinner.return_value = _cm()
         _render_config_tab(net)
-    assert mock_st.session_state.get("_sa_results") == sa_results
+
+    assert state.get("_sa_results") == sa_results
+    mock_run.assert_called_once()
+    _, kwargs = mock_run.call_args
+    assert kwargs["monitored_elements"] == monitored
+    assert kwargs["limit_reductions"] == reductions

@@ -6,36 +6,56 @@
 |---|---|
 | `app.py` tab "Security Analysis" | "Run Security Analysis" button in the Configuration sub-tab |
 
-## Execution — `state.run_security_analysis(network, contingencies)`
-
-```python
-def run_security_analysis(network, contingencies):
-    raw = object.__getattribute__(network, "_obj")   # unwrap proxy
-    generic, provider = get_lf_parameters()           # read session state on main thread
-
-    def _run_sa():
-        import pypowsybl.security as sa
-        import pypowsybl.loadflow as lf
-        analysis = sa.create_analysis()
-        for c in contingencies:
-            analysis.add_single_element_contingency(c["id"], c["element_id"])
-        lf_params = lf.Parameters(**generic)
-        if provider:
-            lf_params.provider_parameters = {k: str(v) for k, v in provider.items()}
-        params = sa.Parameters(load_flow_parameters=lf_params)
-        result = sa.run_ac(raw, analysis, parameters=params)
-        # Serialize inside worker before results escape
-        return _serialize(result, contingencies)
-
-    return run(_run_sa)
-```
+## Execution — `state.run_security_analysis(network, contingencies, monitored_elements=None, limit_reductions=None)`
 
 All pypowsybl calls happen inside `_run_sa` on the worker thread. Results
-(pre/post DataFrames and status strings) are serialized to plain Python
-objects before returning so they are safe to store in `st.session_state`.
+(pre/post DataFrames, monitored-element DataFrames and status strings) are
+serialized to plain Python objects before returning so they are safe to store
+in `st.session_state`.
 
 LF parameters are read **before** entering `run()` because `st.session_state`
 is not safe to access from the worker.
+
+Inside the worker, the analysis is composed in this order:
+
+1. `add_single_element_contingency` for each contingency
+2. `add_monitored_elements(...)` for each monitored-element rule
+3. `add_limit_reductions(pd.DataFrame(limit_reductions))` if any are defined
+4. `run_ac(raw, parameters=params)`
+
+The result is split per contingency: monitored `branch_results`, `bus_results`
+and `three_windings_transformer_results` come back as multi-indexed DataFrames
+whose level-0 key is the contingency id (empty string for pre-contingency);
+`_select(...)` slices them into per-contingency frames stored alongside each
+`PostContingencyResult`.
+
+### Monitored-element rule shape
+
+Each entry in `monitored_elements` is a dict:
+
+| Key | Type | Notes |
+|---|---|---|
+| `contingency_context_type` | `"ALL"` / `"NONE"` / `"SPECIFIC"` | Mapped to `ContingencyContextType` inside the worker |
+| `contingency_ids` | `list[str]` or `None` | Required when context is `SPECIFIC` |
+| `branch_ids` | `list[str]` or `None` | Lines + 2-winding transformers |
+| `voltage_level_ids` | `list[str]` or `None` | |
+| `three_windings_transformer_ids` | `list[str]` or `None` | |
+
+### Limit-reduction row shape
+
+Each entry in `limit_reductions` is a dict flattened into a one-row DataFrame
+passed to `add_limit_reductions`:
+
+| Key | Type | Notes |
+|---|---|---|
+| `limit_type` | `"CURRENT"` | Only value supported by OpenLoadFlow |
+| `permanent` | `bool` | Apply to permanent limits |
+| `temporary` | `bool` | Apply to temporary limits |
+| `value` | `float ∈ [0, 1]` | Reduction factor |
+| `contingency_context` | `"ALL"` | Only `ALL` supported by OpenLoadFlow |
+| `min_temporary_duration` / `max_temporary_duration` | `int` (s) | Optional, only when `temporary=True` |
+| `country` | `str` | Optional, 2-letter code |
+| `min_voltage` / `max_voltage` | `float` (kV) | Optional range filter |
 
 ## Contingency building — `state.build_n1_contingencies(network, element_type, nominal_v_set)`
 
@@ -62,16 +82,27 @@ call.
 ```
 render_security_analysis(network)
 ├── tab "Configuration"
-│   ├── selectbox: element type (Lines / 2-Winding Transformers)
-│   ├── multiselect: nominal voltage filter (defaults to ≥ 380 kV)
-│   ├── caption: N contingencies to be simulated
-│   ├── expander: preview contingency table
-│   └── button: "Run Security Analysis"
+│   ├── sub-tab "Contingencies"
+│   │   ├── selectbox: element type (Lines / 2-Winding Transformers)
+│   │   ├── multiselect: nominal voltage filter (defaults to ≥ 380 kV)
+│   │   ├── caption: N contingencies to be simulated
+│   │   └── expander: preview contingency table
+│   ├── sub-tab "Monitored elements"
+│   │   ├── form: context (ALL/NONE/SPECIFIC) + contingency picker + id multiselects
+│   │   │       (branches, voltage levels, 3WTs)
+│   │   └── list of rules with per-row Remove button
+│   ├── sub-tab "Limit reductions"
+│   │   ├── form: value, permanent/temporary flags, duration window,
+│   │   │       country, voltage window
+│   │   └── list of reductions (+ expander with preview DataFrame)
+│   └── footer row: metrics (contingencies / monitored / reductions)
+│                 + button "Run Security Analysis"
 └── tab "Results"
     ├── subheader: Pre-contingency state
     │   ├── metric: base case status
     │   ├── metric: pre-contingency violation count
-    │   └── dataframe: pre-contingency limit violations (if any)
+    │   ├── dataframe: pre-contingency limit violations (if any)
+    │   └── expander: pre-contingency monitored results (branches/buses/3WTs)
     ├── subheader: Post-contingency results
     │   ├── metrics: total / failed / with violations
     │   ├── slider: show only contingencies with violations ≥ N
@@ -79,7 +110,8 @@ render_security_analysis(network)
     └── subheader: Contingency detail
         ├── text_input: filter by contingency ID
         ├── selectbox: select one contingency
-        └── dataframe: limit violations for selected contingency
+        ├── dataframe: limit violations for selected contingency
+        └── dataframes: monitored branches/buses/3WTs for this contingency
 ```
 
 Results are stored in `_sa_results` and survive reruns within the session.
@@ -88,7 +120,11 @@ Results are stored in `_sa_results` and survive reruns within the session.
 
 | Key | Set by | Read by |
 |---|---|---|
-| `_sa_results` | `security_analysis._render_config_tab` (after successful run) | `security_analysis._render_results_tab` |
+| `_sa_contingencies` | `_render_contingencies_subtab` (rebuilt each render) | `_render_config_tab`, `_render_monitored_subtab` |
+| `_sa_monitored` | `_render_monitored_subtab` | `_render_config_tab` → `run_security_analysis` |
+| `_sa_limit_reductions` | `_render_limit_reductions_subtab` | `_render_config_tab` → `run_security_analysis` |
+| `_sa_id_cache` | `_get_ids` (one worker call per session) | `_render_monitored_subtab` |
+| `_sa_results` | `_render_config_tab` (after successful run) | `_render_results_tab` |
 
 ## Limit violations DataFrame columns (pypowsybl)
 
