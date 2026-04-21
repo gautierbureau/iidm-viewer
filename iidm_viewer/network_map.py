@@ -120,7 +120,41 @@ def _extract_map_data(network):
         except Exception:
             pass
 
-        return substations, substation_positions, lines
+        # Line positions from the linePosition extension (optional).
+        # Each entry: {id, coordinates: [{lat, lon}, ...]} sorted by num.
+        line_positions = []
+        if "linePosition" in get_extensions_names():
+            try:
+                lpos_df = raw.get_extensions("linePosition").reset_index()
+                lpos_df = lpos_df[
+                    lpos_df["latitude"].between(-90, 90)
+                    & lpos_df["longitude"].between(-180, 180)
+                ]
+                if not lpos_df.empty:
+                    grouped = (
+                        lpos_df.sort_values("num")
+                        .groupby("id")
+                        .apply(
+                            lambda g: [
+                                {
+                                    "lat": _to_float(r["latitude"]),
+                                    "lon": _to_float(r["longitude"]),
+                                }
+                                for _, r in g.iterrows()
+                            ],
+                            include_groups=False,
+                        )
+                        .to_dict()
+                    )
+                    line_positions = [
+                        {"id": lid, "coordinates": coords}
+                        for lid, coords in grouped.items()
+                        if coords
+                    ]
+            except Exception:
+                pass
+
+        return substations, substation_positions, lines, line_positions
 
     return run(_extract)
 
@@ -162,7 +196,7 @@ def render_network_map(network, selected_vl):
         )
         return
 
-    substations, substation_positions, lines = data
+    substations, substation_positions, lines, line_positions = data
 
     if not substation_positions:
         st.info(
@@ -175,10 +209,13 @@ def render_network_map(network, selected_vl):
         substations=substations,
         substation_positions=substation_positions,
         lines=lines,
+        line_positions=line_positions,
         height=670,
         key="network_map",
     )
 
-    st.caption(
-        f"{len(substations)} substations, {len(lines)} branches on the map"
-    )
+    line_pos_count = len(line_positions)
+    caption = f"{len(substations)} substations, {len(lines)} branches"
+    if line_pos_count:
+        caption += f", {line_pos_count} lines with detailed geometry"
+    st.caption(caption)
