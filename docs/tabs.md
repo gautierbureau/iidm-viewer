@@ -145,6 +145,19 @@ for the capability boundary plus:
 
 VL filter and generic Generator filters from `filters.py` are available.
 
+### Pmax Visualization — `pmax_visualization.render_pmax_visualization`
+
+Per-line steady-state transmission limit `Pmax = V₁·V₂/X` plus the
+operating ratio `P/Pmax = sin(δ)` and its margin. Shows a sortable
+summary table (colored by safe / caution / warning bands at 60 % /
+80 % of Pmax) and a Plotly P-δ characteristic for the selected line.
+Works as soon as bus voltages are available (loaded from the XIIDM
+file or solved by a load flow); `p_actual` stays `0` until an AC load
+flow has run.
+
+See [pmax-visualization.md](pmax-visualization.md) for the formulas
+and full column reference.
+
 ### Voltage Analysis — `voltage_analysis.render_voltage_analysis`
 
 Bus voltages grouped by nominal level, a **geographical voltage-deviation
