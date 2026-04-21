@@ -2002,11 +2002,60 @@ def build_n1_contingencies(
     return [{"id": f"N1_{eid}", "element_id": eid} for eid in elem_df.index]
 
 
+def _apply_action(analysis, action: dict) -> None:
+    """Dispatch a single action dict to the right pypowsybl ``add_*_action`` call.
+
+    Supported action types (extend here to add more):
+
+    - ``SWITCH``: ``switch_id``, ``open``
+    - ``TERMINALS_CONNECTION``: ``element_id``, ``opening``, optional ``side``
+    - ``GENERATOR_ACTIVE_POWER``: ``generator_id``, ``is_relative``, ``active_power``
+    - ``PHASE_TAP_CHANGER_POSITION``: ``transformer_id``, ``is_relative``, ``tap_position``,
+      optional ``side``
+    """
+    from pypowsybl._pypowsybl import Side
+
+    action_id = action["action_id"]
+    atype = action["type"]
+    side = Side.__members__.get(action.get("side", "NONE"), Side.NONE)
+
+    if atype == "SWITCH":
+        analysis.add_switch_action(
+            action_id, action["switch_id"], bool(action["open"])
+        )
+    elif atype == "TERMINALS_CONNECTION":
+        analysis.add_terminals_connection_action(
+            action_id,
+            action["element_id"],
+            side=side,
+            opening=bool(action.get("opening", True)),
+        )
+    elif atype == "GENERATOR_ACTIVE_POWER":
+        analysis.add_generator_active_power_action(
+            action_id,
+            action["generator_id"],
+            bool(action["is_relative"]),
+            float(action["active_power"]),
+        )
+    elif atype == "PHASE_TAP_CHANGER_POSITION":
+        analysis.add_phase_tap_changer_position_action(
+            action_id,
+            action["transformer_id"],
+            bool(action["is_relative"]),
+            int(action["tap_position"]),
+            side=side,
+        )
+    else:
+        raise ValueError(f"Unsupported action type: {atype!r}")
+
+
 def run_security_analysis(
     network,
     contingencies: list[dict],
     monitored_elements: list[dict] | None = None,
     limit_reductions: list[dict] | None = None,
+    actions: list[dict] | None = None,
+    operator_strategies: list[dict] | None = None,
 ) -> dict:
     """Run AC security analysis on the worker thread.
 
@@ -2037,6 +2086,20 @@ def run_security_analysis(
             "max_voltage": float (optional),
         }
 
+    *actions* is an optional list of remedial-action dicts dispatched by
+    :func:`_apply_action` — see that function for the per-type shape.
+
+    *operator_strategies* is an optional list of dicts, one per
+    ``add_operator_strategy`` call:
+        {
+            "operator_strategy_id": str,
+            "contingency_id": str,
+            "action_ids": list[str],
+            "condition_type": "TRUE_CONDITION" | "ANY_VIOLATION_CONDITION"
+                              | "ALL_VIOLATION_CONDITION"
+                              | "AT_LEAST_ONE_VIOLATION_CONDITION",
+        }
+
     Returns a serialized dict safe for ``st.session_state``:
         {
             "pre_status":    str,
@@ -2051,6 +2114,15 @@ def run_security_analysis(
                 "bus_results": DataFrame,
                 "three_windings_transformer_results": DataFrame,
             }},
+            "operator_strategies": {strategy_id: {
+                "status": str,
+                "limit_violations": DataFrame,
+                "branch_results": DataFrame,
+                "bus_results": DataFrame,
+                "three_windings_transformer_results": DataFrame,
+                "contingency_id": str,
+                "action_ids": list[str],
+            }},
             "contingencies": list[dict],
         }
     """
@@ -2060,11 +2132,14 @@ def run_security_analysis(
     generic, provider = get_lf_parameters()
     monitored_elements = monitored_elements or []
     limit_reductions = limit_reductions or []
+    actions = actions or []
+    operator_strategies = operator_strategies or []
 
     def _run_sa():
         import pypowsybl.security as sa
         import pypowsybl.loadflow as lf
         from pypowsybl.flowdecomposition import ContingencyContextType
+        from pypowsybl._pypowsybl import ConditionType
 
         analysis = sa.create_analysis()
         for c in contingencies:
@@ -2087,6 +2162,19 @@ def run_security_analysis(
             lr_df = pd.DataFrame(limit_reductions).set_index("limit_type")
             analysis.add_limit_reductions(lr_df)
 
+        for action in actions:
+            _apply_action(analysis, action)
+
+        for strat in operator_strategies:
+            cond_name = strat.get("condition_type", "TRUE_CONDITION")
+            cond = ConditionType.__members__.get(cond_name, ConditionType.TRUE_CONDITION)
+            analysis.add_operator_strategy(
+                strat["operator_strategy_id"],
+                strat["contingency_id"],
+                list(strat["action_ids"]),
+                condition_type=cond,
+            )
+
         lf_params = lf.Parameters(**generic)
         if provider:
             lf_params.provider_parameters = {k: str(v) for k, v in provider.items()}
@@ -2098,20 +2186,28 @@ def run_security_analysis(
         pre_result = result.pre_contingency_result
         pre_viol = pd.DataFrame(pre_result.limit_violations)
 
-        def _select(df: pd.DataFrame, fid: str | None) -> pd.DataFrame:
-            """Slice a per-contingency multi-indexed result DF down to one key.
+        def _select(
+            df: pd.DataFrame,
+            contingency_id: str | None,
+            strategy_id: str = "",
+        ) -> pd.DataFrame:
+            """Slice a multi-indexed result DF by (contingency_id, operator_strategy_id).
 
-            The first level of the index is the contingency id (empty string for
-            the pre-contingency state). Returns an empty DataFrame if *df* is
-            empty or the key is absent.
+            Index levels are ``(contingency_id, operator_strategy_id, element_id)``.
+            ``""`` means "no contingency" for level 0 and "no strategy" for level 1.
+            Returns an empty DataFrame if *df* is empty or the keys are absent.
             """
             if df is None or df.empty:
                 return pd.DataFrame()
             try:
                 if isinstance(df.index, pd.MultiIndex):
-                    key = "" if fid is None else fid
+                    cid_key = "" if contingency_id is None else contingency_id
                     lvl0 = df.index.get_level_values(0)
-                    mask = lvl0 == key
+                    mask = lvl0 == cid_key
+                    if df.index.nlevels >= 3:
+                        lvl1 = df.index.get_level_values(1)
+                        mask = mask & (lvl1 == strategy_id)
+                        return df[mask].reset_index(level=[0, 1], drop=True)
                     return df[mask].reset_index(level=0, drop=True)
                 return df.copy()
             except Exception:
@@ -2135,6 +2231,23 @@ def run_security_analysis(
                 "three_windings_transformer_results": _select(t3w_all, cid),
             }
 
+        os_results: dict = {}
+        for sid, osr in result.operator_strategy_results.items():
+            strat = next(
+                (s for s in operator_strategies if s["operator_strategy_id"] == sid),
+                None,
+            )
+            cid = strat["contingency_id"] if strat else None
+            os_results[sid] = {
+                "status": osr.status.name,
+                "limit_violations": pd.DataFrame(osr.limit_violations),
+                "branch_results": _select(branch_all, cid, sid),
+                "bus_results": _select(bus_all, cid, sid),
+                "three_windings_transformer_results": _select(t3w_all, cid, sid),
+                "contingency_id": cid,
+                "action_ids": list(strat["action_ids"]) if strat else [],
+            }
+
         return {
             "pre_status": pre_result.status.name,
             "pre_violations": pre_viol,
@@ -2142,6 +2255,7 @@ def run_security_analysis(
             "pre_bus_results": _select(bus_all, None),
             "pre_3wt_results": _select(t3w_all, None),
             "post": post,
+            "operator_strategies": os_results,
             "contingencies": contingencies,
         }
 

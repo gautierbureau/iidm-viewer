@@ -10,12 +10,16 @@ from iidm_viewer.state import (
     run_security_analysis,
 )
 from iidm_viewer.security_analysis import (
+    _action_summary,
+    _render_actions_subtab,
     _render_config_tab,
     _render_contingencies_subtab,
     _render_limit_reductions_subtab,
     _render_monitored_subtab,
+    _render_operator_strategies_subtab,
     _render_results_tab,
 )
+from iidm_viewer.state import _apply_action
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +506,7 @@ def test_render_limit_reductions_subtab_none_selected_warns():
     mock_st.warning.assert_called()
 
 
-def test_render_config_tab_run_button_passes_monitored_and_reductions():
+def test_render_config_tab_run_button_passes_all_inputs():
     contingencies = [{"id": "N1_L1", "element_id": "L1"}]
     monitored = [{
         "contingency_context_type": "ALL",
@@ -518,10 +522,23 @@ def test_render_config_tab_run_button_passes_monitored_and_reductions():
         "value": 0.9,
         "contingency_context": "ALL",
     }]
+    actions = [{
+        "action_id": "open_L1",
+        "type": "SWITCH",
+        "switch_id": "SW1",
+        "open": True,
+    }]
+    strategies = [{
+        "operator_strategy_id": "strat1",
+        "contingency_id": "N1_L1",
+        "action_ids": ["open_L1"],
+        "condition_type": "TRUE_CONDITION",
+    }]
     sa_results = {
         "pre_status": "CONVERGED",
         "pre_violations": pd.DataFrame(),
         "post": {"N1_L1": {"status": "CONVERGED", "limit_violations": pd.DataFrame()}},
+        "operator_strategies": {},
         "contingencies": contingencies,
     }
     net = MagicMock()
@@ -529,17 +546,21 @@ def test_render_config_tab_run_button_passes_monitored_and_reductions():
         "_sa_contingencies": contingencies,
         "_sa_monitored": monitored,
         "_sa_limit_reductions": reductions,
+        "_sa_actions": actions,
+        "_sa_operator_strategies": strategies,
     }
     with patch("iidm_viewer.security_analysis.st") as mock_st, \
          patch("iidm_viewer.security_analysis._render_contingencies_subtab"), \
          patch("iidm_viewer.security_analysis._render_monitored_subtab"), \
          patch("iidm_viewer.security_analysis._render_limit_reductions_subtab"), \
+         patch("iidm_viewer.security_analysis._render_actions_subtab"), \
+         patch("iidm_viewer.security_analysis._render_operator_strategies_subtab"), \
          patch(
              "iidm_viewer.security_analysis.run_security_analysis",
              return_value=sa_results,
          ) as mock_run:
         mock_st.session_state = state
-        mock_st.tabs.return_value = (_cm(), _cm(), _cm())
+        mock_st.tabs.return_value = (_cm(), _cm(), _cm(), _cm(), _cm())
         mock_st.columns.side_effect = _mock_columns
         mock_st.button.return_value = True
         mock_st.spinner.return_value = _cm()
@@ -550,3 +571,280 @@ def test_render_config_tab_run_button_passes_monitored_and_reductions():
     _, kwargs = mock_run.call_args
     assert kwargs["monitored_elements"] == monitored
     assert kwargs["limit_reductions"] == reductions
+    assert kwargs["actions"] == actions
+    assert kwargs["operator_strategies"] == strategies
+
+
+# ---------------------------------------------------------------------------
+# Actions sub-tab + _action_summary
+# ---------------------------------------------------------------------------
+
+
+def test_action_summary_switch():
+    s = _action_summary({
+        "action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True,
+    })
+    assert "SWITCH" in s and "SW1" in s and "open" in s
+
+
+def test_action_summary_terminals():
+    s = _action_summary({
+        "action_id": "a2", "type": "TERMINALS_CONNECTION",
+        "element_id": "L1", "opening": False, "side": "ONE",
+    })
+    assert "TERMINALS" in s and "close" in s and "side ONE" in s
+
+
+def test_action_summary_generator():
+    s = _action_summary({
+        "action_id": "a3", "type": "GENERATOR_ACTIVE_POWER",
+        "generator_id": "G1", "is_relative": True, "active_power": -10.0,
+    })
+    assert "GEN P" in s and "G1" in s and "Δ-10" in s
+
+
+def test_action_summary_ptc():
+    s = _action_summary({
+        "action_id": "a4", "type": "PHASE_TAP_CHANGER_POSITION",
+        "transformer_id": "T1", "is_relative": False, "tap_position": 3,
+    })
+    assert "PTC" in s and "T1" in s and "=3" in s
+
+
+def _ids_fixture():
+    return {
+        "branches": ["L1"],
+        "lines": ["L1"],
+        "two_windings_transformers": [],
+        "three_windings_transformers": [],
+        "voltage_levels": ["VL1"],
+        "switches": ["SW1"],
+        "generators": ["G1"],
+        "phase_tap_changers": ["T1"],
+        "connectables": ["L1", "G1"],
+    }
+
+
+def test_render_actions_subtab_empty_shows_info():
+    net = MagicMock()
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()):
+        mock_st.session_state = {}
+        mock_st.form.return_value = _cm()
+        mock_st.selectbox.return_value = "SWITCH"
+        mock_st.text_input.return_value = ""
+        mock_st.checkbox.return_value = True
+        mock_st.form_submit_button.return_value = False
+        _render_actions_subtab(net)
+    mock_st.info.assert_called()
+
+
+def test_render_actions_subtab_submit_appends_switch_action():
+    net = MagicMock()
+    state: dict = {}
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()):
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.container.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        # outer + inner selectbox: action type, then switch_id
+        mock_st.selectbox.side_effect = ["SWITCH", "SW1"]
+        mock_st.text_input.return_value = "open_sw1"
+        mock_st.checkbox.return_value = True
+        mock_st.form_submit_button.return_value = True
+        mock_st.button.return_value = False
+        _render_actions_subtab(net)
+    assert state["_sa_actions"] == [
+        {"action_id": "open_sw1", "type": "SWITCH", "switch_id": "SW1", "open": True},
+    ]
+    mock_st.rerun.assert_called()
+
+
+def test_render_actions_subtab_duplicate_id_warns():
+    net = MagicMock()
+    state = {"_sa_actions": [
+        {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
+    ]}
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()):
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.container.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.selectbox.side_effect = ["SWITCH", "SW1"]
+        mock_st.text_input.return_value = "a1"
+        mock_st.checkbox.return_value = True
+        mock_st.form_submit_button.return_value = True
+        mock_st.button.return_value = False
+        _render_actions_subtab(net)
+    assert len(state["_sa_actions"]) == 1
+    mock_st.warning.assert_called()
+
+
+def test_render_actions_subtab_blank_id_warns():
+    net = MagicMock()
+    state: dict = {}
+    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()):
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.selectbox.side_effect = ["SWITCH", "SW1"]
+        mock_st.text_input.return_value = ""
+        mock_st.checkbox.return_value = True
+        mock_st.form_submit_button.return_value = True
+        _render_actions_subtab(net)
+    assert state.get("_sa_actions") == []
+    mock_st.warning.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Operator strategies sub-tab
+# ---------------------------------------------------------------------------
+
+
+def test_render_operator_strategies_subtab_no_inputs_shows_info():
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = {}
+        _render_operator_strategies_subtab()
+    mock_st.info.assert_called()
+
+
+def test_render_operator_strategies_subtab_submit_appends():
+    state = {
+        "_sa_contingencies": [{"id": "N1_L1", "element_id": "L1"}],
+        "_sa_actions": [
+            {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
+        ],
+    }
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.container.return_value = _cm()
+        mock_st.columns.side_effect = _mock_columns
+        mock_st.text_input.return_value = "strat1"
+        # selectbox: contingency, then condition_type
+        mock_st.selectbox.side_effect = ["N1_L1", "TRUE_CONDITION"]
+        mock_st.multiselect.return_value = ["a1"]
+        mock_st.form_submit_button.return_value = True
+        mock_st.button.return_value = False
+        _render_operator_strategies_subtab()
+    assert state["_sa_operator_strategies"] == [{
+        "operator_strategy_id": "strat1",
+        "contingency_id": "N1_L1",
+        "action_ids": ["a1"],
+        "condition_type": "TRUE_CONDITION",
+    }]
+    mock_st.rerun.assert_called()
+
+
+def test_render_operator_strategies_subtab_no_actions_warns():
+    state = {
+        "_sa_contingencies": [{"id": "N1_L1", "element_id": "L1"}],
+        "_sa_actions": [
+            {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
+        ],
+    }
+    with patch("iidm_viewer.security_analysis.st") as mock_st:
+        mock_st.session_state = state
+        mock_st.form.return_value = _cm()
+        mock_st.text_input.return_value = "strat1"
+        mock_st.selectbox.side_effect = ["N1_L1", "TRUE_CONDITION"]
+        mock_st.multiselect.return_value = []
+        mock_st.form_submit_button.return_value = True
+        _render_operator_strategies_subtab()
+    assert state.get("_sa_operator_strategies") == []
+    mock_st.warning.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# state._apply_action — direct unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_apply_action_switch_calls_pypowsybl():
+    analysis = MagicMock()
+    _apply_action(analysis, {
+        "action_id": "a", "type": "SWITCH", "switch_id": "SW1", "open": True,
+    })
+    analysis.add_switch_action.assert_called_once_with("a", "SW1", True)
+
+
+def test_apply_action_terminals_passes_side_enum():
+    analysis = MagicMock()
+    _apply_action(analysis, {
+        "action_id": "a", "type": "TERMINALS_CONNECTION",
+        "element_id": "L1", "opening": False, "side": "TWO",
+    })
+    args, kwargs = analysis.add_terminals_connection_action.call_args
+    assert args == ("a", "L1")
+    assert kwargs["opening"] is False
+    assert kwargs["side"].name == "TWO"
+
+
+def test_apply_action_generator():
+    analysis = MagicMock()
+    _apply_action(analysis, {
+        "action_id": "a", "type": "GENERATOR_ACTIVE_POWER",
+        "generator_id": "G1", "is_relative": True, "active_power": -5.0,
+    })
+    analysis.add_generator_active_power_action.assert_called_once_with(
+        "a", "G1", True, -5.0,
+    )
+
+
+def test_apply_action_ptc():
+    analysis = MagicMock()
+    _apply_action(analysis, {
+        "action_id": "a", "type": "PHASE_TAP_CHANGER_POSITION",
+        "transformer_id": "T1", "is_relative": False, "tap_position": 3,
+    })
+    args, kwargs = analysis.add_phase_tap_changer_position_action.call_args
+    assert args == ("a", "T1", False, 3)
+    assert kwargs["side"].name == "NONE"
+
+
+def test_apply_action_unknown_raises():
+    analysis = MagicMock()
+    with pytest.raises(ValueError):
+        _apply_action(analysis, {"action_id": "a", "type": "BOGUS"})
+
+
+# ---------------------------------------------------------------------------
+# run_security_analysis — operator strategies integration
+# ---------------------------------------------------------------------------
+
+
+def test_run_security_analysis_operator_strategy_round_trip(xiidm_upload):
+    pytest.importorskip("pypowsybl.security")
+    network = load_network(xiidm_upload)
+    contingencies = build_n1_contingencies(network, "Lines")[:1]
+    cid = contingencies[0]["id"]
+    gens = network.get_generators(attributes=[])
+    gen_id = list(gens.index)[0]
+    actions = [{
+        "action_id": "gen_down",
+        "type": "GENERATOR_ACTIVE_POWER",
+        "generator_id": gen_id,
+        "is_relative": True,
+        "active_power": -10.0,
+    }]
+    strategies = [{
+        "operator_strategy_id": "strat1",
+        "contingency_id": cid,
+        "action_ids": ["gen_down"],
+        "condition_type": "TRUE_CONDITION",
+    }]
+    results = run_security_analysis(
+        network,
+        contingencies,
+        actions=actions,
+        operator_strategies=strategies,
+    )
+    assert "operator_strategies" in results
+    osr = results["operator_strategies"].get("strat1")
+    assert osr is not None
+    assert isinstance(osr["status"], str) and osr["status"]
+    assert osr["contingency_id"] == cid
+    assert osr["action_ids"] == ["gen_down"]
