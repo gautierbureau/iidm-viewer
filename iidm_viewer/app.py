@@ -120,6 +120,13 @@ with st.sidebar:
         with col_params:
             if st.button("\u2699\ufe0f", key="lf_params_btn", help="Load Flow Parameters"):
                 show_lf_parameters_dialog()
+        lf_status = st.session_state.pop("_lf_status_message", None)
+        if lf_status:
+            status_text, is_success = lf_status
+            if is_success:
+                st.success(status_text)
+            else:
+                st.warning(status_text)
         if st.session_state.get("_lf_report_json"):
             if st.button("View Logs", key="lf_logs_btn", help="Load Flow Logs"):
                 show_lf_report_dialog()

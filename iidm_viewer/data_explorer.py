@@ -40,7 +40,6 @@ from iidm_viewer.state import (
     run_loadflow,
     update_components,
 )
-from iidm_viewer.lf_report_dialog import show_lf_report_dialog
 from iidm_viewer.filters import (
     FILTERS,
     build_vl_lookup,
@@ -1087,20 +1086,6 @@ def _render_create_extension_form(network, component: str):
 
 
 def render_data_explorer(network, selected_vl):
-    lf_status = st.session_state.pop("_lf_status_message", None)
-    if lf_status:
-        status_text, is_success = lf_status
-        col_status, col_logs = st.columns([4, 1], gap="small")
-        with col_status:
-            if is_success:
-                st.success(status_text)
-            else:
-                st.warning(status_text)
-        with col_logs:
-            if st.session_state.get("_lf_report_json"):
-                if st.button("View Logs", key="de_lf_logs_btn", help="Load Flow Logs"):
-                    show_lf_report_dialog()
-
     component_options = sorted(COMPONENT_TYPES.keys())
     component = st.selectbox(
         "Component type",
