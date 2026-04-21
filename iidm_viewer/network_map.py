@@ -1,12 +1,13 @@
 """Geographical network map tab.
 
-Data extraction runs on the pypowsybl worker thread and produces three
+Data extraction runs on the pypowsybl worker thread and produces four
 lists matching the shape expected by
 ``@powsybl/network-map-layers``:
 
     substations:          MapSubstation[]       (id, name, voltageLevels[])
     substation_positions: GeoDataSubstation[]   (id, coordinate{lon,lat})
     lines:                MapLine[]             (lines + 2W transformers)
+    line_positions:       LinePosition[]        (id, coordinates[{lat,lon}])
 
 The frontend (``frontend/map_component/``) consumes them via
 ``render_interactive_map`` and draws the map with MapLibre + deck.gl.
