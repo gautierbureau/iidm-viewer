@@ -64,11 +64,13 @@ calls. Do not wrap these inside another `run()` — that deadlocks the executor.
 
 ### Single Line Diagram — `diagrams.render_sld_tab`
 
-Calls `network.get_single_line_diagram(selected_vl, parameters=SldParameters(...))`.
-Returns an SLD result with `.svg` and `.metadata` attributes.
+Calls `network.get_single_line_diagram(container_id, parameters=SldParameters(...))`.
+`container_id` is either a voltage level ID (`svgType="voltage-level"`) or a
+substation ID (`svgType="substation"`). Returns an SLD result with `.svg` and
+`.metadata` attributes.
 
 Rendering goes through `sld_component.render_interactive_sld(svg, metadata,
-height, key)` — a custom Streamlit component declared from
+height, svg_type, key)` — a custom Streamlit component declared from
 `iidm_viewer/frontend/sld_component/dist/`. The frontend is a Vite-built
 TypeScript wrapper around
 [`@powsybl/network-viewer-core`](https://www.npmjs.com/package/@powsybl/network-viewer-core)'s
@@ -78,8 +80,21 @@ points to another VL, and hit-tests them; our `src/main.ts` (~90 lines)
 speaks the Streamlit wire protocol directly and forwards
 `onNextVoltageCallback(nextVId)` into
 `{"type": "sld-vl-click", "vl": "<nextVId>", "ts": ...}` via
-`setComponentValue`. The constructor is invoked with `svgType =
-"voltage-level"` so the library applies VL-scoped zoom limits.
+`setComponentValue`. The `svgType` arg is forwarded to the
+`SingleLineDiagramViewer` constructor; `"voltage-level"` applies VL-scoped
+zoom limits while `"substation"` enables multi-VL layout.
+
+**Expand to substation**: `render_sld_tab` shows an "Expand to substation"
+button whenever the selected VL belongs to a substation that has more than one
+VL. Clicking sets `st.session_state.sld_show_substation = True` and reruns,
+switching the generation call to `get_single_line_diagram(substation_id)` and
+the viewer to `svgType="substation"`. Selecting a new VL (from the sidebar, a
+navigation-arrow click, or a NAD click) clears `sld_show_substation`.
+
+**Multi-substation expansion is not supported.** pypowsybl's SLD API takes one
+container ID at a time (a VL or a substation); there is no call that generates a
+combined SVG spanning two or more substations. For cross-substation topology
+overview use the NAD tab with `depth ≥ 1`.
 
 `render_sld_tab` writes `vl` into `st.session_state.selected_vl` and
 calls `st.rerun()`; session state survives so the uploaded network and
