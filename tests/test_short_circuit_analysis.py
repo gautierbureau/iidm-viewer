@@ -16,6 +16,23 @@ from iidm_viewer.short_circuit_analysis import (
 
 
 # ---------------------------------------------------------------------------
+# Fixture network carries generatorShortCircuit extensions
+# ---------------------------------------------------------------------------
+
+
+def test_ieee14_fixture_has_generator_short_circuit_extension(xiidm_upload):
+    """The short-circuit analysis provider requires a transient or
+    subtransient reactance on at least one generator. Guard against
+    accidentally dropping the ``generatorShortCircuit`` extension from the
+    test fixture."""
+    network = load_network(xiidm_upload)
+    raw = object.__getattribute__(network, "_obj")
+    df = raw.get_extensions("generatorShortCircuit")
+    assert not df.empty, "generatorShortCircuit extension missing from fixture"
+    assert "direct_sub_trans_x" in df.columns or "direct_trans_x" in df.columns
+
+
+# ---------------------------------------------------------------------------
 # build_bus_faults — integration tests (real IEEE14 network)
 # ---------------------------------------------------------------------------
 
