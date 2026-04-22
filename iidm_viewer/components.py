@@ -6,7 +6,11 @@ from iidm_viewer.state import get_voltage_levels_df, filter_voltage_levels
 def vl_selector(network):
     vls_df = get_voltage_levels_df(network)
 
-    vl_filter = st.text_input("Filter voltage levels", key="vl_filter_text")
+    gen = st.session_state.get("vl_selector_gen", 0)
+    filter_key = f"vl_filter_text_{gen}"
+    selectbox_key = f"vl_selectbox_{gen}"
+
+    vl_filter = st.text_input("Filter voltage levels", key=filter_key)
     filtered = filter_voltage_levels(vls_df, vl_filter)
 
     if filtered.empty:
@@ -28,17 +32,17 @@ def vl_selector(network):
     # because the sidebar runs first and the stale widget state wins.
     # When selected_vl is None (network just reloaded), force the widget
     # to the first option so the stale frontend value cannot be restored.
-    if current in options and st.session_state.get("vl_selectbox") != current:
-        st.session_state.vl_selectbox = current
+    if current in options and st.session_state.get(selectbox_key) != current:
+        st.session_state[selectbox_key] = current
     elif current is None and options:
-        st.session_state.vl_selectbox = options[0]
+        st.session_state[selectbox_key] = options[0]
 
     selected = st.selectbox(
         "Voltage Level",
         options=options,
         index=index,
         format_func=lambda x: label_map.get(x, x),
-        key="vl_selectbox",
+        key=selectbox_key,
     )
     st.session_state.selected_vl = selected
     return selected
