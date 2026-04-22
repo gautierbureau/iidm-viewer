@@ -33,6 +33,14 @@ _SLD_COLOR_RE = re.compile(
 _SLD_BUSBAR_RE = re.compile(
     r'<g\s+class="sld-busbar-section\s+sld-(vl\d+to\d+)\s+sld-bus-(\d+)"\s+id="id([^"]+)"'
 )
+# The SLG renderer encodes non-alphanumeric characters in SVG element IDs as
+# _<decimal ASCII>_  (e.g. underscore '_' → '_95_', hyphen '-' → '_45_').
+_SVG_ID_ENCODE_RE = re.compile(r'_(\d+)_')
+
+
+def _decode_svg_id(encoded: str) -> str:
+    """Decode the SLG id encoding back to the original network element id."""
+    return _SVG_ID_ENCODE_RE.sub(lambda m: chr(int(m.group(1))), encoded)
 
 
 def _parse_sld_palette(svg: str) -> dict:
@@ -44,9 +52,13 @@ def _parse_sld_palette(svg: str) -> dict:
 
 
 def _parse_sld_busbar_indices(svg: str) -> dict:
-    """Return ``{busbar_section_id: (band, bus_index)}`` from <g> elements."""
+    """Return ``{busbar_section_id: (band, bus_index)}`` from <g> elements.
+
+    SVG element ids use the SLG encoding (``_<decimal>_``) for special chars;
+    decoded back to the real network element id before returning.
+    """
     return {
-        m.group(3): (m.group(1), int(m.group(2)))
+        _decode_svg_id(m.group(3)): (m.group(1), int(m.group(2)))
         for m in _SLD_BUSBAR_RE.finditer(svg or "")
     }
 
