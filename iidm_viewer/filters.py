@@ -8,6 +8,8 @@ so those can sit in the whitelist alongside the component's own columns.
 import pandas as pd
 import streamlit as st
 
+from iidm_viewer.caches import enrich_with_joins, get_vl_lookup
+
 
 FILTERS: dict[str, list[str]] = {
     "Generators": [
@@ -33,69 +35,8 @@ FILTERS: dict[str, list[str]] = {
 
 
 def build_vl_lookup(network) -> pd.DataFrame:
-    """VL id → (substation_id, nominal_v, country) table.
-
-    Cached in session_state so we only pay the two pypowsybl calls once
-    per network upload.
-    """
-    cache = st.session_state.setdefault("_vl_lookup_cache", {})
-    net_id = id(network)
-    if cache.get("id") != net_id:
-        vls = network.get_voltage_levels(
-            attributes=["substation_id", "nominal_v"]
-        ).reset_index()
-        subs = (
-            network.get_substations(attributes=["country"])
-            .reset_index()
-            .rename(columns={"id": "substation_id"})
-        )
-        vls["id"] = vls["id"].astype(str)
-        vls["substation_id"] = vls["substation_id"].astype(str)
-        subs["substation_id"] = subs["substation_id"].astype(str)
-        cache["id"] = net_id
-        cache["df"] = vls.merge(subs, on="substation_id", how="left")
-    return cache["df"]
-
-
-def enrich_with_joins(df: pd.DataFrame, vl_lookup: pd.DataFrame) -> pd.DataFrame:
-    """Left-join VL/substation-derived columns so they can be filtered on."""
-    idx_name = df.index.name
-    out = df.reset_index()
-
-    if "substation_id" in out.columns and "country" not in out.columns:
-        out = out.merge(
-            vl_lookup[["substation_id", "country"]].drop_duplicates("substation_id"),
-            on="substation_id",
-            how="left",
-        )
-
-    if "voltage_level_id" in out.columns:
-        missing = [c for c in ("nominal_v", "country") if c not in out.columns]
-        if missing:
-            lookup = vl_lookup.rename(columns={"id": "voltage_level_id"})[
-                ["voltage_level_id", *missing]
-            ].copy()
-            lookup["voltage_level_id"] = lookup["voltage_level_id"].astype(str)
-            out["voltage_level_id"] = out["voltage_level_id"].astype(str)
-            out = out.merge(lookup, on="voltage_level_id", how="left")
-
-    for side in ("1", "2"):
-        col = f"voltage_level{side}_id"
-        if col in out.columns:
-            lookup = vl_lookup.rename(
-                columns={
-                    "id": col,
-                    "nominal_v": f"nominal_v{side}",
-                    "country": f"country{side}",
-                }
-            )[[col, f"nominal_v{side}", f"country{side}"]].copy()
-            lookup[col] = lookup[col].astype(str)
-            out[col] = out[col].astype(str)
-            out = out.merge(lookup, on=col, how="left")
-
-    if idx_name and idx_name in out.columns:
-        out = out.set_index(idx_name)
-    return out
+    """Thin wrapper around :func:`caches.get_vl_lookup`."""
+    return get_vl_lookup(network)
 
 
 def render_filters(df: pd.DataFrame, columns: list[str], key_prefix: str, label: str = "Filters") -> pd.DataFrame:

@@ -40,10 +40,9 @@ from iidm_viewer.state import (
     run_loadflow,
     update_components,
 )
+from iidm_viewer.caches import get_enriched_component
 from iidm_viewer.filters import (
     FILTERS,
-    build_vl_lookup,
-    enrich_with_joins,
     render_filters,
 )
 
@@ -1148,8 +1147,7 @@ def render_data_explorer(network, selected_vl):
 
     with st.spinner(f"Loading {component}..."):
         try:
-            from iidm_viewer.caches import get_component_df
-            df = get_component_df(network, method_name)
+            df = get_enriched_component(network, method_name)
 
             if df.empty:
                 st.info(f"No {component.lower()} found in this network.")
@@ -1161,7 +1159,6 @@ def render_data_explorer(network, selected_vl):
                     st.info(f"No {component.lower()} in this voltage level.")
                     return
 
-            df = enrich_with_joins(df, build_vl_lookup(network))
             df = _reorder_columns(df, component)
             total = len(df)
 
