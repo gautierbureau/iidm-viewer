@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Active Tab</title>
+</head>
+<body>
+<script>
+(function () {
+  "use strict";
+  function sendParent(msg) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true }, msg), '*');
+  }
+  function setValue(v) {
+    sendParent({ type: 'streamlit:setComponentValue', dataType: 'json', value: v });
+  }
+  function currentIndex() {
+    try {
+      var tabs = window.parent.document.querySelectorAll(
+        '[data-baseweb="tab-list"] [role="tab"]'
+      );
+      for (var i = 0; i < tabs.length; i++) {
+        if (tabs[i].getAttribute('aria-selected') === 'true') return i;
+      }
+    } catch (_) {}
+    return 0;
+  }
+  var listenerInstalled = false;
+  window.addEventListener('message', function (e) {
+    var data = e.data;
+    if (!data || data.type !== 'streamlit:render') return;
+    // Install click listener once; capture phase so we see clicks before
+    // Streamlit flips aria-selected. setTimeout lets Streamlit update the
+    // DOM first so currentIndex() reads the *new* value.
+    if (!listenerInstalled) {
+      listenerInstalled = true;
+      window.parent.document.addEventListener('click', function (evt) {
+        var t = evt.target;
+        if (t && t.closest('[role="tab"]')) {
+          setTimeout(function () { setValue(currentIndex()); }, 0);
+        }
+      }, true);
+    }
+    setValue(currentIndex());
+  });
+  // Announce readiness to Streamlit and collapse the iframe to 0 height.
+  sendParent({ type: 'streamlit:componentReady', apiVersion: 1 });
+  sendParent({ type: 'streamlit:setFrameHeight', height: 0 });
+}());
+</script>
+</body>
+</html>

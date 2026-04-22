@@ -90,6 +90,7 @@ def _prepare(xiidm_upload, selected_vl=None):
 def test_nad_tab_info_when_no_vl_selected(xiidm_upload):
     """Empty VL filter -> vl_selector returns None -> NAD tab shows its info."""
     at = _prepare(xiidm_upload)
+    at.session_state["active_tab_sync"] = 2  # Network Area Diagram
     at.text_input(key="vl_filter_text_0").set_value("ZZZZZZ").run(timeout=30)
     assert not at.exception
     infos = [i.value for i in at.info]
@@ -98,6 +99,7 @@ def test_nad_tab_info_when_no_vl_selected(xiidm_upload):
 
 def test_sld_tab_info_when_no_vl_selected(xiidm_upload):
     at = _prepare(xiidm_upload)
+    at.session_state["active_tab_sync"] = 3  # Single Line Diagram
     at.text_input(key="vl_filter_text_0").set_value("ZZZZZZ").run(timeout=30)
     assert not at.exception
     infos = [i.value for i in at.info]

@@ -25,6 +25,8 @@ from iidm_viewer.voltage_analysis import render_voltage_analysis
 from iidm_viewer.injection_map import render_injection_map
 from iidm_viewer.security_analysis import render_security_analysis
 from iidm_viewer.short_circuit_analysis import render_short_circuit_analysis
+from iidm_viewer.active_tab import sync_active_tab
+from iidm_viewer.prewarming import render_prewarmer
 
 
 st.set_page_config(page_title="IIDM Viewer", layout="wide", page_icon="⚡")
@@ -145,6 +147,22 @@ if network is None:
     )
     st.stop()
 
+_TAB_NAMES = [
+    "Overview",
+    "Network Map",
+    "Network Area Diagram",
+    "Single Line Diagram",
+    "Data Explorer Components",
+    "Data Explorer Extensions",
+    "Reactive Capability Curves",
+    "Operational Limits",
+    "Pmax Visualization",
+    "Voltage Analysis",
+    "Injection Map",
+    "Security Analysis",
+    "Short Circuit Analysis",
+]
+
 (
     tab_overview,
     tab_map,
@@ -159,59 +177,62 @@ if network is None:
     tab_injection,
     tab_sa,
     tab_sc,
-) = st.tabs(
-    [
-        "Overview",
-        "Network Map",
-        "Network Area Diagram",
-        "Single Line Diagram",
-        "Data Explorer Components",
-        "Data Explorer Extensions",
-        "Reactive Capability Curves",
-        "Operational Limits",
-        "Pmax Visualization",
-        "Voltage Analysis",
-        "Injection Map",
-        "Security Analysis",
-        "Short Circuit Analysis",
-    ]
-)
+) = st.tabs(_TAB_NAMES)
 
+# Detect the active tab index. Returns 0 on first load; updates on each click.
+active = sync_active_tab(len(_TAB_NAMES))
+
+# Overview always renders so the first paint is not blank.
 with tab_overview:
     render_overview(network)
 
 with tab_map:
-    render_network_map(network, selected_vl)
+    if active == 1:
+        render_network_map(network, selected_vl)
 
 with tab_nad:
-    render_nad_tab(network, selected_vl)
+    if active == 2:
+        render_nad_tab(network, selected_vl)
 
 with tab_sld:
-    render_sld_tab(network, selected_vl)
+    if active == 3:
+        render_sld_tab(network, selected_vl)
 
 with tab_components:
-    render_data_explorer(network, selected_vl)
+    if active == 4:
+        render_data_explorer(network, selected_vl)
 
 with tab_extensions:
-    render_extensions_explorer(network)
+    if active == 5:
+        render_extensions_explorer(network)
 
 with tab_rcc:
-    render_reactive_curves(network, selected_vl)
+    if active == 6:
+        render_reactive_curves(network, selected_vl)
 
 with tab_limits:
-    render_operational_limits(network, selected_vl)
+    if active == 7:
+        render_operational_limits(network, selected_vl)
 
 with tab_pmax:
-    render_pmax_visualization(network, selected_vl)
+    if active == 8:
+        render_pmax_visualization(network, selected_vl)
 
 with tab_voltage:
-    render_voltage_analysis(network)
+    if active == 9:
+        render_voltage_analysis(network)
 
 with tab_injection:
-    render_injection_map(network)
+    if active == 10:
+        render_injection_map(network)
 
 with tab_sa:
-    render_security_analysis(network)
+    if active == 11:
+        render_security_analysis(network)
 
 with tab_sc:
-    render_short_circuit_analysis(network)
+    if active == 12:
+        render_short_circuit_analysis(network)
+
+# Background prewarmer: silently populates shared caches for unvisited tabs.
+render_prewarmer(network)

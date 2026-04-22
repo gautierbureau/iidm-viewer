@@ -10,6 +10,7 @@ def _prepare(xiidm_upload):
     at.run(timeout=30)
     at.session_state["network"] = load_network(xiidm_upload)
     at.session_state["_last_file"] = xiidm_upload.name
+    at.session_state["active_tab_sync"] = 4  # Data Explorer Components
     at.run(timeout=30)
     return at
 
@@ -127,6 +128,7 @@ def test_data_explorer_create_form_renders_for_node_breaker(node_breaker_network
     at.run(timeout=30)
     at.session_state["network"] = node_breaker_network
     at.session_state["_last_file"] = "four_substations.xiidm"
+    at.session_state["active_tab_sync"] = 4  # Data Explorer Components
     at.run(timeout=30)
     at.selectbox(key="component_type_select").select("Generators").run(timeout=30)
     assert not at.exception
@@ -143,6 +145,7 @@ def test_data_explorer_create_form_renders_for_loads(node_breaker_network):
     at.run(timeout=30)
     at.session_state["network"] = node_breaker_network
     at.session_state["_last_file"] = "four_substations.xiidm"
+    at.session_state["active_tab_sync"] = 4  # Data Explorer Components
     at.run(timeout=30)
     at.selectbox(key="component_type_select").select("Loads").run(timeout=30)
     assert not at.exception
@@ -155,6 +158,7 @@ def test_data_explorer_branch_form_renders_for_lines(node_breaker_network):
     at.run(timeout=30)
     at.session_state["network"] = node_breaker_network
     at.session_state["_last_file"] = "four_substations.xiidm"
+    at.session_state["active_tab_sync"] = 4  # Data Explorer Components
     at.run(timeout=30)
     at.selectbox(key="component_type_select").select("Lines").run(timeout=30)
     assert not at.exception
@@ -171,6 +175,7 @@ def test_data_explorer_branch_form_renders_for_2wt(node_breaker_network):
     at.run(timeout=30)
     at.session_state["network"] = node_breaker_network
     at.session_state["_last_file"] = "four_substations.xiidm"
+    at.session_state["active_tab_sync"] = 4  # Data Explorer Components
     at.run(timeout=30)
     at.selectbox(key="component_type_select").select("2-Winding Transformers").run(timeout=30)
     assert not at.exception

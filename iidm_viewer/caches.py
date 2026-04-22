@@ -258,6 +258,7 @@ _LOAD_FLOW_CACHE_KEYS = (
     "_svc_all_cache",
     "_generators_all_cache",
     "_3wt_all_cache",
+    "_prewarm_idx",     # restart background prewarming after a load flow
 )
 
 # Caches holding pre-rendered map payloads or positions — only need to
@@ -266,6 +267,7 @@ _NETWORK_REPLACE_CACHE_KEYS = (
     "_substation_positions_cache",
     "_voltage_map_cache",
     "_injection_map_cache",
+    "_prewarm_idx",     # restart background prewarming on network replace
 )
 
 
