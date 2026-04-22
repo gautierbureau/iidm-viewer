@@ -165,11 +165,14 @@ def _line_record(row) -> dict:
     }
 
 
+_MISSING = object()  # sentinel: key absent from session state (distinct from None)
+
+
 def _get_cached_map_data(network):
     """Cache extraction in session state so reruns don't reprocess."""
-    cache = st.session_state.get("_map_data_cache")
-    if cache is not None:
-        return cache
+    cache = st.session_state.get("_map_data_cache", _MISSING)
+    if cache is not _MISSING:
+        return cache  # may be None when the network has no geo data
     result = _extract_map_data(network)
     st.session_state["_map_data_cache"] = result
     # Bump the version so the JS map component knows to rebuild layers.
@@ -198,15 +201,32 @@ def render_network_map(network, selected_vl):
         )
         return
 
-    render_interactive_map(
-        substations=substations,
-        substation_positions=substation_positions,
-        lines=lines,
-        line_positions=line_positions,
-        version=st.session_state.get("_map_data_version", 0),
-        height=670,
-        key="network_map",
-    )
+    version = st.session_state.get("_map_data_version", 0)
+
+    if st.session_state.get("_map_last_sent_version") == version:
+        # Data unchanged — send empty arrays so Streamlit doesn't serialize
+        # and transfer the full network payload on every navigation rerun.
+        # The JS component skips layer rebuilds via the version check.
+        render_interactive_map(
+            substations=[],
+            substation_positions=[],
+            lines=[],
+            line_positions=[],
+            version=version,
+            height=670,
+            key="network_map",
+        )
+    else:
+        st.session_state["_map_last_sent_version"] = version
+        render_interactive_map(
+            substations=substations,
+            substation_positions=substation_positions,
+            lines=lines,
+            line_positions=line_positions,
+            version=version,
+            height=670,
+            key="network_map",
+        )
 
     line_pos_count = len(line_positions)
     caption = f"{len(substations)} substations, {len(lines)} branches"
