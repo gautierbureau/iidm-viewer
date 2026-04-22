@@ -38,11 +38,10 @@ def _bus_voltages(network) -> pd.DataFrame:
 def _shunt_compensation(network) -> pd.DataFrame:
     """Return one row per shunt compensator with reactive power columns (MVAr).
 
-    current_q_mvar   — from load-flow q if available, else b × nominal_v²
-                       (b is the total current susceptance returned by pypowsybl)
-    available_q_mvar — remaining sections × (b/section_count) × nominal_v²,
-                       plus the current contribution of disconnected units
-    total_q_mvar     — full capacity at max_section_count × (b/section_count) × nominal_v²
+    current_q_mvar   — from load-flow q if available, else −b × nominal_v²
+                       (pypowsybl load-sign convention: Q < 0 for capacitors, Q > 0 for reactors)
+    available_q_mvar — −b_per_section × remaining_sections × nominal_v²
+    total_q_mvar     — −b_per_section × max_section_count × nominal_v²
                        (NaN when section_count == 0 and no b_per_section column)
     b_per_section    — susceptance per section; sign determines capacitive vs inductive
                        (NaN when section_count == 0 and pypowsybl does not expose it)
@@ -68,18 +67,20 @@ def _shunt_compensation(network) -> pd.DataFrame:
     if "b_per_section" in df.columns:
         bps = bps.fillna(df["b_per_section"])
 
-    # Use q per element when available, fall back to b × nominal_v² estimate.
-    # Zero out for disconnected shunts — they inject nothing into the network.
+    # pypowsybl load-sign convention: Q = −b × V²
+    #   capacitors (b > 0) → Q < 0   reactors (b < 0) → Q > 0
+    # Use load-flow q when available (already in load-sign convention);
+    # fall back to −b × V² so the sign is consistent in both cases.
     has_q = df["q"].notna()
-    q_estimate = df["q"].where(has_q, df["b"] * v2)
+    q_estimate = df["q"].where(has_q, -df["b"] * v2)
     df["current_q_mvar"] = q_estimate.where(df["connected"], other=0.0)
 
-    df["total_q_mvar"] = bps * df["max_section_count"] * v2
+    df["total_q_mvar"] = -bps * df["max_section_count"] * v2
 
     # Disconnected shunts count all sections as available (none are in use).
     active_sections = df["section_count"].where(df["connected"], other=0)
     remaining = (df["max_section_count"] - active_sections).clip(lower=0)
-    df["available_q_mvar"] = bps * remaining * v2
+    df["available_q_mvar"] = -bps * remaining * v2
     df["b_per_section"] = bps
 
     return df[[
@@ -229,13 +230,13 @@ def _render_shunt_section(shunts: pd.DataFrame):
     ind = shunts[shunts["b_per_section"] < 0]
     unk = shunts[shunts["b_per_section"].isna() | (shunts["b_per_section"] == 0)]
 
-    st.markdown("##### Capacitive (b > 0) — injects reactive power, raises voltage")
+    st.markdown("##### Capacitive (b > 0, Q < 0) — injects reactive power, raises voltage")
     if cap.empty:
         st.info("No capacitive shunt compensators in this network.")
     else:
         _render_shunt_group(cap, has_lf)
 
-    st.markdown("##### Inductive (b < 0) — absorbs reactive power, lowers voltage")
+    st.markdown("##### Inductive (b < 0, Q > 0) — absorbs reactive power, lowers voltage")
     if ind.empty:
         st.info("No inductive shunt compensators in this network.")
     else:
