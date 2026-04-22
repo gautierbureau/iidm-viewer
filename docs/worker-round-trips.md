@@ -27,24 +27,25 @@ are noted separately.
 | Tab                      | RT / rerun | First-visit extra | Source of cost |
 |---|---:|---:|---|
 | Sidebar (`vl_selector`)  | **0** | 2 | `get_voltage_levels_df` cached in `_vl_lookup_cache` |
-| Overview                 | **12 – 20** | — | no caching (see below) |
+| Overview                 | **0** | 12 – 20 | `_overview_cache` keyed by `(net_key, lf_gen)` |
 | Network Map              | **0** | 1 closure | `_map_data_cache` + `_map_data_version` wire-payload skip |
 | Network Area Diagram     | **0** | 4 | `_nad_cache` keyed by `(vl, depth)` |
 | Single Line Diagram      | **0 – 3** | 4 + 2 | `_sld_cache`, `_buses_all`, `_bbs_cache`, `_sub_map_cache` |
 | Data Explorer Components | **2** | — | `getattr(network, method)(all_attributes=True, …)` uncached |
 | Data Explorer Extensions | **2** | — | `network.get_extensions(name)` uncached |
 | Reactive Capability Curves | **4** | — | `get_reactive_capability_curve_points` + `get_generators` |
-| Operational Limits       | **12 – 16** | — | heavy duplication across `_get_current_flows`, `_compute_loading`, `_get_branch_losses`, `_get_filtered_element_ids` |
-| Pmax Visualization       | **4** | — | `get_lines(all_attributes=True)` + `get_buses(all_attributes=True)` |
+| Operational Limits       | **0** | 6 | shared `caches.get_lines_all` / `get_2wt_all` / `get_operational_limits_df` |
+| Pmax Visualization       | **2 – 4** | — | `get_lines(all_attributes=True)` uncached (can share `caches.get_lines_all`) + `get_buses(all_attributes=True)` |
 | Voltage Analysis         | **8** | — | 4 separate uncached `get_*` |
 | Injection Map            | **0** | 1 closure | `_injection_map_cache` |
 | Security Analysis        | **2 – 8** | 1 closure | `_sa_id_cache` hit, but `_get_nominal_voltages` + each filterable DF uncached |
 | Short Circuit Analysis   | **2** | — | `_get_nominal_voltages` uncached |
 
-**Aggregate per rerun ≈ 50 – 65 RT** (IEEE 14 fixture, no LF logs
-expander open). Most of that is spent on tab bodies the user isn't
-even looking at, because Streamlit runs every `with tab_xxx:` block
-on every rerun.
+**Aggregate per rerun ≈ 26 – 37 RT** (IEEE 14 fixture, no LF logs
+expander open) — down from ~50 – 65 before Overview and Operational
+Limits were cached. Most of the remaining cost is spent on tab bodies
+the user isn't even looking at, because Streamlit runs every
+`with tab_xxx:` block on every rerun.
 
 First-visit adds ~12 RT across SLD, NAD, and the one-shot injection /
 map closures.
@@ -86,28 +87,24 @@ when the expander is open.
 
 ### Operational Limits — `iidm_viewer/operational_limits.py::render_operational_limits`
 
-Heavy duplication. On every rerun:
+After routing `_get_current_flows`, `_compute_loading`,
+`_get_branch_losses`, and `_get_filtered_element_ids` through the
+shared `iidm_viewer/caches.py` helpers, warm reruns cost **0 RT**:
 
 | Call path | RT |
 |---|---:|
-| `render_operational_limits` → `network.get_operational_limits()` | 2 |
-| `_compute_loading` → `get_lines(attributes=[...i1,i2,connected...])` | 2 |
-| `_compute_loading` → `get_2_windings_transformers(attributes=[...])` | 2 |
-| `_compute_loading` → `_get_branch_losses` → `get_lines(attributes=["p1","p2"])` | 2 |
-| `_compute_loading` → `_get_branch_losses` → `get_2_windings_transformers(attributes=["p1","p2"])` | 2 |
-| `_get_filtered_element_ids` → `get_lines(all_attributes=True)` | 2 |
-| `_get_filtered_element_ids` → `get_2_windings_transformers(all_attributes=True)` | 2 |
-| When an element is selected: `_get_current_flows` → `get_lines` + `get_2_windings_transformers` | 4 |
+| `render_operational_limits` → `get_operational_limits_df` | 0 (cached in `_oplimits_cache` by `net_key`) |
+| `_compute_loading` / `_get_branch_losses` / `_get_current_flows` → `get_lines_all` | 0 (cached in `_lines_all_cache` by `(net_key, lf_gen)`) |
+| `_compute_loading` / `_get_branch_losses` / `_get_current_flows` → `get_2wt_all` | 0 (cached in `_2wt_all_cache` by `(net_key, lf_gen)`) |
+| `_get_filtered_element_ids` → `get_lines_all` / `get_2wt_all` | 0 (same caches) |
 
-**Action**: fold `_get_current_flows`, `_compute_loading`, and
-`_get_branch_losses` into a single cached `_get_branches(network)` that
-returns `DataFrame(get_lines(all_attributes=True))` +
-`DataFrame(get_2_windings_transformers(all_attributes=True))`, cached
-per `(net_key, lf_gen)`. `get_operational_limits()` is static for a
-given network — cache per `net_key`. Overview can reuse the same branches
-cache.
+First-visit cost is **~6 RT** (one `get_operational_limits` +
+`get_lines(all_attributes=True)` + `get_2_windings_transformers(all_attributes=True)`)
+plus another 4 RT the first time after each load flow.
 
-Estimated saving: **12-16 → 0 RT** steady state.
+Invalidation: every topology-edit site in `state.py` that pops
+`_vl_lookup_cache` also pops the three new caches; `run_loadflow`
+bumps `_lf_gen` so flow/loss columns recompute on the next visit.
 
 ### Voltage Analysis — `iidm_viewer/voltage_analysis.py::render_voltage_analysis`
 
