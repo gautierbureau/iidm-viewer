@@ -69,17 +69,17 @@ def _shunt_compensation(network) -> pd.DataFrame:
         bps = bps.fillna(df["b_per_section"])
 
     # Use q per element when available, fall back to b × nominal_v² estimate.
-    # A network-wide has_lf flag would misclassify newly added shunts whose q
-    # is still NaN while other shunts in the same network already have q.
+    # Zero out for disconnected shunts — they inject nothing into the network.
     has_q = df["q"].notna()
-    df["current_q_mvar"] = df["q"].where(has_q, df["b"] * v2)
+    q_estimate = df["q"].where(has_q, df["b"] * v2)
+    df["current_q_mvar"] = q_estimate.where(df["connected"], other=0.0)
 
     df["total_q_mvar"] = bps * df["max_section_count"] * v2
 
-    remaining = (df["max_section_count"] - df["section_count"]).clip(lower=0)
-    available_from_sections = bps * remaining * v2
-    disconnected_loss = df["current_q_mvar"].where(~df["connected"], other=0.0).fillna(0.0)
-    df["available_q_mvar"] = available_from_sections + disconnected_loss
+    # Disconnected shunts count all sections as available (none are in use).
+    active_sections = df["section_count"].where(df["connected"], other=0)
+    remaining = (df["max_section_count"] - active_sections).clip(lower=0)
+    df["available_q_mvar"] = bps * remaining * v2
     df["b_per_section"] = bps
 
     return df[[
