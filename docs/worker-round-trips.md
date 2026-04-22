@@ -31,8 +31,8 @@ are noted separately.
 | Network Map              | **0** | 1 closure | `_map_data_cache` + `_map_data_version` wire-payload skip |
 | Network Area Diagram     | **0** | 4 | `_nad_cache` keyed by `(vl, depth)` |
 | Single Line Diagram      | **0** | 4 + 2 | `_sld_cache`, `_buses_all`, `_bbs_cache`, `_bbt_cache`, `_sub_map_cache` |
-| Data Explorer Components | **2** | — | `getattr(network, method)(all_attributes=True, …)` uncached |
-| Data Explorer Extensions | **2** | — | `network.get_extensions(name)` uncached |
+| Data Explorer Components | **0** | 2 | `caches.get_component_df` (delegates to existing getters for known types; `_de_component_cache` for others) |
+| Data Explorer Extensions | **0** | 2 | `caches.get_extension_df` (`_ext_df_cache` keyed by `(net_key, lf_gen, extension)`) |
 | Reactive Capability Curves | **0** | 4 | `caches.get_reactive_curve_points` (topology-keyed) + `caches.get_generators_all` (lf_gen-keyed) |
 | Operational Limits       | **0** | 6 | shared `caches.get_lines_all` / `get_2wt_all` / `get_operational_limits_df` |
 | Pmax Visualization       | **0** | 0 | `caches.get_lines_all` + `caches.get_buses_all` (both already warm from other tabs) |
@@ -41,9 +41,9 @@ are noted separately.
 | Security Analysis        | **0** | 1 closure | `_sa_id_cache` (net_key-keyed) + `_sa_manual_df_cache` ((net_key,lf_gen,type)-keyed) + `caches.get_vl_nominal_v` |
 | Short Circuit Analysis   | **0** | 2 | `caches.get_vl_nominal_v` (topology-keyed, shared with Voltage Analysis) |
 
-**Aggregate per rerun ≈ 4 – 6 RT** (IEEE 14 fixture, no LF logs
-expander open) — down from ~50 – 65 before per-tab caching. Remaining cost is
-the two uncached Data Explorer paths (Components: 2 RT, Extensions: 2 RT).
+**Aggregate per rerun ≈ 0 – 2 RT** (IEEE 14 fixture, no LF logs
+expander open) — down from ~50 – 65 before per-tab caching. First-visit costs
+remain (~12–20 RT across all tabs combined).
 
 First-visit adds ~12 RT across SLD, NAD, and the one-shot injection /
 map closures.
@@ -145,29 +145,36 @@ Estimated saving: **4 → 0 RT**.
 
 ### Data Explorer Components — `iidm_viewer/data_explorer.py::render_data_explorer`
 
-| Call | RT |
-|---|---:|
-| `getattr(network, method_name)(all_attributes=True, **kwargs)` where method depends on selected component | 2 |
+| Call | RT (before) | RT (after) |
+|---|---:|---:|
+| `getattr(network, method_name)(all_attributes=True, **kwargs)` | 2 | 0 |
 
-**Action**: cache per `(net_key, lf_gen, component, voltage_level_id)`.
-Invalidation is messier because the tab edits the network — the
-`update_components` / `remove_components` paths in `state.py` must
-pop the cache. Every edit path already pops `_vl_lookup_cache`, so
-reuse the same invalidation sites.
+`caches.get_component_df(network, method_name)` routes through existing per-tab
+caches (Lines → `get_lines_all`, Generators → `get_generators_all`, etc.) for the
+7 already-cached types. For the other 11 types (Substations, Voltage Levels,
+Switches, HVDC Lines, …) a `"_de_component_cache"` dict keyed by
+`(net_key, lf_gen, method_name)` is used.
 
-Estimated saving: **2 → 0 RT** (but only when the user lingers; every
-component-type switch still costs 2 RT on first view).
+VL filter (`voltage_level_id=` kwarg) moved from network call to pure-Python
+column filter on the cached DataFrame — 0 RT and same result.
+
+Both caches added to `_TOPOLOGY_CACHE_KEYS` → flushed on every topology edit
+(add/remove components, update r/x/…) and on LF.
+
+**Result: 2 → 0 RT** warm.
 
 ### Data Explorer Extensions — `iidm_viewer/extensions_explorer.py::render_extensions_explorer`
 
-| Call | RT |
-|---|---:|
-| `network.get_extensions(extension)` | 2 |
+| Call | RT (before) | RT (after) |
+|---|---:|---:|
+| `network.get_extensions(extension)` | 2 | 0 |
 
-**Action**: cache per `(net_key, extension_name)`. Invalidate on
-`update_extension` / `remove_extension` (already pop `_vl_lookup_cache`).
+`caches.get_extension_df(network, extension_name)` caches per
+`(net_key, lf_gen, extension_name)` in `"_ext_df_cache"`. Keyed by lf_gen
+because some extensions carry post-LF attributes. Added to
+`_TOPOLOGY_CACHE_KEYS` → flushed on `update_extension` / `remove_extension`.
 
-Estimated saving: **2 → 0 RT** on re-view of the same extension.
+**Result: 2 → 0 RT** on re-view of the same extension.
 
 ### Short Circuit Analysis — `iidm_viewer/short_circuit_analysis.py::_get_nominal_voltages`
 

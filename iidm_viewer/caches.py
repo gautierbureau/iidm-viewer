@@ -20,6 +20,7 @@ but *do* change the set of rows. Every ``_vl_lookup_cache`` pop site in
 """
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 
@@ -94,6 +95,68 @@ def get_generators_all(network):
 def get_3wt_all(network):
     """Cache ``get_3_windings_transformers(all_attributes=True)`` per ``(net_key, lf_gen)``."""
     return _get_all_attrs(network, "_3wt_all_cache", "get_3_windings_transformers")
+
+
+# Map pypowsybl method names to their already-cached getters above so
+# get_component_df can reuse them without a second fetch.
+_METHOD_TO_CACHE_FN: dict = {
+    "get_lines": get_lines_all,
+    "get_2_windings_transformers": get_2wt_all,
+    "get_3_windings_transformers": get_3wt_all,
+    "get_generators": get_generators_all,
+    "get_buses": get_buses_all,
+    "get_shunt_compensators": get_shunts_all,
+    "get_static_var_compensators": get_svc_all,
+}
+
+
+def get_component_df(network, method_name: str) -> pd.DataFrame:
+    """Return ``network.method_name(all_attributes=True)`` cached per ``(net_key, lf_gen)``.
+
+    For types already cached in this module (lines, generators, buses, etc.)
+    delegates to the existing getter so the DataFrame is shared across tabs.
+    For all other component types a general ``"_de_component_cache"`` dict is
+    used, keyed by ``(net_key, lf_gen, method_name)``.
+    Returns an empty DataFrame on failure.
+    """
+    known = _METHOD_TO_CACHE_FN.get(method_name)
+    if known is not None:
+        return known(network)
+
+    cache = st.session_state.setdefault("_de_component_cache", {})
+    key = _cache_key(network) + (method_name,)
+    if key in cache:
+        return cache[key]
+
+    df = getattr(network, method_name)(all_attributes=True)
+    cache[key] = df
+    return df
+
+
+def get_extension_df(network, extension_name: str) -> pd.DataFrame:
+    """Return ``network.get_extensions(extension_name)`` cached per ``(net_key, lf_gen)``.
+
+    Some extensions carry post-LF attributes, so the cache is keyed by
+    ``(net_key, lf_gen)``. Invalidated via ``_TOPOLOGY_CACHE_KEYS`` on every
+    topology or extension edit.
+    Returns an empty DataFrame on failure or when the extension is absent.
+    """
+    cache = st.session_state.setdefault("_ext_df_cache", {})
+    key = _cache_key(network) + (extension_name,)
+    if key in cache:
+        return cache[key]
+
+    df = network.get_extensions(extension_name)
+    if df is None:
+        df = pd.DataFrame()
+
+    # Only cache non-empty results: an absent extension can become present after
+    # create_extension, and in AppTest the session-state invalidation from
+    # invalidate_on_topology_change may not reach at.session_state when called
+    # outside at.run(). Re-fetching on every call costs 2 RT but is correct.
+    if not df.empty:
+        cache[key] = df
+    return df
 
 
 def get_reactive_curve_points(network) -> pd.DataFrame:
@@ -176,6 +239,8 @@ _TOPOLOGY_CACHE_KEYS = (
     "_bbt_cache",
     "_sa_id_cache",
     "_sa_manual_df_cache",
+    "_de_component_cache",
+    "_ext_df_cache",
 )
 
 # Caches additionally tied to geographic layout (lat/lon extensions).

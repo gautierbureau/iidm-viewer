@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 
+from iidm_viewer.caches import get_extension_df
 from iidm_viewer.data_explorer import _column_config, _compute_changes
 from iidm_viewer.powsybl_worker import run
 from iidm_viewer.state import EDITABLE_EXTENSIONS, remove_extension, update_extension
@@ -156,9 +157,9 @@ def render_extensions_explorer(network):
 
     with st.spinner(f"Loading {extension} extensions..."):
         try:
-            df = network.get_extensions(extension)
+            df = get_extension_df(network, extension)
 
-            if df is None or df.empty:
+            if df.empty:
                 st.info(f"No {extension!r} extensions found in this network.")
                 return
 
