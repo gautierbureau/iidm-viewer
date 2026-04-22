@@ -123,11 +123,8 @@ def _render_bus_legend(network, selected_vl: str, svg: str = "") -> None:
     pypowsybl's SLG output exactly; buses the SVG doesn't tag fall back
     to :data:`_BUS_LEGEND_PALETTE` (ordered by bus index in the VL).
     """
-    try:
-        buses = network.get_buses(all_attributes=True).reset_index()
-    except Exception:
-        return
-    if buses.empty:
+    buses = _get_buses_all(network)
+    if buses is None or buses.empty:
         return
 
     buses["voltage_level_id"] = buses["voltage_level_id"].astype(str)
@@ -263,6 +260,25 @@ def _get_busbar_sections(network):
     return bbs
 
 
+def _get_buses_all(network):
+    """Cache ``get_buses(all_attributes=True)`` per network.
+
+    Bus voltages change after a load flow run; ``_buses_all`` is popped from
+    session state in ``run_loadflow`` / ``load_network`` / ``create_empty_network``
+    to force a refresh.  Returns ``None`` on failure.
+    """
+    key = _net_key(network)
+    if st.session_state.get("_buses_all_net") == key and "_buses_all" in st.session_state:
+        return st.session_state["_buses_all"]
+    try:
+        buses = network.get_buses(all_attributes=True).reset_index()
+    except Exception:
+        buses = None
+    st.session_state["_buses_all"] = buses
+    st.session_state["_buses_all_net"] = key
+    return buses
+
+
 def render_sld_tab(network, selected_vl):
     from pypowsybl.network import SldParameters
     if not selected_vl:
@@ -298,18 +314,24 @@ def render_sld_tab(network, selected_vl):
                 st.session_state["sld_show_substation"] = True
                 st.rerun()
 
-    with st.spinner("Generating Single Line Diagram..."):
-        try:
-            sld_params = SldParameters(use_name=True, tooltip_enabled=True)
-            sld = network.get_single_line_diagram(
-                container_id,
-                parameters=sld_params,
-            )
-            svg = sld.svg
-            metadata = sld.metadata
-        except Exception as e:
-            st.error(f"Error generating SLD: {e}")
-            return
+    sld_cache = st.session_state.setdefault("_sld_cache", {})
+    cached_sld = sld_cache.get(container_id)
+    if cached_sld is not None:
+        svg, metadata = cached_sld
+    else:
+        with st.spinner("Generating Single Line Diagram..."):
+            try:
+                sld_params = SldParameters(use_name=True, tooltip_enabled=True)
+                sld = network.get_single_line_diagram(
+                    container_id,
+                    parameters=sld_params,
+                )
+                svg = sld.svg
+                metadata = sld.metadata
+            except Exception as e:
+                st.error(f"Error generating SLD: {e}")
+                return
+        sld_cache[container_id] = (svg, metadata)
 
     click = render_interactive_sld(
         svg=svg,
