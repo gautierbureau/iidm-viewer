@@ -109,6 +109,7 @@ def load_network(uploaded_file):
     st.session_state.pop("_substation_positions_cache", None)
     st.session_state.pop("_voltage_map_cache", None)
     st.session_state.pop("_injection_map_cache", None)
+    st.session_state.pop("_nad_cache", None)
     st.session_state.pop("_export_bytes", None)
     st.session_state.pop("_export_fmt", None)
     st.session_state.pop("_export_ext", None)
@@ -143,6 +144,7 @@ def create_empty_network(network_id: str = "network"):
     st.session_state.pop("_substation_positions_cache", None)
     st.session_state.pop("_voltage_map_cache", None)
     st.session_state.pop("_injection_map_cache", None)
+    st.session_state.pop("_nad_cache", None)
     st.session_state.pop("_last_file", None)
     st.session_state.pop("_last_file_id", None)
     st.session_state.pop("_export_bytes", None)
@@ -179,6 +181,7 @@ def run_loadflow(network):
     st.session_state["_lf_report_json"] = report_json
     # Invalidate cached lookups so tabs reload fresh data
     st.session_state.pop("_vl_lookup_cache", None)
+    st.session_state.pop("_nad_cache", None)
     return results
 
 

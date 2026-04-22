@@ -178,19 +178,26 @@ def render_nad_tab(network, selected_vl):
         st.info("Select a voltage level in the sidebar to display the Network Area Diagram.")
         return
 
-    with st.spinner("Generating Network Area Diagram..."):
-        try:
-            nad_params = NadParameters(edge_name_displayed=True, power_value_precision=1)
-            nad = network.get_network_area_diagram(
-                voltage_level_ids=[selected_vl],
-                depth=depth,
-                nad_parameters=nad_params,
-            )
-            svg = nad.svg
-            metadata = nad.metadata
-        except Exception as e:
-            st.error(f"Error generating NAD: {e}")
-            return
+    cache_key = (selected_vl, depth)
+    nad_cache = st.session_state.setdefault("_nad_cache", {})
+    cached = nad_cache.get(cache_key)
+    if cached is not None:
+        svg, metadata = cached
+    else:
+        with st.spinner("Generating Network Area Diagram..."):
+            try:
+                nad_params = NadParameters(edge_name_displayed=True, power_value_precision=1)
+                nad = network.get_network_area_diagram(
+                    voltage_level_ids=[selected_vl],
+                    depth=depth,
+                    nad_parameters=nad_params,
+                )
+                svg = nad.svg
+                metadata = nad.metadata
+            except Exception as e:
+                st.error(f"Error generating NAD: {e}")
+                return
+        nad_cache[cache_key] = (svg, metadata)
 
     click = render_interactive_nad(
         svg=svg,
