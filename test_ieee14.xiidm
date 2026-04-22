@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<iidm:network xmlns:iidm="http://www.powsybl.org/schema/iidm/1_15" xmlns:sp="http://www.powsybl.org/schema/iidm/ext/substation_position/1_0" xmlns:slt="http://www.powsybl.org/schema/iidm/ext/slack_terminal/1_5" xmlns:gsc="http://www.itesla_project.eu/schema/iidm/ext/generator_short_circuit/1_0" id="ieee14cdf" caseDate="1993-08-19T00:00:00.000Z" forecastDistance="0" sourceFormat="IEEE-CDF" minimumValidationLevel="STEADY_STATE_HYPOTHESIS">
+<iidm:network xmlns:iidm="http://www.powsybl.org/schema/iidm/1_15" xmlns:sp="http://www.powsybl.org/schema/iidm/ext/substation_position/1_0" xmlns:slt="http://www.powsybl.org/schema/iidm/ext/slack_terminal/1_5" xmlns:gsc="http://www.itesla_project.eu/schema/iidm/ext/generator_short_circuit/1_0" xmlns:lp="http://www.powsybl.org/schema/iidm/ext/line_position/1_0" id="ieee14cdf" caseDate="1993-08-19T00:00:00.000Z" forecastDistance="0" sourceFormat="IEEE-CDF" minimumValidationLevel="STEADY_STATE_HYPOTHESIS">
+
     <iidm:substation id="S1" country="FR">
         <iidm:voltageLevel id="VL1" nominalV="135.0" topologyKind="BUS_BREAKER">
             <iidm:busBreakerTopology>
@@ -357,5 +358,14 @@
         <sp:substationPosition>
             <sp:coordinate longitude="-0.58" latitude="44.84"/>
         </sp:substationPosition>
+    </iidm:extension>
+    <iidm:extension id="L1-2-1">
+        <lp:linePosition>
+            <lp:coordinate longitude="2.35" latitude="48.86"/>
+            <lp:coordinate longitude="4.80" latitude="49.30"/>
+            <lp:coordinate longitude="7.45" latitude="48.10"/>
+            <lp:coordinate longitude="7.60" latitude="46.20"/>
+            <lp:coordinate longitude="4.83" latitude="45.76"/>
+        </lp:linePosition>
     </iidm:extension>
 </iidm:network>
