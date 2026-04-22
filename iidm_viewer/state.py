@@ -10,6 +10,7 @@ def init_state():
         "selected_vl": None,
         "nad_depth": 1,
         "component_type": "Voltage Levels",
+        "vl_selector_gen": 0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -100,8 +101,7 @@ def load_network(uploaded_file):
     network = NetworkProxy(run(_load))
     st.session_state.network = network
     st.session_state.selected_vl = None
-    st.session_state.pop("vl_selectbox", None)
-    st.session_state["vl_filter_text"] = ""
+    st.session_state["vl_selector_gen"] = st.session_state.get("vl_selector_gen", 0) + 1
     st.session_state.pop("_lf_report_json", None)
     st.session_state.pop("_map_data_cache", None)
     st.session_state.pop("_vl_lookup_cache", None)
@@ -131,8 +131,7 @@ def create_empty_network(network_id: str = "network"):
     network = NetworkProxy(run(_create))
     st.session_state.network = network
     st.session_state.selected_vl = None
-    st.session_state.pop("vl_selectbox", None)
-    st.session_state["vl_filter_text"] = ""
+    st.session_state["vl_selector_gen"] = st.session_state.get("vl_selector_gen", 0) + 1
     st.session_state.pop("_lf_report_json", None)
     st.session_state.pop("_map_data_cache", None)
     st.session_state.pop("_vl_lookup_cache", None)
