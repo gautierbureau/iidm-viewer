@@ -30,21 +30,20 @@ are noted separately.
 | Overview                 | **0** | 12 – 20 | `_overview_cache` keyed by `(net_key, lf_gen)` |
 | Network Map              | **0** | 1 closure | `_map_data_cache` + `_map_data_version` wire-payload skip |
 | Network Area Diagram     | **0** | 4 | `_nad_cache` keyed by `(vl, depth)` |
-| Single Line Diagram      | **0 – 3** | 4 + 2 | `_sld_cache`, `_buses_all`, `_bbs_cache`, `_sub_map_cache` |
+| Single Line Diagram      | **0** | 4 + 2 | `_sld_cache`, `_buses_all`, `_bbs_cache`, `_bbt_cache`, `_sub_map_cache` |
 | Data Explorer Components | **2** | — | `getattr(network, method)(all_attributes=True, …)` uncached |
 | Data Explorer Extensions | **2** | — | `network.get_extensions(name)` uncached |
 | Reactive Capability Curves | **0** | 4 | `caches.get_reactive_curve_points` (topology-keyed) + `caches.get_generators_all` (lf_gen-keyed) |
 | Operational Limits       | **0** | 6 | shared `caches.get_lines_all` / `get_2wt_all` / `get_operational_limits_df` |
 | Pmax Visualization       | **0** | 0 | `caches.get_lines_all` + `caches.get_buses_all` (both already warm from other tabs) |
-| Voltage Analysis         | **8** | — | 4 separate uncached `get_*` |
+| Voltage Analysis         | **0** | 8 | `caches.get_buses_all` / `get_shunts_all` / `get_svc_all` / `get_vl_nominal_v` |
 | Injection Map            | **0** | 1 closure | `_injection_map_cache` |
 | Security Analysis        | **2 – 8** | 1 closure | `_sa_id_cache` hit, but `_get_nominal_voltages` + each filterable DF uncached |
-| Short Circuit Analysis   | **2** | — | `_get_nominal_voltages` uncached |
+| Short Circuit Analysis   | **0** | 2 | `caches.get_vl_nominal_v` (topology-keyed, shared with Voltage Analysis) |
 
-**Aggregate per rerun ≈ 18 – 25 RT** (IEEE 14 fixture, no LF logs
-expander open) — down from ~50 – 65 before per-tab caching. Most of the remaining cost is spent on tab bodies
-the user isn't even looking at, because Streamlit runs every
-`with tab_xxx:` block on every rerun.
+**Aggregate per rerun ≈ 4 – 10 RT** (IEEE 14 fixture, no LF logs
+expander open) — down from ~50 – 65 before per-tab caching. Remaining cost is
+the two uncached Data Explorer paths and Security Analysis filterable DFs.
 
 First-visit adds ~12 RT across SLD, NAD, and the one-shot injection /
 map closures.
@@ -107,21 +106,18 @@ bumps `_lf_gen` so flow/loss columns recompute on the next visit.
 
 ### Voltage Analysis — `iidm_viewer/voltage_analysis.py::render_voltage_analysis`
 
-| Call | RT |
-|---|---:|
-| `_vl_nominal_v` → `get_voltage_levels(attributes=["nominal_v"])` | 2 |
-| `_bus_voltages` → `get_buses(all_attributes=True)` | 2 |
-| `_shunt_compensation` → `get_shunt_compensators(all_attributes=True)` | 2 |
-| `_svc_compensation` → `get_static_var_compensators(all_attributes=True)` | 2 |
+| Call | RT (before) | RT (after) |
+|---|---:|---:|
+| `_vl_nominal_v` → `get_voltage_levels(attributes=["nominal_v"])` | 2 | 0 |
+| `_bus_voltages` → `get_buses(all_attributes=True)` | 2 | 0 |
+| `_shunt_compensation` → `get_shunt_compensators(all_attributes=True)` | 2 | 0 |
+| `_svc_compensation` → `get_static_var_compensators(all_attributes=True)` | 2 | 0 |
 
-**Action**: reuse `_get_buses_all` (already cached in
-`diagrams.py` — move it to a shared `caches.py`). Add per-network
-caches for `shunt_compensators` and `static_var_compensators` (LF
-invalidates via `_lf_gen`). `_vl_nominal_v` is static per network —
-can piggyback on `get_voltage_levels_df` by adding a `nominal_v`
-column, or cache separately.
+All four are now routed through `caches.py` helpers:
+`get_vl_nominal_v` (topology-keyed), `get_buses_all` / `get_shunts_all` /
+`get_svc_all` (all keyed by `(net_key, lf_gen)`).
 
-Estimated saving: **8 → 0 RT**.
+**Result: 8 → 0 RT**.
 
 ### Pmax Visualization — `iidm_viewer/pmax_visualization.py::_compute_pmax_data`
 
@@ -175,15 +171,14 @@ Estimated saving: **2 → 0 RT** on re-view of the same extension.
 
 ### Short Circuit Analysis — `iidm_viewer/short_circuit_analysis.py::_get_nominal_voltages`
 
-| Call | RT |
-|---|---:|
-| `get_voltage_levels(attributes=["nominal_v"])` | 2 |
+| Call | RT (before) | RT (after) |
+|---|---:|---:|
+| `get_voltage_levels(attributes=["nominal_v"])` | 2 | 0 |
 
-**Action**: reuse the shared nominal-v list (see Voltage Analysis). Move
-to `state.get_voltage_levels_df` — it already has `nominal_v` in its
-columns.
+`_get_nominal_voltages` now calls `caches.get_vl_nominal_v(network)` which
+caches the DataFrame per `net_key` and is shared with Voltage Analysis.
 
-Estimated saving: **2 → 0 RT**.
+**Result: 2 → 0 RT**.
 
 ### Security Analysis — `iidm_viewer/security_analysis.py`
 
@@ -204,17 +199,18 @@ Estimated saving: **2-8 → 0 RT**.
 ### SLD — `iidm_viewer/diagrams.py::render_sld_tab` (bus-breaker fallback)
 
 On bus-breaker networks `_get_busbar_sections` returns `None`, so
-every SLD navigation hits the fallback path in `_resolve_bus_colors`:
+every SLD navigation hit the fallback path in `_resolve_bus_colors`:
 
-| Call | RT |
-|---|---:|
-| `network.get_bus_breaker_topology(selected_vl)` | 2 |
-| `tp.buses` (attribute on wrapped object) | 1 |
+| Call | RT (before) | RT (after) |
+|---|---:|---:|
+| `network.get_bus_breaker_topology(selected_vl)` | 2 | 0 |
+| `tp.buses` (attribute on wrapped object) | 1 | 0 |
 
-**Action**: cache `get_bus_breaker_topology` per `(net_key, vl)` inside
-`_resolve_bus_colors`. The topology is static for the network.
+`_get_bbt_buses(network, vl_id)` caches the ``tp.buses`` DataFrame per
+`(net_key, vl)` in ``"_bbt_cache"`` (a dict in session state). Listed in
+``_TOPOLOGY_CACHE_KEYS`` so it is cleared on every topology edit.
 
-Estimated saving: **3 → 0 RT** on bus-breaker networks after first VL visit.
+**Result: 3 → 0 RT** on bus-breaker networks after first VL visit.
 
 ## Cross-cutting patterns
 
