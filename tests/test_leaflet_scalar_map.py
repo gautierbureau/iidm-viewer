@@ -1,8 +1,14 @@
 """Tests for iidm_viewer.leaflet_scalar_map."""
 import json
+from unittest.mock import patch
+
+import streamlit as st
 
 from iidm_viewer.leaflet_scalar_map import (
     DivergingColorScale,
+    _SUBSTATION_POSITIONS_CACHE_KEY,
+    _extract_substation_positions,
+    clear_substation_positions_cache,
     default_legend_stops,
     get_substation_positions,
 )
@@ -86,3 +92,49 @@ def test_get_substation_positions_is_json_serializable(xiidm_upload):
     # dict[str, tuple] — tuples become lists, still serialisable
     as_pairs = {k: list(v) for k, v in positions.items()}
     json.dumps(as_pairs)
+
+
+# ── caching ──────────────────────────────────────────────────────────────────
+
+def test_get_substation_positions_caches_result(xiidm_upload):
+    """Two consecutive calls hit the worker only once."""
+    network = load_network(xiidm_upload)  # load_network pops the cache
+    with patch(
+        "iidm_viewer.leaflet_scalar_map._extract_substation_positions",
+        wraps=_extract_substation_positions,
+    ) as spy:
+        first = get_substation_positions(network)
+        second = get_substation_positions(network)
+    assert first == second
+    assert spy.call_count == 1
+
+
+def test_get_substation_positions_populates_session_state(xiidm_upload):
+    network = load_network(xiidm_upload)
+    assert _SUBSTATION_POSITIONS_CACHE_KEY not in st.session_state
+    positions = get_substation_positions(network)
+    assert st.session_state[_SUBSTATION_POSITIONS_CACHE_KEY] is positions
+
+
+def test_clear_substation_positions_cache_forces_reextraction(xiidm_upload):
+    network = load_network(xiidm_upload)
+    get_substation_positions(network)
+    assert _SUBSTATION_POSITIONS_CACHE_KEY in st.session_state
+    clear_substation_positions_cache()
+    assert _SUBSTATION_POSITIONS_CACHE_KEY not in st.session_state
+    with patch(
+        "iidm_viewer.leaflet_scalar_map._extract_substation_positions",
+        wraps=_extract_substation_positions,
+    ) as spy:
+        get_substation_positions(network)
+    assert spy.call_count == 1
+
+
+def test_load_network_invalidates_substation_positions_cache(xiidm_upload):
+    network = load_network(xiidm_upload)
+    get_substation_positions(network)
+    assert _SUBSTATION_POSITIONS_CACHE_KEY in st.session_state
+    # Loading the same bytes again creates a fresh NetworkProxy + raw object;
+    # state.load_network should drop the cached positions.
+    load_network(xiidm_upload)
+    assert _SUBSTATION_POSITIONS_CACHE_KEY not in st.session_state

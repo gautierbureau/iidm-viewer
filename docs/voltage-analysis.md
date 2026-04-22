@@ -287,10 +287,83 @@ in-range coordinates. Returns `{}` when the extension is missing or
 empty — callers typically do `if not positions: return` and surface a
 friendly info message.
 
-Both `voltage_map._extract_voltage_map_data` and
-`injection_map._extract_injection_data` call it; they do their own
-per-VL / per-substation aggregation on top and route everything
-through `run()`.
+Result is **memoised in
+`st.session_state["_substation_positions_cache"]`** so multiple calls
+within the same session reuse a single extraction. Cache is dropped
+on `state.load_network` / `state.create_empty_network`; a public
+`clear_substation_positions_cache()` is exported for explicit
+invalidation (e.g. after editing the `substationPosition` extension
+in the Data Explorer).
+
+Today's consumers:
+
+- `injection_map._extract_injection_data` → goes through the cached
+  helper.
+- `voltage_map._extract_voltage_map_data` → still does its **own**
+  inline `get_extensions("substationPosition")` lookup (legacy from
+  before the refactor).
+- `network_map._extract_map_data` → also does its own inline lookup
+  (carries extra `entsoe_country` / `tso` columns the helper doesn't
+  return today).
+- `extensions_explorer` → calls `network.get_extensions(extension)`
+  directly when the user picks `substationPosition` from the
+  selectbox. Not cached.
+
+The next step (option 2 below) is to route the remaining consumers
+through this helper so the extraction happens once per session.
+
+## Future refactor — single shared substation-position cache (option 2)
+
+Today the same `substationPosition` extension is extracted up to four
+times per session (Network Map, Voltage Map, Injection Map, Data
+Explorer Extensions). Option 1 — memoising `get_substation_positions`
+— means a *given consumer* hits the worker once, but consumers that
+inline their own merge (`network_map`, `voltage_map`) still do their
+own extraction. Option 2 collapses all of them onto the cached
+helper.
+
+### Plan
+
+1. **Extend `get_substation_positions` to return the optional extra
+   columns the consumers need.** Today it returns
+   `{sub_id: (lat, lon)}`. `network_map` additionally reads
+   `entsoe_country` and `tso` from `get_substations()`, and uses
+   `country` / `name`. Either:
+   - widen the helper return type to a small dataclass / dict
+     `{sub_id: SubstationGeo(lat, lon, country, tso, name)}`; or
+   - keep `get_substation_positions` lean (just lat/lon) and add a
+     companion `get_substations_geo(network)` that returns the wider
+     row shape, both backed by the same session-state cache.
+   The companion-helper option is less disruptive for existing
+   single-need callers.
+2. **Rewrite `voltage_map._extract_voltage_map_data` to call the
+   helper** for the position lookup, keeping its own per-VL bus
+   aggregation. The function then becomes "join cached positions ⊕
+   per-VL bus stats" instead of re-reading the extension.
+3. **Rewrite `network_map._extract_map_data` similarly** — call the
+   companion helper for the substation rows, then do its own line and
+   VL aggregation on top.
+4. **Switch the Data Explorer Extensions tab to the cached helper
+   when the user selects `substationPosition`.** Today it calls
+   `network.get_extensions("substationPosition")` directly; have it
+   reuse the cached dict and rebuild a DataFrame for display.
+5. **Invalidation hook.** When the Data Explorer "Apply changes" path
+   touches substations or the `substationPosition` extension, call
+   `clear_substation_positions_cache()` (already exported). This is
+   the only new invalidation the refactor needs — the existing
+   `load_network` / `create_empty_network` pop is already in place.
+
+### Cost / value
+
+- **Net win:** the extension lookup runs once per session-load
+  instead of once per tab open. On a network with a few hundred
+  substations the lookup is milliseconds, so the user-visible win is
+  small. The refactor mostly pays for itself in deduplicated code
+  (three near-identical merges collapse to one).
+- **Risk:** widening the helper's return shape touches three files
+  and the Data Explorer tab. Worth doing the next time any of these
+  three modules needs another change near the substation lookup, but
+  not as a standalone refactor.
 
 ## How to add a new scalar-on-substation map
 
