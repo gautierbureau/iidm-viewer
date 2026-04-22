@@ -4,14 +4,14 @@ import numpy as np
 import plotly.graph_objects as go
 
 from iidm_viewer.caches import (
+    _cache_key,
     get_2wt_all,
+    get_enriched_component,
     get_lines_all,
     get_operational_limits_df,
 )
 from iidm_viewer.filters import (
     FILTERS,
-    build_vl_lookup,
-    enrich_with_joins,
     render_filters,
 )
 
@@ -130,8 +130,14 @@ def _compute_loading(network, limits_reset: pd.DataFrame) -> pd.DataFrame:
 
     Returns a DataFrame sorted by descending loading with columns:
     element_id, element_type, side, permanent_limit, current, loading_pct,
-    losses.
+    losses.  Result is cached per ``(net_key, lf_gen)``; limits_reset is
+    deterministic from the cached operational-limits DF so the key is sufficient.
     """
+    key = _cache_key(network)
+    cached = st.session_state.get("_loading_cache")
+    if cached is not None and cached.get("key") == key:
+        return cached["df"]
+
     # Permanent limits only, no sentinel
     perm = limits_reset[
         (limits_reset["acceptable_duration"] == -1)
@@ -151,6 +157,7 @@ def _compute_loading(network, limits_reset: pd.DataFrame) -> pd.DataFrame:
             rows.append({"element_id": idx, "side": "TWO", "current": r["i2"], "element_name": name})
 
     if not rows:
+        st.session_state["_loading_cache"] = {"key": key, "df": pd.DataFrame()}
         return pd.DataFrame()
 
     currents = pd.DataFrame(rows)
@@ -158,6 +165,7 @@ def _compute_loading(network, limits_reset: pd.DataFrame) -> pd.DataFrame:
     merged = merged.dropna(subset=["current"])
     merged = merged[merged["current"] > 0]
     if merged.empty:
+        st.session_state["_loading_cache"] = {"key": key, "df": pd.DataFrame()}
         return pd.DataFrame()
     merged["loading_pct"] = (merged["current"] / merged["permanent_limit"]) * 100
 
@@ -168,25 +176,22 @@ def _compute_loading(network, limits_reset: pd.DataFrame) -> pd.DataFrame:
     # Attach per-element losses (p1 + p2)
     losses = _get_branch_losses(network)
     worst["losses"] = worst["element_id"].map(losses)
-    return worst.reset_index(drop=True)
+    result = worst.reset_index(drop=True)
+    st.session_state["_loading_cache"] = {"key": key, "df": result}
+    return result
 
 
 def _get_filtered_element_ids(network, selected_vl) -> set[str]:
     """Load lines + transformers, apply filters, return surviving element IDs."""
-    vl_lookup = build_vl_lookup(network)
     all_ids: set[str] = set()
 
-    for component, getter in [
-        ("Lines", get_lines_all),
-        ("2-Winding Transformers", get_2wt_all),
+    for component, method_name in [
+        ("Lines", "get_lines"),
+        ("2-Winding Transformers", "get_2_windings_transformers"),
     ]:
-        try:
-            df = getter(network)
-        except Exception:
-            continue
+        df = get_enriched_component(network, method_name)
         if df.empty:
             continue
-        df = enrich_with_joins(df, vl_lookup)
 
         # VL filter — show all by default, check to restrict to selected VL
         if selected_vl:

@@ -1,27 +1,14 @@
 import streamlit as st
 import pandas as pd
 
-from iidm_viewer.caches import get_buses_all, get_shunts_all, get_svc_all, get_vl_nominal_v
+from iidm_viewer.caches import (
+    _cache_key,
+    get_bus_voltages,
+    get_shunts_all,
+    get_svc_all,
+    get_vl_nominal_v,
+)
 from iidm_viewer.voltage_map import render_voltage_map
-
-
-def _bus_voltages(network) -> pd.DataFrame:
-    """Return buses enriched with nominal_v and v_pu.
-
-    Columns: bus_id, voltage_level_id, nominal_v, v_mag, v_pu.
-    v_mag / v_pu are NaN when no load flow has run.
-    """
-    buses = get_buses_all(network)
-    if buses.empty:
-        return pd.DataFrame(columns=["bus_id", "voltage_level_id", "nominal_v", "v_mag", "v_pu"])
-
-    buses = buses.reset_index()
-    buses["voltage_level_id"] = buses["voltage_level_id"].astype(str)
-    lookup = get_vl_nominal_v(network)
-    merged = buses.merge(lookup, on="voltage_level_id", how="left")
-    merged = merged.rename(columns={"id": "bus_id"})
-    merged["v_pu"] = merged["v_mag"] / merged["nominal_v"]
-    return merged[["bus_id", "voltage_level_id", "nominal_v", "v_mag", "v_pu"]]
 
 
 def _shunt_compensation(network) -> pd.DataFrame:
@@ -35,11 +22,18 @@ def _shunt_compensation(network) -> pd.DataFrame:
     b_per_section    — susceptance per section; sign determines capacitive vs inductive
                        (NaN when section_count == 0 and pypowsybl does not expose it)
     """
+    key = _cache_key(network)
+    cached = st.session_state.get("_shunts_enriched_cache")
+    if cached is not None and cached.get("key") == key:
+        return cached["df"]
+
     shunts = get_shunts_all(network)
     if shunts.empty:
+        st.session_state["_shunts_enriched_cache"] = {"key": key, "df": pd.DataFrame()}
         return pd.DataFrame()
     shunts = shunts.reset_index()
     if shunts.empty:
+        st.session_state["_shunts_enriched_cache"] = {"key": key, "df": shunts}
         return shunts
 
     shunts["voltage_level_id"] = shunts["voltage_level_id"].astype(str)
@@ -72,11 +66,13 @@ def _shunt_compensation(network) -> pd.DataFrame:
     df["available_q_mvar"] = -bps * remaining * v2
     df["b_per_section"] = bps
 
-    return df[[
+    result = df[[
         "id", "voltage_level_id", "connected", "section_count",
         "max_section_count", "nominal_v", "q",
         "current_q_mvar", "available_q_mvar", "total_q_mvar", "b_per_section",
     ]]
+    st.session_state["_shunts_enriched_cache"] = {"key": key, "df": result}
+    return result
 
 
 def _svc_compensation(network) -> pd.DataFrame:
@@ -86,8 +82,14 @@ def _svc_compensation(network) -> pd.DataFrame:
     q_min_mvar      — b_min × nominal_v²
     q_max_mvar      — b_max × nominal_v²
     """
+    key = _cache_key(network)
+    cached = st.session_state.get("_svcs_enriched_cache")
+    if cached is not None and cached.get("key") == key:
+        return cached["df"]
+
     svcs = get_svc_all(network)
     if svcs.empty:
+        st.session_state["_svcs_enriched_cache"] = {"key": key, "df": pd.DataFrame()}
         return pd.DataFrame()
     svcs = svcs.reset_index()
 
@@ -106,10 +108,12 @@ def _svc_compensation(network) -> pd.DataFrame:
     df["q_min_mvar"] = df["b_min"] * v2
     df["q_max_mvar"] = df["b_max"] * v2
 
-    return df[[
+    result = df[[
         "id", "voltage_level_id", "connected", "regulation_mode", "nominal_v",
         "current_q_mvar", "q_min_mvar", "q_max_mvar",
     ]]
+    st.session_state["_svcs_enriched_cache"] = {"key": key, "df": result}
+    return result
 
 
 def _render_voltage_section(buses: pd.DataFrame):
@@ -266,7 +270,7 @@ def _render_svc_section(svcs: pd.DataFrame):
 
 
 def render_voltage_analysis(network):
-    buses = _bus_voltages(network)
+    buses = get_bus_voltages(network)
     if buses.empty:
         st.info("No bus data available in this network.")
         return

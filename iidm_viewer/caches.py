@@ -214,6 +214,131 @@ def get_operational_limits_df(network):
     return df
 
 
+def get_vl_lookup(network) -> pd.DataFrame:
+    """VL id → (substation_id, nominal_v, country) lookup, cached by ``net_key``.
+
+    Fetches voltage-levels and substations (2 RT) and merges them.  Cached by
+    topology (not load-flow) since nominal voltages and country assignments
+    don't change after a load flow.
+    Columns: ``id`` (VL id), ``substation_id``, ``nominal_v``, ``country``.
+    """
+    key = _net_key(network)
+    cached = st.session_state.get("_vl_lookup_cache")
+    if cached is not None and cached.get("key") == key:
+        return cached["df"]
+    try:
+        vls = network.get_voltage_levels(
+            attributes=["substation_id", "nominal_v"]
+        ).reset_index()
+        subs = (
+            network.get_substations(attributes=["country"])
+            .reset_index()
+            .rename(columns={"id": "substation_id"})
+        )
+        vls["id"] = vls["id"].astype(str)
+        vls["substation_id"] = vls["substation_id"].astype(str)
+        subs["substation_id"] = subs["substation_id"].astype(str)
+        df = vls.merge(subs, on="substation_id", how="left")
+    except Exception:
+        df = pd.DataFrame(columns=["id", "substation_id", "nominal_v", "country"])
+    st.session_state["_vl_lookup_cache"] = {"key": key, "df": df}
+    return df
+
+
+def enrich_with_joins(df: pd.DataFrame, vl_lookup: pd.DataFrame) -> pd.DataFrame:
+    """Left-join VL/substation-derived columns (``nominal_v``, ``country``) onto ``df``.
+
+    Inspects ``df`` for ``substation_id``, ``voltage_level_id``, and
+    ``voltage_level{1,2}_id`` columns and adds the corresponding lookup
+    columns when they are missing.  Returns a new DataFrame; the index is
+    preserved when possible.
+    """
+    idx_name = df.index.name
+    out = df.reset_index()
+
+    if "substation_id" in out.columns and "country" not in out.columns:
+        out = out.merge(
+            vl_lookup[["substation_id", "country"]].drop_duplicates("substation_id"),
+            on="substation_id",
+            how="left",
+        )
+
+    if "voltage_level_id" in out.columns:
+        missing = [c for c in ("nominal_v", "country") if c not in out.columns]
+        if missing:
+            lookup = vl_lookup.rename(columns={"id": "voltage_level_id"})[
+                ["voltage_level_id", *missing]
+            ].copy()
+            lookup["voltage_level_id"] = lookup["voltage_level_id"].astype(str)
+            out["voltage_level_id"] = out["voltage_level_id"].astype(str)
+            out = out.merge(lookup, on="voltage_level_id", how="left")
+
+    for side in ("1", "2"):
+        col = f"voltage_level{side}_id"
+        if col in out.columns:
+            lookup = vl_lookup.rename(
+                columns={
+                    "id": col,
+                    "nominal_v": f"nominal_v{side}",
+                    "country": f"country{side}",
+                }
+            )[[col, f"nominal_v{side}", f"country{side}"]].copy()
+            lookup[col] = lookup[col].astype(str)
+            out[col] = out[col].astype(str)
+            out = out.merge(lookup, on=col, how="left")
+
+    if idx_name and idx_name in out.columns:
+        out = out.set_index(idx_name)
+    return out
+
+
+def get_enriched_component(network, method_name: str) -> pd.DataFrame:
+    """Component DF enriched with VL-derived columns, cached per ``(net_key, lf_gen)``.
+
+    Delegates to :func:`get_component_df` then applies :func:`enrich_with_joins`
+    so callers never re-run the merge on repeated reruns.  The enriched
+    **full** DataFrame is cached; callers should apply their own VL or ID
+    filters on the result rather than before calling this function.
+    Returns an empty DataFrame when the component type is absent or fails.
+    """
+    cache = st.session_state.setdefault("_enriched_component_cache", {})
+    key = _cache_key(network) + (method_name,)
+    if key in cache:
+        return cache[key]
+    df = get_component_df(network, method_name)
+    if not df.empty:
+        df = enrich_with_joins(df, get_vl_lookup(network))
+    cache[key] = df
+    return df
+
+
+def get_bus_voltages(network) -> pd.DataFrame:
+    """Buses merged with ``nominal_v`` and ``v_pu``, cached per ``(net_key, lf_gen)``.
+
+    Columns: ``bus_id``, ``voltage_level_id``, ``nominal_v``, ``v_mag``, ``v_pu``.
+    ``v_mag`` / ``v_pu`` are NaN when no load flow has run.
+    """
+    key = _cache_key(network)
+    cached = st.session_state.get("_bus_voltages_cache")
+    if cached is not None and cached.get("key") == key:
+        return cached["df"]
+    buses = get_buses_all(network)
+    if buses.empty:
+        df = pd.DataFrame(
+            columns=["bus_id", "voltage_level_id", "nominal_v", "v_mag", "v_pu"]
+        )
+    else:
+        buses = buses.reset_index()
+        buses["voltage_level_id"] = buses["voltage_level_id"].astype(str)
+        lookup = get_vl_nominal_v(network)
+        merged = buses.merge(lookup, on="voltage_level_id", how="left")
+        merged = merged.rename(columns={"id": "bus_id"})
+        merged["v_pu"] = merged["v_mag"] / merged["nominal_v"]
+        df = merged[["bus_id", "voltage_level_id", "nominal_v", "v_mag", "v_pu"]]
+    st.session_state["_bus_voltages_cache"] = {"key": key, "df": df}
+    return df
+
+
 # --- Invalidation ---
 #
 # Three levels, called from ``state.py`` to keep every pypowsybl-facing
@@ -241,6 +366,7 @@ _TOPOLOGY_CACHE_KEYS = (
     "_sa_manual_df_cache",
     "_de_component_cache",
     "_ext_df_cache",
+    "_enriched_component_cache",  # dict keyed by (net_key, lf_gen, method_name)
 )
 
 # Caches additionally tied to geographic layout (lat/lon extensions).
@@ -258,7 +384,11 @@ _LOAD_FLOW_CACHE_KEYS = (
     "_svc_all_cache",
     "_generators_all_cache",
     "_3wt_all_cache",
-    "_prewarm_idx",     # restart background prewarming after a load flow
+    "_prewarm_idx",          # restart background prewarming after a load flow
+    "_bus_voltages_cache",   # buses + nominal_v + v_pu
+    "_shunts_enriched_cache",
+    "_svcs_enriched_cache",
+    "_loading_cache",        # operational limits loading %
 )
 
 # Caches holding pre-rendered map payloads or positions — only need to

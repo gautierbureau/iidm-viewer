@@ -1,8 +1,8 @@
 import pandas as pd
 import pytest
+from iidm_viewer.caches import get_bus_voltages as _bus_voltages
 from iidm_viewer.state import create_component_bay
 from iidm_viewer.voltage_analysis import (
-    _bus_voltages,
     _shunt_compensation,
     _svc_compensation,
 )
