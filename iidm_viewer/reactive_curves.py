@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
+from iidm_viewer.caches import get_generators_all, get_reactive_curve_points
 from iidm_viewer.filters import (
     FILTERS,
     build_vl_lookup,
@@ -11,13 +12,13 @@ from iidm_viewer.filters import (
 
 
 def render_reactive_curves(network, selected_vl):
-    curves_df = network.get_reactive_capability_curve_points()
+    curves_df = get_reactive_curve_points(network)
     curve_gen_ids = set(
         curves_df.index.get_level_values("id").unique()
     ) if not curves_df.empty else set()
 
     # Load all generators — those with curves and those with min/max limits
-    gens_df = network.get_generators(all_attributes=True)
+    gens_df = get_generators_all(network)
 
     # Keep generators that have either a curve or finite min/max reactive limits
     has_curve = gens_df.index.isin(curve_gen_ids)

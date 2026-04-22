@@ -33,17 +33,16 @@ are noted separately.
 | Single Line Diagram      | **0 – 3** | 4 + 2 | `_sld_cache`, `_buses_all`, `_bbs_cache`, `_sub_map_cache` |
 | Data Explorer Components | **2** | — | `getattr(network, method)(all_attributes=True, …)` uncached |
 | Data Explorer Extensions | **2** | — | `network.get_extensions(name)` uncached |
-| Reactive Capability Curves | **4** | — | `get_reactive_capability_curve_points` + `get_generators` |
+| Reactive Capability Curves | **0** | 4 | `caches.get_reactive_curve_points` (topology-keyed) + `caches.get_generators_all` (lf_gen-keyed) |
 | Operational Limits       | **0** | 6 | shared `caches.get_lines_all` / `get_2wt_all` / `get_operational_limits_df` |
-| Pmax Visualization       | **2 – 4** | — | `get_lines(all_attributes=True)` uncached (can share `caches.get_lines_all`) + `get_buses(all_attributes=True)` |
+| Pmax Visualization       | **0** | 0 | `caches.get_lines_all` + `caches.get_buses_all` (both already warm from other tabs) |
 | Voltage Analysis         | **8** | — | 4 separate uncached `get_*` |
 | Injection Map            | **0** | 1 closure | `_injection_map_cache` |
 | Security Analysis        | **2 – 8** | 1 closure | `_sa_id_cache` hit, but `_get_nominal_voltages` + each filterable DF uncached |
 | Short Circuit Analysis   | **2** | — | `_get_nominal_voltages` uncached |
 
-**Aggregate per rerun ≈ 26 – 37 RT** (IEEE 14 fixture, no LF logs
-expander open) — down from ~50 – 65 before Overview and Operational
-Limits were cached. Most of the remaining cost is spent on tab bodies
+**Aggregate per rerun ≈ 18 – 25 RT** (IEEE 14 fixture, no LF logs
+expander open) — down from ~50 – 65 before per-tab caching. Most of the remaining cost is spent on tab bodies
 the user isn't even looking at, because Streamlit runs every
 `with tab_xxx:` block on every rerun.
 
