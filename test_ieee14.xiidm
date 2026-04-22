@@ -67,6 +67,9 @@
             <iidm:shunt id="B9-SH" sectionCount="1" voltageRegulatorOn="false" bus="B9" connectableBus="B9">
                 <iidm:shuntLinearModel bPerSection="0.13194444444444445" maximumSectionCount="1"/>
             </iidm:shunt>
+            <iidm:shunt id="B9-SHL" sectionCount="1" voltageRegulatorOn="false" bus="B9" connectableBus="B9" q="-0.0">
+                <iidm:shuntLinearModel bPerSection="-0.13194444444444445" maximumSectionCount="1"/>
+            </iidm:shunt>
         </iidm:voltageLevel>
         <iidm:twoWindingsTransformer id="T4-7-1" r="0.0" x="0.4098752" g="0.0" b="0.0" ratedU1="132.03" ratedU2="14.0" voltageLevelId1="VL4" bus1="B4" connectableBus1="B4" voltageLevelId2="VL7" bus2="B7" connectableBus2="B7" selectedOperationalLimitsGroupId1="DEFAULT" selectedOperationalLimitsGroupId2="DEFAULT">
             <iidm:operationalLimitsGroup1 id="DEFAULT">
