@@ -215,17 +215,17 @@ def _net_key(network) -> int:
 def _get_substation_map(network) -> dict:
     """Return ``{vl_id: (substation_id, has_multi_vl)}`` for every VL.
 
-    Calls ``get_voltage_levels()`` exactly once per network load (2 worker
-    round-trips).  Every subsequent call — including all VL navigation
-    reruns — is a pure-Python dict lookup with zero round-trips.
+    Reuses the ``get_voltage_levels_df`` result that the VL selector already
+    fetches on every rerun — zero additional worker round-trips.
     """
     key = _net_key(network)
     if st.session_state.get("_sub_map_net") == key:
         return st.session_state["_sub_map_cache"]
+    mapping: dict = {}
     try:
-        vls = network.get_voltage_levels().reset_index()
+        from iidm_viewer.state import get_voltage_levels_df
+        vls = get_voltage_levels_df(network)
         sub_count = vls.groupby("substation_id")["id"].count().to_dict()
-        mapping: dict = {}
         for _, row in vls.iterrows():
             vl_id = str(row["id"])
             sid_raw = row.get("substation_id")

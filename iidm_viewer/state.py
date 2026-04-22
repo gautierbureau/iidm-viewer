@@ -1061,12 +1061,19 @@ def create_container(network, component: str, fields: dict):
 
 
 def get_voltage_levels_df(network):
+    cache = st.session_state.setdefault("_vl_lookup_cache", {})
+    net_id = id(network)
+    if cache.get("id") == net_id and "vl_df" in cache:
+        return cache["vl_df"]
     vls = network.get_voltage_levels(attributes=["name", "substation_id", "nominal_v"])
     vls = vls.reset_index()
     vls["display"] = vls.apply(
         lambda r: r["name"] if r["name"] else r["id"], axis=1
     )
-    return vls.sort_values("display")
+    df = vls.sort_values("display")
+    cache["id"] = net_id
+    cache["vl_df"] = df
+    return df
 
 
 def filter_voltage_levels(vls_df, text):
