@@ -2432,7 +2432,10 @@ def run_short_circuit_analysis(network, faults: list[dict], sc_params: dict | No
             analysis.set_bus_fault(f["id"], f["element_id"], 0.0, 0.0)
 
         params = sc.Parameters(
-            study_type=sc.ShortCircuitStudyType[sc_params.get("study_type", "SUB_TRANSIENT")],
+            study_type=sc.ShortCircuitStudyType.__members__.get(
+                sc_params.get("study_type", "SUB_TRANSIENT"),
+                sc.ShortCircuitStudyType.SUB_TRANSIENT,
+            ),
             with_feeder_result=sc_params.get("with_feeder_result", True),
             with_limit_violations=sc_params.get("with_limit_violations", True),
             min_voltage_drop_proportional_threshold=float(
