@@ -296,20 +296,11 @@ def render_voltage_analysis(network):
         st.info("No reactive compensation equipment found in this network.")
         return
 
-    has_lf = (
-        (not shunts.empty and shunts["q"].notna().any())
-        or (not svcs.empty and svcs["current_q_mvar"].notna().any())
+    st.info(
+        "**Current Q** — Q from the network file when available, "
+        "otherwise estimated as −b × V²_nom. "
+        "Sign convention: Q < 0 for capacitors, Q > 0 for reactors."
     )
-    if has_lf:
-        st.info(
-            "**Current Q** — load-flow result (pypowsybl load-sign convention: "
-            "Q < 0 for capacitors, Q > 0 for reactors)."
-        )
-    else:
-        st.info(
-            "**Current Q** — estimated as −b × V²_nom (no load flow available; "
-            "Q < 0 for capacitors, Q > 0 for reactors)."
-        )
 
     _render_shunt_section(shunts)
     _render_svc_section(svcs)
