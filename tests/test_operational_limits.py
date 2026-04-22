@@ -189,11 +189,8 @@ def test_compute_loading_valid_mocked_data():
         {"i1": [200.0], "i2": [150.0], "name": ["Line 1"]},
         index=pd.Index(["L1"], name="id"),
     )
-    get_lines_mock = MagicMock()
-    get_lines_mock.reset_index.return_value = lines_df.reset_index()
-
     net = MagicMock()
-    net.get_lines.return_value = get_lines_mock
+    net.get_lines.return_value = lines_df
     net.get_2_windings_transformers.side_effect = RuntimeError("unavailable")
 
     with patch("iidm_viewer.operational_limits._get_branch_losses", return_value={}):

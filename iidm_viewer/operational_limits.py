@@ -3,6 +3,11 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
+from iidm_viewer.caches import (
+    get_2wt_all,
+    get_lines_all,
+    get_operational_limits_df,
+)
 from iidm_viewer.filters import (
     FILTERS,
     build_vl_lookup,
@@ -14,19 +19,24 @@ from iidm_viewer.filters import (
 _MAX_DOUBLE = 1.7e308  # pypowsybl sentinel for "no limit"
 
 
+def _branch_dataframes(network):
+    """Yield (lines_df, 2wt_df) from the shared cache; empty DFs on failure."""
+    for getter in (get_lines_all, get_2wt_all):
+        try:
+            df = getter(network)
+        except Exception:
+            df = pd.DataFrame()
+        yield df
+
+
 def _get_current_flows(network) -> dict[str, dict[str, float]]:
     """Return {element_id: {'i1': ..., 'i2': ...}} for lines and transformers."""
     flows: dict[str, dict[str, float]] = {}
-    for method, cols in [
-        ("get_lines", ["i1", "i2"]),
-        ("get_2_windings_transformers", ["i1", "i2"]),
-    ]:
-        try:
-            df = getattr(network, method)(attributes=cols)
-            for idx, row in df.iterrows():
-                flows[idx] = {"i1": row["i1"], "i2": row["i2"]}
-        except Exception:
-            pass
+    for df in _branch_dataframes(network):
+        if df.empty or "i1" not in df.columns or "i2" not in df.columns:
+            continue
+        for idx, row in df[["i1", "i2"]].iterrows():
+            flows[idx] = {"i1": row["i1"], "i2": row["i2"]}
     return flows
 
 
@@ -38,12 +48,10 @@ def _get_branch_losses(network) -> dict[str, float]:
     (typically before any load flow has run).
     """
     losses: dict[str, float] = {}
-    for method in ("get_lines", "get_2_windings_transformers"):
-        try:
-            df = getattr(network, method)(attributes=["p1", "p2"])
-        except Exception:
+    for df in _branch_dataframes(network):
+        if df.empty or "p1" not in df.columns or "p2" not in df.columns:
             continue
-        for idx, row in df.iterrows():
+        for idx, row in df[["p1", "p2"]].iterrows():
             p1, p2 = row["p1"], row["p2"]
             if pd.notna(p1) and pd.notna(p2):
                 losses[idx] = float(p1) + float(p2)
@@ -131,19 +139,16 @@ def _compute_loading(network, limits_reset: pd.DataFrame) -> pd.DataFrame:
     ][["element_id", "side", "value", "element_type"]].copy()
     perm = perm.rename(columns={"value": "permanent_limit"})
 
-    # Gather actual currents
+    # Gather actual currents from the shared lines / 2WT caches.
     rows = []
-    for method, cols in [
-        ("get_lines", ["i1", "i2", "name"]),
-        ("get_2_windings_transformers", ["i1", "i2", "name"]),
-    ]:
-        try:
-            df = getattr(network, method)(attributes=cols).reset_index()
-            for _, r in df.iterrows():
-                rows.append({"element_id": r["id"], "side": "ONE", "current": r["i1"], "element_name": r["name"]})
-                rows.append({"element_id": r["id"], "side": "TWO", "current": r["i2"], "element_name": r["name"]})
-        except Exception:
-            pass
+    for df in _branch_dataframes(network):
+        if df.empty or "i1" not in df.columns or "i2" not in df.columns:
+            continue
+        sub = df[["i1", "i2", "name"]] if "name" in df.columns else df[["i1", "i2"]]
+        for idx, r in sub.iterrows():
+            name = r["name"] if "name" in sub.columns else idx
+            rows.append({"element_id": idx, "side": "ONE", "current": r["i1"], "element_name": name})
+            rows.append({"element_id": idx, "side": "TWO", "current": r["i2"], "element_name": name})
 
     if not rows:
         return pd.DataFrame()
@@ -171,12 +176,12 @@ def _get_filtered_element_ids(network, selected_vl) -> set[str]:
     vl_lookup = build_vl_lookup(network)
     all_ids: set[str] = set()
 
-    for component, method in [
-        ("Lines", "get_lines"),
-        ("2-Winding Transformers", "get_2_windings_transformers"),
+    for component, getter in [
+        ("Lines", get_lines_all),
+        ("2-Winding Transformers", get_2wt_all),
     ]:
         try:
-            df = getattr(network, method)(all_attributes=True)
+            df = getter(network)
         except Exception:
             continue
         if df.empty:
@@ -210,7 +215,7 @@ def _get_filtered_element_ids(network, selected_vl) -> set[str]:
 
 
 def render_operational_limits(network, selected_vl):
-    limits_df = network.get_operational_limits()
+    limits_df = get_operational_limits_df(network)
 
     if limits_df.empty:
         st.info("No operational limits found in this network.")
