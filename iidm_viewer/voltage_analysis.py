@@ -1,21 +1,8 @@
 import streamlit as st
 import pandas as pd
 
+from iidm_viewer.caches import get_buses_all, get_shunts_all, get_svc_all, get_vl_nominal_v
 from iidm_viewer.voltage_map import render_voltage_map
-
-
-def _vl_nominal_v(network) -> pd.DataFrame:
-    """Return a voltage_level_id → nominal_v lookup without session-state caching.
-
-    Keeping this session-state-free makes the helper functions unit-testable
-    outside of a Streamlit AppTest context.
-    """
-    try:
-        vls = network.get_voltage_levels(attributes=["nominal_v"]).reset_index()
-        vls["id"] = vls["id"].astype(str)
-        return vls.rename(columns={"id": "voltage_level_id"})[["voltage_level_id", "nominal_v"]]
-    except Exception:
-        return pd.DataFrame(columns=["voltage_level_id", "nominal_v"])
 
 
 def _bus_voltages(network) -> pd.DataFrame:
@@ -24,13 +11,13 @@ def _bus_voltages(network) -> pd.DataFrame:
     Columns: bus_id, voltage_level_id, nominal_v, v_mag, v_pu.
     v_mag / v_pu are NaN when no load flow has run.
     """
-    try:
-        buses = network.get_buses(all_attributes=True).reset_index()
-    except Exception:
+    buses = get_buses_all(network)
+    if buses.empty:
         return pd.DataFrame(columns=["bus_id", "voltage_level_id", "nominal_v", "v_mag", "v_pu"])
 
+    buses = buses.reset_index()
     buses["voltage_level_id"] = buses["voltage_level_id"].astype(str)
-    lookup = _vl_nominal_v(network)
+    lookup = get_vl_nominal_v(network)
     merged = buses.merge(lookup, on="voltage_level_id", how="left")
     merged = merged.rename(columns={"id": "bus_id"})
     merged["v_pu"] = merged["v_mag"] / merged["nominal_v"]
@@ -48,15 +35,15 @@ def _shunt_compensation(network) -> pd.DataFrame:
     b_per_section    — susceptance per section; sign determines capacitive vs inductive
                        (NaN when section_count == 0 and pypowsybl does not expose it)
     """
-    try:
-        shunts = network.get_shunt_compensators(all_attributes=True).reset_index()
-    except Exception:
+    shunts = get_shunts_all(network)
+    if shunts.empty:
         return pd.DataFrame()
+    shunts = shunts.reset_index()
     if shunts.empty:
         return shunts
 
     shunts["voltage_level_id"] = shunts["voltage_level_id"].astype(str)
-    lookup = _vl_nominal_v(network)
+    lookup = get_vl_nominal_v(network)
     df = shunts.merge(lookup, on="voltage_level_id", how="left")
 
     v2 = df["nominal_v"] ** 2
@@ -99,15 +86,13 @@ def _svc_compensation(network) -> pd.DataFrame:
     q_min_mvar      — b_min × nominal_v²
     q_max_mvar      — b_max × nominal_v²
     """
-    try:
-        svcs = network.get_static_var_compensators(all_attributes=True).reset_index()
-    except Exception:
-        return pd.DataFrame()
+    svcs = get_svc_all(network)
     if svcs.empty:
-        return svcs
+        return pd.DataFrame()
+    svcs = svcs.reset_index()
 
     svcs["voltage_level_id"] = svcs["voltage_level_id"].astype(str)
-    lookup = _vl_nominal_v(network)
+    lookup = get_vl_nominal_v(network)
     df = svcs.merge(lookup, on="voltage_level_id", how="left")
 
     v2 = df["nominal_v"] ** 2

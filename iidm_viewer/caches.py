@@ -44,13 +44,16 @@ def _get_all_attrs(network, session_key: str, getter_name: str):
     Returns the DataFrame with its natural pypowsybl index intact (usually
     the element id). Consumers that want ``reset_index`` should call it
     themselves — ``reset_index`` produces a copy so the cached frame is
-    not mutated.
+    not mutated. Returns an empty DataFrame when the call raises.
     """
     key = _cache_key(network)
     cached = st.session_state.get(session_key)
     if cached is not None and cached.get("key") == key:
         return cached["df"]
-    df = getattr(network, getter_name)(all_attributes=True)
+    try:
+        df = getattr(network, getter_name)(all_attributes=True)
+    except Exception:
+        return pd.DataFrame()
     st.session_state[session_key] = {"key": key, "df": df}
     return df
 
@@ -61,6 +64,47 @@ def get_lines_all(network):
 
 def get_2wt_all(network):
     return _get_all_attrs(network, "_2wt_all_cache", "get_2_windings_transformers")
+
+
+def get_buses_all(network):
+    """Cache ``get_buses(all_attributes=True)`` per ``(net_key, lf_gen)``.
+
+    Bus voltages (v_mag, v_angle) change after a load flow; the cache is
+    auto-invalidated when ``_lf_gen`` bumps and explicitly popped by
+    :func:`invalidate_on_load_flow`.
+    """
+    return _get_all_attrs(network, "_buses_all", "get_buses")
+
+
+def get_shunts_all(network):
+    """Cache ``get_shunt_compensators(all_attributes=True)`` per ``(net_key, lf_gen)``."""
+    return _get_all_attrs(network, "_shunts_all_cache", "get_shunt_compensators")
+
+
+def get_svc_all(network):
+    """Cache ``get_static_var_compensators(all_attributes=True)`` per ``(net_key, lf_gen)``."""
+    return _get_all_attrs(network, "_svc_all_cache", "get_static_var_compensators")
+
+
+def get_vl_nominal_v(network) -> pd.DataFrame:
+    """Return a ``voltage_level_id`` → ``nominal_v`` lookup, cached by ``net_key``.
+
+    Nominal voltages are topology-dependent but not load-flow-dependent, so
+    the cache is keyed by ``net_key`` alone and invalidated by
+    :func:`invalidate_on_topology_change`.
+    """
+    key = _net_key(network)
+    cached = st.session_state.get("_vl_nominal_v_cache")
+    if cached is not None and cached.get("key") == key:
+        return cached["df"]
+    try:
+        vls = network.get_voltage_levels(attributes=["nominal_v"]).reset_index()
+        vls["id"] = vls["id"].astype(str)
+        df = vls.rename(columns={"id": "voltage_level_id"})[["voltage_level_id", "nominal_v"]]
+    except Exception:
+        df = pd.DataFrame(columns=["voltage_level_id", "nominal_v"])
+    st.session_state["_vl_nominal_v_cache"] = {"key": key, "df": df}
+    return df
 
 
 def get_operational_limits_df(network):
@@ -95,6 +139,7 @@ def get_operational_limits_df(network):
 # Caches reflecting the component set / attributes (topology).
 _TOPOLOGY_CACHE_KEYS = (
     "_vl_lookup_cache",
+    "_vl_nominal_v_cache",
     "_overview_cache",
     "_lines_all_cache",
     "_2wt_all_cache",
@@ -111,6 +156,9 @@ _LOAD_FLOW_CACHE_KEYS = (
     "_nad_cache",
     "_sld_cache",
     "_buses_all",
+    "_buses_all_net",   # stale key written by old diagrams._get_buses_all — clean up
+    "_shunts_all_cache",
+    "_svc_all_cache",
 )
 
 # Caches holding pre-rendered map payloads or positions — only need to
