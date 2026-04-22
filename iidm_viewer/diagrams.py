@@ -273,22 +273,15 @@ def _get_busbar_sections(network):
 
 
 def _get_buses_all(network):
-    """Cache ``get_buses(all_attributes=True)`` per network.
+    """Return ``get_buses(all_attributes=True)`` with ``reset_index()``, cached.
 
-    Bus voltages change after a load flow run; ``_buses_all`` is popped from
-    session state in ``run_loadflow`` / ``load_network`` / ``create_empty_network``
-    to force a refresh.  Returns ``None`` on failure.
+    Delegates to :func:`iidm_viewer.caches.get_buses_all` which owns the
+    ``(net_key, lf_gen)`` invalidation. Returns ``None`` on empty result so
+    call sites can keep their ``if buses is None or buses.empty`` guard.
     """
-    key = _net_key(network)
-    if st.session_state.get("_buses_all_net") == key and "_buses_all" in st.session_state:
-        return st.session_state["_buses_all"]
-    try:
-        buses = network.get_buses(all_attributes=True).reset_index()
-    except Exception:
-        buses = None
-    st.session_state["_buses_all"] = buses
-    st.session_state["_buses_all_net"] = key
-    return buses
+    from iidm_viewer.caches import get_buses_all
+    df = get_buses_all(network)
+    return df.reset_index() if not df.empty else None
 
 
 def render_sld_tab(network, selected_vl):
