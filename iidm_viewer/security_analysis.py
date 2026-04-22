@@ -4,6 +4,15 @@ import tempfile
 import streamlit as st
 import pandas as pd
 
+from iidm_viewer.caches import (
+    _net_key as _caches_net_key,
+    _cache_key as _caches_cache_key,
+    get_vl_nominal_v,
+    get_lines_all,
+    get_2wt_all,
+    get_3wt_all,
+    get_generators_all,
+)
 from iidm_viewer.powsybl_worker import run
 from iidm_viewer.filters import (
     FILTERS,
@@ -31,12 +40,6 @@ _MANUAL_TYPE_IDS_KEY = {
     "2-Winding Transformers": "two_windings_transformers",
     "3-Winding Transformers": "three_windings_transformers",
     "Generators": "generators",
-}
-_MANUAL_TYPE_GETTERS = {
-    "Lines": "get_lines",
-    "2-Winding Transformers": "get_2_windings_transformers",
-    "3-Winding Transformers": "get_3_windings_transformers",
-    "Generators": "get_generators",
 }
 _MANUAL_GROUPINGS = ["One contingency per element (N-1)", "Single grouped contingency (N-k)"]
 _CTX_TYPES = ["ALL", "NONE", "SPECIFIC"]
@@ -67,17 +70,22 @@ _SIDES = ["NONE", "ONE", "TWO"]
 
 def _get_nominal_voltages(network) -> list[float]:
     try:
-        vls = network.get_voltage_levels(attributes=["nominal_v"])
-        return sorted(vls["nominal_v"].dropna().unique().tolist())
+        df = get_vl_nominal_v(network)
+        return sorted(df["nominal_v"].dropna().unique().tolist())
     except Exception:
         return []
 
 
 def _get_ids(network) -> dict[str, list[str]]:
-    """Fetch element id lists in a single worker call, cached per network."""
-    cache = st.session_state.get("_sa_id_cache")
-    if cache is not None:
-        return cache
+    """Fetch element id lists in a single worker call, cached per network.
+
+    Keyed by ``net_key`` only (IDs are topology-dependent, not LF-dependent).
+    Invalidated by ``caches._TOPOLOGY_CACHE_KEYS`` on every topology edit.
+    """
+    net_key = _caches_net_key(network)
+    cached = st.session_state.get("_sa_id_cache")
+    if cached is not None and cached.get("key") == net_key:
+        return cached["data"]
 
     raw = object.__getattribute__(network, "_obj")
 
@@ -114,30 +122,40 @@ def _get_ids(network) -> dict[str, list[str]]:
             "connectables": sorted(lines + t2w + gens),
         }
 
-    cache = run(_gather)
-    st.session_state["_sa_id_cache"] = cache
-    return cache
+    data = run(_gather)
+    st.session_state["_sa_id_cache"] = {"key": net_key, "data": data}
+    return data
+
+
+_FILTERABLE_DF_GETTERS = {
+    "Lines": get_lines_all,
+    "2-Winding Transformers": get_2wt_all,
+    "3-Winding Transformers": get_3wt_all,
+    "Generators": get_generators_all,
+}
 
 
 def _get_filterable_df(network, manual_type: str) -> pd.DataFrame:
-    """Fetch (via worker) and enrich the component DataFrame for *manual_type*.
+    """Return the enriched component DataFrame for *manual_type*.
 
-    Cached per network so the pypowsybl call + VL/substation join only runs
-    once per type. Returns an empty DataFrame if the type has no getter or
-    the network has no elements of that type.
+    Raw data comes from ``caches.get_*_all`` (shared, 0 RT when warm). The
+    enriched result (VL/substation join applied) is cached per
+    ``(net_key, lf_gen, manual_type)`` so repeated visits to the same type
+    within a rerun are free. Invalidated via ``caches._TOPOLOGY_CACHE_KEYS``
+    on topology edits, and self-invalidating after a load flow (lf_gen bumps).
     """
     cache = st.session_state.setdefault("_sa_manual_df_cache", {})
-    key = (id(network), manual_type)
+    key = _caches_cache_key(network) + (manual_type,)
     if key in cache:
         return cache[key]
 
-    getter = _MANUAL_TYPE_GETTERS.get(manual_type)
-    if not getter:
+    getter_fn = _FILTERABLE_DF_GETTERS.get(manual_type)
+    if not getter_fn:
         cache[key] = pd.DataFrame()
         return cache[key]
 
-    df = getattr(network, getter)(all_attributes=True)
-    if df is None or df.empty:
+    df = getter_fn(network)
+    if df.empty:
         cache[key] = pd.DataFrame()
         return cache[key]
 

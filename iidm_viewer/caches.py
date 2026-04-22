@@ -91,6 +91,11 @@ def get_generators_all(network):
     return _get_all_attrs(network, "_generators_all_cache", "get_generators")
 
 
+def get_3wt_all(network):
+    """Cache ``get_3_windings_transformers(all_attributes=True)`` per ``(net_key, lf_gen)``."""
+    return _get_all_attrs(network, "_3wt_all_cache", "get_3_windings_transformers")
+
+
 def get_reactive_curve_points(network) -> pd.DataFrame:
     """Cache ``get_reactive_capability_curve_points()`` per ``net_key``.
 
@@ -169,6 +174,8 @@ _TOPOLOGY_CACHE_KEYS = (
     "_oplimits_cache",
     "_reactive_curves_cache",
     "_bbt_cache",
+    "_sa_id_cache",
+    "_sa_manual_df_cache",
 )
 
 # Caches additionally tied to geographic layout (lat/lon extensions).
@@ -185,6 +192,7 @@ _LOAD_FLOW_CACHE_KEYS = (
     "_shunts_all_cache",
     "_svc_all_cache",
     "_generators_all_cache",
+    "_3wt_all_cache",
 )
 
 # Caches holding pre-rendered map payloads or positions — only need to
