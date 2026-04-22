@@ -38,12 +38,12 @@ are noted separately.
 | Pmax Visualization       | **0** | 0 | `caches.get_lines_all` + `caches.get_buses_all` (both already warm from other tabs) |
 | Voltage Analysis         | **0** | 8 | `caches.get_buses_all` / `get_shunts_all` / `get_svc_all` / `get_vl_nominal_v` |
 | Injection Map            | **0** | 1 closure | `_injection_map_cache` |
-| Security Analysis        | **2 – 8** | 1 closure | `_sa_id_cache` hit, but `_get_nominal_voltages` + each filterable DF uncached |
+| Security Analysis        | **0** | 1 closure | `_sa_id_cache` (net_key-keyed) + `_sa_manual_df_cache` ((net_key,lf_gen,type)-keyed) + `caches.get_vl_nominal_v` |
 | Short Circuit Analysis   | **0** | 2 | `caches.get_vl_nominal_v` (topology-keyed, shared with Voltage Analysis) |
 
-**Aggregate per rerun ≈ 4 – 10 RT** (IEEE 14 fixture, no LF logs
+**Aggregate per rerun ≈ 4 – 6 RT** (IEEE 14 fixture, no LF logs
 expander open) — down from ~50 – 65 before per-tab caching. Remaining cost is
-the two uncached Data Explorer paths and Security Analysis filterable DFs.
+the two uncached Data Explorer paths (Components: 2 RT, Extensions: 2 RT).
 
 First-visit adds ~12 RT across SLD, NAD, and the one-shot injection /
 map closures.
@@ -182,19 +182,24 @@ caches the DataFrame per `net_key` and is shared with Voltage Analysis.
 
 ### Security Analysis — `iidm_viewer/security_analysis.py`
 
-`_get_ids(network)` is the model: one `run(_gather)` closure fetches
-every ID list in a single worker hop, cached per `_sa_id_cache`. Two
-uncached paths remain:
+| Call | RT (before) | RT (after) |
+|---|---:|---:|
+| `_get_nominal_voltages` → `get_voltage_levels(attributes=["nominal_v"])` | 2 | 0 |
+| `_get_ids` (first visit or after topology change) | 1 closure | 1 closure |
+| `_get_ids` (warm) | 0 | 0 |
+| `_get_filterable_df` → `getattr(network, getter)(all_attributes=True)` per type | 2 | 0 |
 
-| Call | RT |
-|---|---:|
-| `_get_nominal_voltages` → `get_voltage_levels(attributes=["nominal_v"])` | 2 |
-| `_get_filterable_df` → `getattr(network, getter)(all_attributes=True)` per type | 2 each |
+`_get_nominal_voltages` now calls `caches.get_vl_nominal_v(network)`.
 
-**Action**: share nominal-v with Voltage / Short-Circuit. Cache
-`_get_filterable_df` per `(net_key, type, lf_gen)`.
+`_get_ids` cache key fixed from "not None" (blind) to `{"key": net_key, "data": ...}`.
+Added to `caches._TOPOLOGY_CACHE_KEYS` so it is flushed on topology edits and network replace.
 
-Estimated saving: **2-8 → 0 RT**.
+`_get_filterable_df` rewritten to pull raw DataFrames from `caches.get_lines_all`,
+`caches.get_2wt_all`, `caches.get_3wt_all`, `caches.get_generators_all` (all 0 RT when warm).
+Enriched result cached per `(net_key, lf_gen, manual_type)` in `_sa_manual_df_cache`.
+Added to `caches._TOPOLOGY_CACHE_KEYS`; self-invalidating via lf_gen after load flow.
+
+**Result: 2–8 → 0 RT** warm.
 
 ### SLD — `iidm_viewer/diagrams.py::render_sld_tab` (bus-breaker fallback)
 
