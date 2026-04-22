@@ -96,14 +96,15 @@ def _resolve_bus_colors(network, selected_vl: str, svg: str) -> dict:
         except Exception:
             pass
     if not bb_to_bus:
-        try:
-            tp = network.get_bus_breaker_topology(selected_vl)
-            for bb_id, row in tp.buses.iterrows():
-                bus_id = row.get("bus_id")
-                if bus_id:
-                    bb_to_bus[str(bb_id)] = str(bus_id)
-        except Exception:
-            pass
+        bbt_df = _get_bbt_buses(network, selected_vl)
+        if bbt_df is not None:
+            try:
+                for bb_id, row in bbt_df.iterrows():
+                    bus_id = row.get("bus_id")
+                    if bus_id:
+                        bb_to_bus[str(bb_id)] = str(bus_id)
+            except Exception:
+                pass
 
     colors: dict = {}
     for bb_id, key in busbars.items():
@@ -282,6 +283,29 @@ def _get_buses_all(network):
     from iidm_viewer.caches import get_buses_all
     df = get_buses_all(network)
     return df.reset_index() if not df.empty else None
+
+
+def _get_bbt_buses(network, vl_id: str):
+    """Return the ``tp.buses`` DataFrame for ``vl_id``, cached per (net_key, vl).
+
+    ``get_bus_breaker_topology`` costs 2 RT and ``.buses`` costs 1 RT; caching
+    the result DataFrame eliminates all 3 RT on repeated SLD navigation.
+    Topology is static — invalidation is handled by ``_TOPOLOGY_CACHE_KEYS``
+    in caches.py popping ``"_bbt_cache"`` on every topology edit.
+    Returns ``None`` on failure.
+    """
+    key = _net_key(network)
+    cache = st.session_state.setdefault("_bbt_cache", {})
+    cache_key = (key, vl_id)
+    if cache_key in cache:
+        return cache[cache_key]
+    try:
+        tp = network.get_bus_breaker_topology(vl_id)
+        df = tp.buses
+    except Exception:
+        df = None
+    cache[cache_key] = df
+    return df
 
 
 def render_sld_tab(network, selected_vl):

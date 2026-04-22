@@ -168,6 +168,7 @@ _TOPOLOGY_CACHE_KEYS = (
     "_2wt_all_cache",
     "_oplimits_cache",
     "_reactive_curves_cache",
+    "_bbt_cache",
 )
 
 # Caches additionally tied to geographic layout (lat/lon extensions).
