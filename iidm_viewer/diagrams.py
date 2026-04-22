@@ -201,6 +201,7 @@ def render_nad_tab(network, selected_vl):
         vl = click.get("vl")
         if vl and vl != st.session_state.get("selected_vl"):
             st.session_state.selected_vl = vl
+            st.session_state["_vl_set_by_click"] = True
             st.rerun()
 
 
@@ -236,4 +237,5 @@ def render_sld_tab(network, selected_vl):
         vl = click.get("vl")
         if vl and vl != st.session_state.get("selected_vl"):
             st.session_state.selected_vl = vl
+            st.session_state["_vl_set_by_click"] = True
             st.rerun()
