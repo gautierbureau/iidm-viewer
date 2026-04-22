@@ -45,6 +45,7 @@ type RenderArgs = {
   substationPositions?: GeoDataSubstation[];
   lines?: MapLine[];
   linePositions?: LinePosition[];
+  version?: number;
   height?: number;
 };
 
@@ -76,6 +77,7 @@ let map: maplibregl.Map | null = null;
 let overlay: MapboxOverlay | null = null;
 let legendEl: HTMLDivElement | null = null;
 let tooltipEl: HTMLDivElement | null = null;
+let lastDataVersion = -1;
 
 function sendParent(msg: Record<string, unknown>): void {
   // Streamlit drops any postMessage whose payload lacks the
@@ -235,19 +237,26 @@ function render(args: RenderArgs): void {
   // This avoids a full WebGL context rebuild + OSM tile reload on every
   // Streamlit rerun triggered by VL navigation.
   // ------------------------------------------------------------------
+  const dataVersion = typeof args.version === 'number' ? args.version : 0;
   if (map && overlay) {
-    overlay.setProps({ layers: buildLayers(typedLines, network, geoData, substations) });
-    if (legendEl && legendEl.parentElement) legendEl.parentElement.removeChild(legendEl);
-    const present = network.getNominalVoltages();
-    if (present.length > 0) {
-      legendEl = buildLegend(present);
-      root.appendChild(legendEl);
+    if (dataVersion !== lastDataVersion) {
+      // Network data changed (new load, topology edit) — rebuild layers.
+      lastDataVersion = dataVersion;
+      overlay.setProps({ layers: buildLayers(typedLines, network, geoData, substations) });
+      if (legendEl && legendEl.parentElement) legendEl.parentElement.removeChild(legendEl);
+      const present = network.getNominalVoltages();
+      if (present.length > 0) {
+        legendEl = buildLegend(present);
+        root.appendChild(legendEl);
+      }
     }
+    // Whether or not we rebuilt, height must be reported every render.
     setFrameHeight(height);
     return;
   }
 
   // First render: create the map from scratch.
+  lastDataVersion = dataVersion;
   root.innerHTML = '';
 
   map = new maplibregl.Map({
