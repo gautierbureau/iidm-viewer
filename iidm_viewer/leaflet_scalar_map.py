@@ -30,9 +30,13 @@ import json
 from dataclasses import dataclass
 from typing import Iterable
 
+import streamlit as st
 import streamlit.components.v1 as st_components
 
 from iidm_viewer.powsybl_worker import run
+
+
+_SUBSTATION_POSITIONS_CACHE_KEY = "_substation_positions_cache"
 
 
 @dataclass(frozen=True)
@@ -55,13 +59,11 @@ class DivergingColorScale:
     high_rgb: tuple[int, int, int]
 
 
-def get_substation_positions(network) -> dict[str, tuple[float, float]]:
-    """Return ``{substation_id -> (lat, lon)}`` for substations with valid coords.
+def _extract_substation_positions(network) -> dict[str, tuple[float, float]]:
+    """Run the actual ``substationPosition`` lookup on the pypowsybl worker.
 
-    Runs on the pypowsybl worker thread via ``run()``. Returns an empty dict
-    when the ``substationPosition`` extension is missing or has no valid
-    entries — callers can ``if not positions: return`` and render an info
-    message.
+    Public callers should prefer :func:`get_substation_positions`, which
+    memoises this result in ``st.session_state``.
     """
     raw = object.__getattribute__(network, "_obj")
 
@@ -87,6 +89,34 @@ def get_substation_positions(network) -> dict[str, tuple[float, float]]:
         }
 
     return run(_extract)
+
+
+def get_substation_positions(network) -> dict[str, tuple[float, float]]:
+    """Return ``{substation_id -> (lat, lon)}`` for substations with valid coords.
+
+    Result is memoised in
+    ``st.session_state[_SUBSTATION_POSITIONS_CACHE_KEY]`` so repeat calls
+    inside the same session don't re-hit the worker.
+    ``state.load_network`` and ``state.create_empty_network`` pop the
+    cache key when they install a new network. Callers can also
+    invalidate explicitly via :func:`clear_substation_positions_cache`
+    after editing the ``substationPosition`` extension.
+
+    Returns an empty dict when the ``substationPosition`` extension is
+    missing or has no valid entries — callers can
+    ``if not positions: return`` and render an info message.
+    """
+    cached = st.session_state.get(_SUBSTATION_POSITIONS_CACHE_KEY)
+    if cached is not None:
+        return cached
+    positions = _extract_substation_positions(network)
+    st.session_state[_SUBSTATION_POSITIONS_CACHE_KEY] = positions
+    return positions
+
+
+def clear_substation_positions_cache() -> None:
+    """Drop the cached substation positions for the current session."""
+    st.session_state.pop(_SUBSTATION_POSITIONS_CACHE_KEY, None)
 
 
 _LEAFLET_HTML = """
