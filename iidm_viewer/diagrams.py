@@ -71,16 +71,18 @@ def _resolve_bus_colors(network, selected_vl: str, svg: str) -> dict:
     # (get_busbar_sections lists real sections), then bus-breaker (the
     # SLG renderer injects a virtual busbar per bus-breaker bus, whose
     # id matches the bus-breaker bus id).
+    # Use the network-level cache — busbar topology never changes during navigation.
     bb_to_bus: dict = {}
-    try:
-        bbs = network.get_busbar_sections(all_attributes=True)
-        bbs = bbs[bbs["voltage_level_id"].astype(str) == str(selected_vl)]
-        for bb_id, row in bbs.iterrows():
-            bus_id = row.get("bus_id")
-            if bus_id:
-                bb_to_bus[str(bb_id)] = str(bus_id)
-    except Exception:
-        pass
+    bbs = _get_busbar_sections(network)
+    if bbs is not None:
+        try:
+            vl_bbs = bbs[bbs["voltage_level_id"].astype(str) == str(selected_vl)]
+            for bb_id, row in vl_bbs.iterrows():
+                bus_id = row.get("bus_id")
+                if bus_id:
+                    bb_to_bus[str(bb_id)] = str(bus_id)
+        except Exception:
+            pass
     if not bb_to_bus:
         try:
             tp = network.get_bus_breaker_topology(selected_vl)
@@ -205,26 +207,53 @@ def render_nad_tab(network, selected_vl):
             st.rerun()
 
 
-def _get_substation_info(network, vl_id: str) -> tuple[str | None, bool]:
-    """Return (substation_id, has_multiple_vls) for ``vl_id``.
+def _net_key(network) -> int:
+    """Stable id for the underlying pypowsybl Network object."""
+    return id(object.__getattribute__(network, "_obj"))
 
-    Calls get_voltage_levels() exactly once so only two worker round-trips
-    are needed. Callers should cache the result in session state — the
-    VL → substation mapping is static for the lifetime of a network.
+
+def _get_substation_map(network) -> dict:
+    """Return ``{vl_id: (substation_id, has_multi_vl)}`` for every VL.
+
+    Calls ``get_voltage_levels()`` exactly once per network load (2 worker
+    round-trips).  Every subsequent call — including all VL navigation
+    reruns — is a pure-Python dict lookup with zero round-trips.
     """
+    key = _net_key(network)
+    if st.session_state.get("_sub_map_net") == key:
+        return st.session_state["_sub_map_cache"]
     try:
         vls = network.get_voltage_levels().reset_index()
-        row = vls[vls["id"].astype(str) == str(vl_id)]
-        if row.empty:
-            return None, False
-        sid = row.iloc[0].get("substation_id")
-        if not sid:
-            return None, False
-        sid = str(sid)
-        count = len(vls[vls["substation_id"].astype(str) == sid])
-        return sid, count > 1
+        sub_count = vls.groupby("substation_id")["id"].count().to_dict()
+        mapping: dict = {}
+        for _, row in vls.iterrows():
+            vl_id = str(row["id"])
+            sid_raw = row.get("substation_id")
+            sid = str(sid_raw) if sid_raw else None
+            mapping[vl_id] = (sid, sub_count.get(sid, 0) > 1 if sid else False)
     except Exception:
-        return None, False
+        mapping = {}
+    st.session_state["_sub_map_cache"] = mapping
+    st.session_state["_sub_map_net"] = key
+    return mapping
+
+
+def _get_busbar_sections(network):
+    """Cache ``get_busbar_sections(all_attributes=True)`` per network.
+
+    Busbar-section topology is static; caching avoids 2 round-trips on
+    every SLD tab rerun.  Returns ``None`` on failure.
+    """
+    key = _net_key(network)
+    if st.session_state.get("_bbs_net") == key:
+        return st.session_state["_bbs_cache"]
+    try:
+        bbs = network.get_busbar_sections(all_attributes=True)
+    except Exception:
+        bbs = None
+    st.session_state["_bbs_cache"] = bbs
+    st.session_state["_bbs_net"] = key
+    return bbs
 
 
 def render_sld_tab(network, selected_vl):
@@ -233,18 +262,15 @@ def render_sld_tab(network, selected_vl):
         st.info("Select a voltage level in the sidebar to display the Single Line Diagram.")
         return
 
-    # Clear substation-expand state when the primary VL changes.
+    # Reset expand state when the primary VL changes.
     if st.session_state.get("_sld_last_vl") != selected_vl:
         st.session_state["_sld_last_vl"] = selected_vl
         st.session_state["sld_show_substation"] = False
-        st.session_state.pop("_sld_sub_info", None)
 
     show_substation = bool(st.session_state.get("sld_show_substation", False))
 
-    # Substation lookup — cached so reruns don't issue extra worker calls.
-    if "_sld_sub_info" not in st.session_state:
-        st.session_state["_sld_sub_info"] = _get_substation_info(network, selected_vl)
-    substation_id, multi_vl = st.session_state["_sld_sub_info"]
+    # Pure-Python lookup — the substation map is built once per network load.
+    substation_id, multi_vl = _get_substation_map(network).get(selected_vl, (None, False))
 
     # Determine the container to render and the svgType for the viewer.
     if show_substation and substation_id:
