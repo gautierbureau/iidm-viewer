@@ -102,6 +102,7 @@ def load_network(uploaded_file):
     st.session_state.network = network
     st.session_state.selected_vl = None
     st.session_state["vl_selector_gen"] = st.session_state.get("vl_selector_gen", 0) + 1
+    st.session_state.pop("_vl_set_by_click", None)
     st.session_state.pop("_lf_report_json", None)
     st.session_state.pop("_map_data_cache", None)
     st.session_state.pop("_vl_lookup_cache", None)
@@ -135,6 +136,7 @@ def create_empty_network(network_id: str = "network"):
     st.session_state.network = network
     st.session_state.selected_vl = None
     st.session_state["vl_selector_gen"] = st.session_state.get("vl_selector_gen", 0) + 1
+    st.session_state.pop("_vl_set_by_click", None)
     st.session_state.pop("_lf_report_json", None)
     st.session_state.pop("_map_data_cache", None)
     st.session_state.pop("_vl_lookup_cache", None)

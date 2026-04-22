@@ -27,12 +27,23 @@ def vl_selector(network):
         index = options.index(current)
 
     # Sync the selectbox's widget state with selected_vl *before* the
-    # widget is instantiated. Without this, a NAD/SLD click that writes
-    # selected_vl from the tab callback is clobbered on the next rerun
-    # because the sidebar runs first and the stale widget state wins.
-    # When selected_vl is None (network just reloaded), force the widget
-    # to the first option so the stale frontend value cannot be restored.
-    if current in options and st.session_state.get(selectbox_key) != current:
+    # widget is instantiated only for the two cases where the browser's
+    # stale value would otherwise win:
+    #
+    # 1. A NAD/SLD click wrote selected_vl externally then called
+    #    st.rerun(). The click handler sets _vl_set_by_click so we know
+    #    to push that value into the widget (which still shows the old VL).
+    #
+    # 2. A new network was just loaded (selected_vl is None). Force the
+    #    widget to options[0] so the old network's VL id is not restored.
+    #
+    # We must NOT override when the user directly changed the selectbox —
+    # st.session_state.get(selectbox_key) returns the browser's pending
+    # NEW value before the widget renders, so comparing it with current
+    # (the previous run's value) would falsely fire and revert the
+    # user's selection.
+    vl_set_by_click = st.session_state.pop("_vl_set_by_click", False)
+    if vl_set_by_click and current in options:
         st.session_state[selectbox_key] = current
     elif current is None and options:
         st.session_state[selectbox_key] = options[0]
