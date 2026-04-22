@@ -147,6 +147,9 @@ if network is None:
     )
     st.stop()
 
+# Set to False to render every tab on every rerun (pre-gate behaviour).
+_ACTIVE_TAB_GATE = True
+
 _TAB_NAMES = [
     "Overview",
     "Network Map",
@@ -181,58 +184,61 @@ _TAB_NAMES = [
 
 # Detect the active tab index. Returns 0 on first load; updates on each click.
 active = sync_active_tab(len(_TAB_NAMES))
+# When the gate is off, _tab(i) is always True so every body renders.
+_tab = (lambda i: active == i) if _ACTIVE_TAB_GATE else (lambda _: True)
 
 # Overview always renders so the first paint is not blank.
 with tab_overview:
     render_overview(network)
 
 with tab_map:
-    if active == 1:
+    if _tab(1):
         render_network_map(network, selected_vl)
 
 with tab_nad:
-    if active == 2:
+    if _tab(2):
         render_nad_tab(network, selected_vl)
 
 with tab_sld:
-    if active == 3:
+    if _tab(3):
         render_sld_tab(network, selected_vl)
 
 with tab_components:
-    if active == 4:
+    if _tab(4):
         render_data_explorer(network, selected_vl)
 
 with tab_extensions:
-    if active == 5:
+    if _tab(5):
         render_extensions_explorer(network)
 
 with tab_rcc:
-    if active == 6:
+    if _tab(6):
         render_reactive_curves(network, selected_vl)
 
 with tab_limits:
-    if active == 7:
+    if _tab(7):
         render_operational_limits(network, selected_vl)
 
 with tab_pmax:
-    if active == 8:
+    if _tab(8):
         render_pmax_visualization(network, selected_vl)
 
 with tab_voltage:
-    if active == 9:
+    if _tab(9):
         render_voltage_analysis(network)
 
 with tab_injection:
-    if active == 10:
+    if _tab(10):
         render_injection_map(network)
 
 with tab_sa:
-    if active == 11:
+    if _tab(11):
         render_security_analysis(network)
 
 with tab_sc:
-    if active == 12:
+    if _tab(12):
         render_short_circuit_analysis(network)
 
 # Background prewarmer: silently populates shared caches for unvisited tabs.
-render_prewarmer(network)
+if _ACTIVE_TAB_GATE:
+    render_prewarmer(network)
