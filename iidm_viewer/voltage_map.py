@@ -6,10 +6,15 @@ color encodes per-unit voltage deviation from nominal (diverging
 blue-white-red). Voltage levels below ``TRANSPORT_NOMINAL_V_THRESHOLD``
 (63 kV) are filtered out — the transport-network focus.
 
-Two render modes:
-- ``icons``    — one colored dot per voltage level at its substation
-- ``gradient`` — wide translucent circles blending into a heatmap surface,
-                 with small dots on top for tooltips
+Three layouts (orthogonal to the icons / gradient render mode):
+
+- ``per_vl``         — one marker per VL at the substation centre (the
+                       multi-VL substations stack on top of each other)
+- ``per_vl_fanned``  — one marker per VL, jittered around the substation
+                       centre on a small circle so each VL is visible
+- ``per_sub_worst``  — one marker per substation, value = signed worst
+                       |v_pu − 1| across the substation's VLs; tooltip
+                       lists the breakdown
 
 Data extraction runs on the pypowsybl worker thread; the result is a dict
 of pure-Python primitives cached in ``st.session_state`` so reruns on
@@ -18,6 +23,7 @@ different threads don't re-query pypowsybl.
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 
 import pandas as pd
 import streamlit as st
@@ -34,6 +40,14 @@ TRANSPORT_NOMINAL_V_THRESHOLD = 63.0  # kV — below this we don't show on the m
 _VOLTAGE_COLOR_SCALE_MID = (255, 255, 224)  # pale yellow at 1.0 pu
 _VOLTAGE_COLOR_SCALE_LOW = (27, 74, 199)    # blue — under-voltage
 _VOLTAGE_COLOR_SCALE_HIGH = (199, 27, 27)   # red — over-voltage
+
+_FAN_JITTER_DEG = 0.025  # ~2.8 km in latitude — visible at the France default zoom
+
+_LAYOUT_OPTIONS = {
+    "Per VL": "per_vl",
+    "Per VL (fanned)": "per_vl_fanned",
+    "Per substation (worst)": "per_sub_worst",
+}
 
 
 def _extract_voltage_map_data(network) -> dict | None:
@@ -168,7 +182,101 @@ def _prepare_display_records(records, sel_nom, min_nominal):
     return out
 
 
-def _build_tooltip(r: dict) -> str:
+def _group_by_substation(display) -> dict[str, list[dict]]:
+    by_sub: dict[str, list[dict]] = defaultdict(list)
+    for r in display:
+        by_sub[r["substation_id"]].append(r)
+    return by_sub
+
+
+def _fan_records(display, jitter_deg: float = _FAN_JITTER_DEG):
+    """Spread co-located VLs around their substation on a small circle.
+
+    Substations with a single VL are returned unchanged. Substations with
+    N > 1 VLs get N markers placed at evenly-spaced angles on a circle of
+    radius ``jitter_deg`` degrees around the centre. VLs are sorted by
+    nominal voltage (highest first) so the placement is stable across
+    reruns.
+    """
+    out = []
+    for sub_id, group in _group_by_substation(display).items():
+        if len(group) <= 1:
+            out.extend(group)
+            continue
+        ordered = sorted(group, key=lambda r: -r["nominal_v"])
+        n = len(ordered)
+        for i, r in enumerate(ordered):
+            angle = 2 * math.pi * i / n
+            shifted = dict(r)
+            shifted["lat"] = r["lat"] + jitter_deg * math.cos(angle)
+            shifted["lon"] = r["lon"] + jitter_deg * math.sin(angle)
+            out.append(shifted)
+    return out
+
+
+def _aggregate_per_substation_worst(display):
+    """Collapse per-VL records to one record per substation.
+
+    The aggregated record's ``v_pu`` is the signed deviation of the VL
+    with the largest ``|v_pu − 1|``. Substations whose VLs all lack a
+    load-flow voltage are kept (so the operator still sees the dot) with
+    ``v_pu = None`` — they render as the grey "no data" swatch.
+    """
+    out = []
+    for sub_id, group in _group_by_substation(display).items():
+        with_v = [r for r in group if r["v_pu"] is not None]
+        ordered = sorted(group, key=lambda r: -r["nominal_v"])
+        base = ordered[0]
+        if with_v:
+            worst = max(with_v, key=lambda r: abs(r["v_pu"] - 1.0))
+            v_pu = worst["v_pu"]
+            v_mag_mean = worst["v_mag_mean"]
+            worst_vl_id = worst["vl_id"]
+            worst_nominal = worst["nominal_v"]
+        else:
+            v_pu = None
+            v_mag_mean = None
+            worst_vl_id = None
+            worst_nominal = None
+        out.append({
+            "vl_id": sub_id,  # used as the renderer "id" only
+            "substation_id": sub_id,
+            "nominal_v": base["nominal_v"],
+            "v_mag_mean": v_mag_mean,
+            "v_pu": v_pu,
+            "lat": base["lat"],
+            "lon": base["lon"],
+            "_aggregate": True,
+            "_worst_vl_id": worst_vl_id,
+            "_worst_nominal": worst_nominal,
+            "_group": ordered,
+        })
+    return out
+
+
+def _apply_layout(display, layout: str):
+    if layout == "per_vl":
+        return display
+    if layout == "per_vl_fanned":
+        return _fan_records(display)
+    if layout == "per_sub_worst":
+        return _aggregate_per_substation_worst(display)
+    raise ValueError(f"Unknown layout: {layout!r}")
+
+
+def _format_pu_line(nominal_v: float, v_pu: float | None,
+                    v_mag_mean: float | None, prefix: str = "") -> str:
+    if v_pu is None or v_mag_mean is None:
+        return f"{prefix}{nominal_v:g} kV: <i>no LF voltage</i>"
+    dev_pct = (v_pu - 1.0) * 100.0
+    sign = "+" if dev_pct >= 0 else ""
+    return (
+        f"{prefix}{nominal_v:g} kV: {v_mag_mean:.2f} kV "
+        f"({v_pu:.4f} pu, {sign}{dev_pct:.2f} %)"
+    )
+
+
+def _build_per_vl_tooltip(r: dict) -> str:
     html = (
         f"<b>{r['vl_id']}</b><br>"
         f"Substation: {r['substation_id']}<br>"
@@ -185,6 +293,31 @@ def _build_tooltip(r: dict) -> str:
     else:
         html += "<i>No load-flow voltage</i>"
     return html
+
+
+def _build_per_substation_tooltip(r: dict) -> str:
+    group = r["_group"]
+    html = f"<b>Substation: {r['substation_id']}</b><br>{len(group)} VLs<br>"
+    if r.get("v_pu") is None:
+        html += "<i>No load-flow voltage on any VL</i><br>"
+    else:
+        html += (
+            f"<b>Worst:</b> {_format_pu_line(r['_worst_nominal'], r['v_pu'], r['v_mag_mean'])}"
+            f"<br>"
+        )
+    html += "All VLs:<br>"
+    for vl in group:
+        html += _format_pu_line(
+            vl["nominal_v"], vl.get("v_pu"), vl.get("v_mag_mean"),
+            prefix="&nbsp;&nbsp;",
+        ) + "<br>"
+    return html
+
+
+def _build_tooltip(r: dict) -> str:
+    if r.get("_aggregate"):
+        return _build_per_substation_tooltip(r)
+    return _build_per_vl_tooltip(r)
 
 
 def _to_render_records(display):
@@ -250,7 +383,7 @@ def render_voltage_map(network):
         nom_counts[key] = nom_counts.get(key, 0) + 1
     available_noms = sorted(nom_counts.keys(), reverse=True)
 
-    col1, col2, col3 = st.columns([2, 2, 1])
+    col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
 
     nom_options = ["All nominal voltages"] + [
         f"{nv:g} kV ({nom_counts[nv]} VL)" for nv in available_noms
@@ -260,15 +393,29 @@ def render_voltage_map(network):
         nom_options,
         key="va_map_nom_select",
         help=(
-            "Restrict the map to a single nominal voltage so the pu color scale "
-            "is comparable across substations."
+            "Restrict the map to a single nominal voltage. With 'All', the pu "
+            "scale stays comparable across classes thanks to per-unit normalisation."
         ),
     )
     sel_nom: float | None = None
     if sel_label != nom_options[0]:
         sel_nom = available_noms[nom_options.index(sel_label) - 1]
 
-    mode_label = col2.radio(
+    layout_label = col2.radio(
+        "Layout",
+        list(_LAYOUT_OPTIONS.keys()),
+        key="va_map_layout",
+        horizontal=True,
+        help=(
+            "How to place markers when a substation has several voltage levels. "
+            "'Per VL' stacks them at the same point; 'fanned' offsets each VL on "
+            "a small circle; 'worst' shows one marker per substation colored by "
+            "its worst |v_pu − 1|."
+        ),
+    )
+    layout = _LAYOUT_OPTIONS[layout_label]
+
+    mode_label = col3.radio(
         "View",
         ["Icons per substation", "Continuous gradient"],
         key="va_map_mode",
@@ -276,7 +423,7 @@ def render_voltage_map(network):
     )
     mode = "icons" if mode_label == "Icons per substation" else "gradient"
 
-    v_range = col3.number_input(
+    v_range = col4.number_input(
         "Full-scale ± pu",
         min_value=0.005,
         max_value=0.5,
@@ -297,6 +444,8 @@ def render_voltage_map(network):
         st.info("No voltage levels match the current filter.")
         return
 
+    laid_out = _apply_layout(display, layout)
+
     gradient_radius_m = 25000 if sel_nom is None or sel_nom >= 200 else 12000
 
     color_scale = DivergingColorScale(
@@ -307,7 +456,7 @@ def render_voltage_map(network):
         high_rgb=_VOLTAGE_COLOR_SCALE_HIGH,
     )
     render_scalar_map(
-        _to_render_records(display),
+        _to_render_records(laid_out),
         mode=mode,
         color_scale=color_scale,
         legend_title="Voltage (pu)",
@@ -317,9 +466,17 @@ def render_voltage_map(network):
     )
 
     with_v = [r for r in display if r["v_pu"] is not None]
-    total = len(display)
+    total_vls = len(display)
+    total_subs = len({r["substation_id"] for r in display})
     shown_nom = "all nominal voltages" if sel_nom is None else f"{sel_nom:g} kV"
-    st.caption(
-        f"{total} voltage levels at {shown_nom} "
-        f"({len(with_v)} with load-flow voltages)"
-    )
+    if layout == "per_sub_worst":
+        st.caption(
+            f"{total_subs} substations at {shown_nom} "
+            f"(aggregated from {total_vls} VLs, {len(with_v)} with load-flow voltages)"
+        )
+    else:
+        st.caption(
+            f"{total_vls} voltage levels at {shown_nom} "
+            f"across {total_subs} substations "
+            f"({len(with_v)} with load-flow voltages)"
+        )
