@@ -77,3 +77,85 @@ def get_operational_limits_df(network):
     df = network.get_operational_limits()
     st.session_state["_oplimits_cache"] = {"key": key, "df": df}
     return df
+
+
+# --- Invalidation ---
+#
+# Three levels, called from ``state.py`` to keep every pypowsybl-facing
+# cache consistent with the underlying network:
+#
+# - Topology edit (add/remove/update elements) → network rows change.
+# - Load flow → flow-carrying columns (p/q/i) + bus voltages change.
+# - Network replace (file upload or blank network) → everything.
+#
+# Several caches are keyed by ``(net_key, lf_gen)`` and self-invalidate
+# when ``_lf_gen`` bumps, but we pop them explicitly to free memory and
+# keep the behavior visible from a single place.
+
+# Caches reflecting the component set / attributes (topology).
+_TOPOLOGY_CACHE_KEYS = (
+    "_vl_lookup_cache",
+    "_overview_cache",
+    "_lines_all_cache",
+    "_2wt_all_cache",
+    "_oplimits_cache",
+)
+
+# Caches additionally tied to geographic layout (lat/lon extensions).
+_GEOGRAPHY_CACHE_KEYS = (
+    "_map_data_cache",
+)
+
+# Caches depending on load-flow results (p, q, i, bus voltages).
+_LOAD_FLOW_CACHE_KEYS = (
+    "_nad_cache",
+    "_sld_cache",
+    "_buses_all",
+)
+
+# Caches holding pre-rendered map payloads or positions — only need to
+# clear when the network itself is swapped out.
+_NETWORK_REPLACE_CACHE_KEYS = (
+    "_substation_positions_cache",
+    "_voltage_map_cache",
+    "_injection_map_cache",
+)
+
+
+def _pop_all(keys) -> None:
+    for key in keys:
+        st.session_state.pop(key, None)
+
+
+def invalidate_on_topology_change(affects_geography: bool = False) -> None:
+    """Pop caches invalidated by a topology edit.
+
+    Pass ``affects_geography=True`` from create_* sites that add or move
+    elements carrying a position extension (substations, lines with
+    ``linePosition``).
+    """
+    _pop_all(_TOPOLOGY_CACHE_KEYS)
+    if affects_geography:
+        _pop_all(_GEOGRAPHY_CACHE_KEYS)
+
+
+def invalidate_on_load_flow() -> None:
+    """Bump ``_lf_gen`` and pop caches affected by the new flow solution.
+
+    ``_lf_gen`` alone would be enough for caches keyed by
+    ``(net_key, lf_gen)``; we still pop explicitly to free memory and
+    cover caches (``_nad_cache``, ``_sld_cache``, ``_buses_all``) that
+    are not keyed by lf_gen.
+    """
+    st.session_state["_lf_gen"] = st.session_state.get("_lf_gen", 0) + 1
+    _pop_all(_TOPOLOGY_CACHE_KEYS + _LOAD_FLOW_CACHE_KEYS)
+
+
+def invalidate_on_network_replace() -> None:
+    """Pop every per-network cache — used by load_network / create_empty_network."""
+    _pop_all(
+        _TOPOLOGY_CACHE_KEYS
+        + _GEOGRAPHY_CACHE_KEYS
+        + _LOAD_FLOW_CACHE_KEYS
+        + _NETWORK_REPLACE_CACHE_KEYS
+    )

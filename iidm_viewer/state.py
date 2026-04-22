@@ -2,6 +2,11 @@ import pandas as pd
 import streamlit as st
 
 from iidm_viewer.powsybl_worker import NetworkProxy, run
+from iidm_viewer.caches import (
+    invalidate_on_load_flow,
+    invalidate_on_network_replace,
+    invalidate_on_topology_change,
+)
 
 
 def init_state():
@@ -104,18 +109,7 @@ def load_network(uploaded_file):
     st.session_state["vl_selector_gen"] = st.session_state.get("vl_selector_gen", 0) + 1
     st.session_state.pop("_vl_set_by_click", None)
     st.session_state.pop("_lf_report_json", None)
-    st.session_state.pop("_map_data_cache", None)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
-    st.session_state.pop("_substation_positions_cache", None)
-    st.session_state.pop("_voltage_map_cache", None)
-    st.session_state.pop("_injection_map_cache", None)
-    st.session_state.pop("_nad_cache", None)
-    st.session_state.pop("_sld_cache", None)
-    st.session_state.pop("_buses_all", None)
+    invalidate_on_network_replace()
     st.session_state.pop("_export_bytes", None)
     st.session_state.pop("_export_fmt", None)
     st.session_state.pop("_export_ext", None)
@@ -145,18 +139,7 @@ def create_empty_network(network_id: str = "network"):
     st.session_state["vl_selector_gen"] = st.session_state.get("vl_selector_gen", 0) + 1
     st.session_state.pop("_vl_set_by_click", None)
     st.session_state.pop("_lf_report_json", None)
-    st.session_state.pop("_map_data_cache", None)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
-    st.session_state.pop("_substation_positions_cache", None)
-    st.session_state.pop("_voltage_map_cache", None)
-    st.session_state.pop("_injection_map_cache", None)
-    st.session_state.pop("_nad_cache", None)
-    st.session_state.pop("_sld_cache", None)
-    st.session_state.pop("_buses_all", None)
+    invalidate_on_network_replace()
     st.session_state.pop("_last_file", None)
     st.session_state.pop("_last_file_id", None)
     st.session_state.pop("_export_bytes", None)
@@ -192,15 +175,7 @@ def run_loadflow(network):
     results, report_json = run(_run_ac)
     st.session_state["_lf_report_json"] = report_json
     # Invalidate cached lookups so tabs reload fresh data
-    st.session_state["_lf_gen"] = st.session_state.get("_lf_gen", 0) + 1
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
-    st.session_state.pop("_nad_cache", None)
-    st.session_state.pop("_sld_cache", None)
-    st.session_state.pop("_buses_all", None)
+    invalidate_on_load_flow()
     return results
 
 
@@ -350,11 +325,7 @@ def remove_components(network, component: str, ids: list[str]) -> list[str]:
             import pypowsybl.network as pn
             pn.remove_feeder_bays(raw, ids)
         run(_do_remove)
-        st.session_state.pop("_vl_lookup_cache", None)
-        st.session_state.pop("_overview_cache", None)
-        st.session_state.pop("_lines_all_cache", None)
-        st.session_state.pop("_2wt_all_cache", None)
-        st.session_state.pop("_oplimits_cache", None)
+        invalidate_on_topology_change()
         return ids
 
     if component in _HVDC_TYPES:
@@ -365,11 +336,7 @@ def remove_components(network, component: str, ids: list[str]) -> list[str]:
             pn.remove_hvdc_lines(raw, hvdc_line_ids)
 
         run(_do_remove)
-        st.session_state.pop("_vl_lookup_cache", None)
-        st.session_state.pop("_overview_cache", None)
-        st.session_state.pop("_lines_all_cache", None)
-        st.session_state.pop("_2wt_all_cache", None)
-        st.session_state.pop("_oplimits_cache", None)
+        invalidate_on_topology_change()
         return station_ids + hvdc_line_ids
 
     if component == "Voltage Levels":
@@ -378,11 +345,7 @@ def remove_components(network, component: str, ids: list[str]) -> list[str]:
             pn.remove_voltage_levels(raw, ids)
 
         run(_do_remove)
-        st.session_state.pop("_vl_lookup_cache", None)
-        st.session_state.pop("_overview_cache", None)
-        st.session_state.pop("_lines_all_cache", None)
-        st.session_state.pop("_2wt_all_cache", None)
-        st.session_state.pop("_oplimits_cache", None)
+        invalidate_on_topology_change()
         return ids
 
     if component == "Substations":
@@ -394,11 +357,7 @@ def remove_components(network, component: str, ids: list[str]) -> list[str]:
                 pn.remove_voltage_levels(raw, vl_ids)
 
         run(_do_remove)
-        st.session_state.pop("_vl_lookup_cache", None)
-        st.session_state.pop("_overview_cache", None)
-        st.session_state.pop("_lines_all_cache", None)
-        st.session_state.pop("_2wt_all_cache", None)
-        st.session_state.pop("_oplimits_cache", None)
+        invalidate_on_topology_change()
         return ids + vl_ids
 
     # Shallow branch removal via generic remove_elements
@@ -406,11 +365,7 @@ def remove_components(network, component: str, ids: list[str]) -> list[str]:
         raw.remove_elements(ids)
 
     run(_do_remove)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
+    invalidate_on_topology_change()
     return ids
 
 
@@ -440,11 +395,7 @@ def update_components(network, component: str, changes_df):
             method(subset)
 
     run(_do_update)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
+    invalidate_on_topology_change()
 
 
 # Extension name -> list of columns that pypowsybl's update_extensions accepts.
@@ -485,11 +436,7 @@ def remove_extension(network, extension_name: str, ids: list):
         raw.remove_extensions(extension_name, ids)
 
     run(_do_remove)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
+    invalidate_on_topology_change()
 
 
 def update_extension(network, extension_name: str, changes_df):
@@ -518,11 +465,7 @@ def update_extension(network, extension_name: str, changes_df):
             raw.update_extensions(extension_name, subset)
 
     run(_do_update)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
+    invalidate_on_topology_change()
 
 
 # Component label -> creation spec. For now only node-breaker feeder-bay
@@ -779,12 +722,7 @@ def _dispatch_bay_create(network, bay_fn_name: str, fields: dict):
         getattr(pn, bay_fn_name)(raw, df)
 
     run(_do_create)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
-    st.session_state.pop("_map_data_cache", None)
+    invalidate_on_topology_change(affects_geography=True)
 
 
 def _dispatch_shunt_bay(network, fields: dict):
@@ -811,12 +749,7 @@ def _dispatch_shunt_bay(network, fields: dict):
         pn.create_shunt_compensator_bay(raw, shunt_df, linear_model_df=linear_df)
 
     run(_do_create)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
-    st.session_state.pop("_map_data_cache", None)
+    invalidate_on_topology_change(affects_geography=True)
 
 
 def create_component_bay(network, component: str, fields: dict):
@@ -1118,12 +1051,7 @@ def create_container(network, component: str, fields: dict):
         getattr(raw, spec["create_function"])(df)
 
     run(_do_create)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
-    st.session_state.pop("_map_data_cache", None)
+    invalidate_on_topology_change(affects_geography=True)
 
 
 def get_voltage_levels_df(network):
@@ -1295,12 +1223,7 @@ def create_tap_changer(
         getattr(raw, method_name)(main_df, steps_df)
 
     run(_do_create)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
-    st.session_state.pop("_map_data_cache", None)
+    invalidate_on_topology_change(affects_geography=True)
 
 
 # --- Coupling device (switches tying two busbar sections together) ---
@@ -1345,12 +1268,7 @@ def create_coupling_device(
         pn.create_coupling_device(raw, **kwargs)
 
     run(_do_create)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
-    st.session_state.pop("_map_data_cache", None)
+    invalidate_on_topology_change(affects_geography=True)
 
 
 # --- HVDC lines (attach to two existing converter stations) ---
@@ -1443,12 +1361,7 @@ def create_hvdc_line(network, fields: dict):
         raw.create_hvdc_lines(df)
 
     run(_do_create)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
-    st.session_state.pop("_map_data_cache", None)
+    invalidate_on_topology_change(affects_geography=True)
 
 
 # --- Reactive limits (min/max or per-P curve) on generators / VSC / batteries ---
@@ -1524,11 +1437,7 @@ def create_reactive_limits(
             raw.create_curve_reactive_limits(df)
 
     run(_do_create)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
+    invalidate_on_topology_change()
 
 
 # --- Operational limits (CURRENT / APPARENT_POWER / ACTIVE_POWER) ---
@@ -1623,11 +1532,7 @@ def create_operational_limits(
         raw.create_operational_limits(df)
 
     run(_do_create)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
+    invalidate_on_topology_change()
 
 
 # --- Extensions (first-phase: attach extension rows to existing elements) ---
@@ -1937,11 +1842,7 @@ def create_extension(
         raw.create_extensions(extension_name, df)
 
     run(_do_create)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
+    invalidate_on_topology_change()
 
 
 # --- Secondary voltage control (network-level, two dataframes) ---
@@ -2058,11 +1959,7 @@ def create_secondary_voltage_control(
         raw.create_extensions("secondaryVoltageControl", [zones_df, units_df])
 
     run(_do_create)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_overview_cache", None)
-    st.session_state.pop("_lines_all_cache", None)
-    st.session_state.pop("_2wt_all_cache", None)
-    st.session_state.pop("_oplimits_cache", None)
+    invalidate_on_topology_change()
 
 
 # --- Security Analysis ---
