@@ -1148,21 +1148,18 @@ def render_data_explorer(network, selected_vl):
 
     with st.spinner(f"Loading {component}..."):
         try:
-            kwargs = {}
-            if filter_by_vl and selected_vl:
-                kwargs["voltage_level_id"] = selected_vl
-
-            try:
-                df = getattr(network, method_name)(all_attributes=True, **kwargs)
-            except Exception as e:
-                if filter_by_vl and "No data provided for index" in str(e):
-                    st.info(f"No {component.lower()} in this voltage level.")
-                    return
-                raise
+            from iidm_viewer.caches import get_component_df
+            df = get_component_df(network, method_name)
 
             if df.empty:
                 st.info(f"No {component.lower()} found in this network.")
                 return
+
+            if filter_by_vl and selected_vl and "voltage_level_id" in df.columns:
+                df = df[df["voltage_level_id"].astype(str) == str(selected_vl)]
+                if df.empty:
+                    st.info(f"No {component.lower()} in this voltage level.")
+                    return
 
             df = enrich_with_joins(df, build_vl_lookup(network))
             df = _reorder_columns(df, component)
