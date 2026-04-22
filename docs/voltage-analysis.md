@@ -107,9 +107,27 @@ and adapted for per-VL scalar coloring.
 
 | Widget | Key | Purpose |
 |---|---|---|
-| Nominal voltage filter | `va_map_nom_select` | `"All nominal voltages"` (default) or a single class (`400 kV`, `225 kV`, …). Restricts the map to VLs of that nominal voltage so the pu scale is comparable across the displayed markers. |
-| View | `va_map_mode` | Radio: `"Icons per substation"` (one colored dot per VL) vs `"Continuous gradient"` (large translucent circles blending into a heatmap, with a small dot per VL on top for the tooltip). |
+| Nominal voltage filter | `va_map_nom_select` | `"All nominal voltages"` (default) or a single class (`400 kV`, `225 kV`, …). Per-unit normalisation already makes all classes comparable on the shared color scale, so the default shows everything. Restrict to one class only when investigating a specific level. |
+| Layout | `va_map_layout` | Radio (see [§ Layouts](#layouts) below): `"Per VL"`, `"Per VL (fanned)"`, `"Per substation (worst)"`. |
+| View | `va_map_mode` | Radio: `"Icons per substation"` (one colored dot per record) vs `"Continuous gradient"` (large translucent circles blending into a heatmap, with a small dot per record on top for the tooltip). |
 | Full-scale ± pu | `va_map_vrange` | Deviation magnitude at which the red / blue channel saturates. Defaults to `0.05`. |
+
+### Layouts
+
+Layouts are orthogonal to the icons / gradient render mode — they control
+*what each marker represents*, not *how it's drawn*.
+
+| Layout key | Markers | When to use |
+|---|---|---|
+| `per_vl` | One marker per voltage level at the substation centre. Multi-VL substations stack — only the top dot is hoverable. | Single-class focus, or when you also set the nominal-voltage filter to one class so stacking can't happen. |
+| `per_vl_fanned` | One marker per voltage level, jittered around the substation centre on a small circle (radius `_FAN_JITTER_DEG = 0.025` ≈ 2.8 km of latitude). VLs are placed at evenly-spaced angles, ordered by descending nominal voltage so the highest class is east of the centre — stable across reruns. | All-class view when you want to see each VL individually. Becomes noisy past 4 VLs per substation. |
+| `per_sub_worst` | One marker per substation, value = signed deviation of the VL with the largest `|v_pu − 1|`. Tooltip lists the breakdown (worst VL highlighted, then all VLs sorted by nominal). Substations with no LF on any VL still appear, rendered in the grey "no data" swatch. | Operational overview: red dot = something is off at this site, hover for the per-VL breakdown. |
+
+`_apply_layout(display, layout)` dispatches to one of three pure
+helpers (`_fan_records`, `_aggregate_per_substation_worst`, identity)
+that return the same record shape consumed by `_to_render_records`,
+so the renderer call site stays the same regardless of the chosen
+layout.
 
 ## Transport-network filter
 
@@ -391,6 +409,16 @@ Until then the simpler Leaflet path wins on maintenance cost.
 - `_prepare_display_records` filtering (below-threshold drop,
   nominal-voltage selection, `v_pu` computation, `v_pu is None` when
   no LF voltage)
+- `_fan_records`: single-VL passthrough, multi-VL distinct coords on a
+  circle of the requested radius, stable ordering by descending
+  nominal voltage, other fields preserved
+- `_aggregate_per_substation_worst`: largest signed deviation wins,
+  one record per substation, substations with no LF kept (grey),
+  partial LF picks the solved VL
+- `_apply_layout` dispatch: `per_vl` is identity, `per_vl_fanned`
+  jitters, `per_sub_worst` collapses, unknown layout raises
+- `_build_per_substation_tooltip` lists every VL; `_build_tooltip`
+  dispatches on the `_aggregate` flag
 - `_extract_voltage_map_data` returns `None` for a blank network and
   for the four-substations factory (neither has `substationPosition`)
 - IEEE14 end-to-end: records populate, geo coordinates are in range,
