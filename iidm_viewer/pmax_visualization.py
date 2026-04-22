@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from iidm_viewer.caches import get_buses_all, get_lines_all
 from iidm_viewer.filters import build_vl_lookup, enrich_with_joins
 
 
@@ -19,19 +20,11 @@ def _compute_pmax_data(network) -> pd.DataFrame:
     Columns: name, voltage_level1_id, voltage_level2_id, x_ohm, v1_kv, v2_kv,
              pmax_mw, p_actual_mw, p_pmax_ratio, delta_deg, margin_pct.
     """
-    try:
-        lines = network.get_lines(all_attributes=True)
-    except Exception:
-        return pd.DataFrame()
-
+    lines = get_lines_all(network)
     if lines.empty:
         return pd.DataFrame()
 
-    try:
-        buses = network.get_buses(all_attributes=True)
-    except Exception:
-        return pd.DataFrame()
-
+    buses = get_buses_all(network)
     if buses.empty:
         return pd.DataFrame()
 

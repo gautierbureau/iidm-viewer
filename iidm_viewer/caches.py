@@ -86,6 +86,29 @@ def get_svc_all(network):
     return _get_all_attrs(network, "_svc_all_cache", "get_static_var_compensators")
 
 
+def get_generators_all(network):
+    """Cache ``get_generators(all_attributes=True)`` per ``(net_key, lf_gen)``."""
+    return _get_all_attrs(network, "_generators_all_cache", "get_generators")
+
+
+def get_reactive_curve_points(network) -> pd.DataFrame:
+    """Cache ``get_reactive_capability_curve_points()`` per ``net_key``.
+
+    Capability curves are physical properties of the generator — they change
+    only when the topology changes, not after a load flow.
+    """
+    key = _net_key(network)
+    cached = st.session_state.get("_reactive_curves_cache")
+    if cached is not None and cached.get("key") == key:
+        return cached["df"]
+    try:
+        df = network.get_reactive_capability_curve_points()
+    except Exception:
+        df = pd.DataFrame()
+    st.session_state["_reactive_curves_cache"] = {"key": key, "df": df}
+    return df
+
+
 def get_vl_nominal_v(network) -> pd.DataFrame:
     """Return a ``voltage_level_id`` → ``nominal_v`` lookup, cached by ``net_key``.
 
@@ -144,6 +167,7 @@ _TOPOLOGY_CACHE_KEYS = (
     "_lines_all_cache",
     "_2wt_all_cache",
     "_oplimits_cache",
+    "_reactive_curves_cache",
 )
 
 # Caches additionally tied to geographic layout (lat/lon extensions).
@@ -159,6 +183,7 @@ _LOAD_FLOW_CACHE_KEYS = (
     "_buses_all_net",   # stale key written by old diagrams._get_buses_all — clean up
     "_shunts_all_cache",
     "_svc_all_cache",
+    "_generators_all_cache",
 )
 
 # Caches holding pre-rendered map payloads or positions — only need to
