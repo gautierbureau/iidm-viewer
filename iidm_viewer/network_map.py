@@ -47,9 +47,18 @@ def _extract_map_data(network):
     raw = object.__getattribute__(network, "_obj")
 
     def _extract():
-        from pypowsybl.network import get_extensions_names
+        # Network-level listing of extensions actually attached to this
+        # network.  Cheap lookup that lets us skip the expensive
+        # get_extensions() GraalVM calls for extensions that aren't
+        # present — notably substationPosition on networks with no geo
+        # data, and linePosition on networks that only carry substation
+        # coordinates.
+        try:
+            present_exts = set(raw.get_extensions_names())
+        except Exception:
+            present_exts = set()
 
-        if "substationPosition" not in get_extensions_names():
+        if "substationPosition" not in present_exts:
             return None
 
         subs_pos_df = raw.get_extensions("substationPosition")
@@ -123,8 +132,9 @@ def _extract_map_data(network):
 
         # Line positions from the linePosition extension (optional).
         # Each entry: {id, coordinates: [{lat, lon}, ...]} sorted by num.
+        # Skipped entirely when the network doesn't carry the extension.
         line_positions = []
-        if "linePosition" in get_extensions_names():
+        if "linePosition" in present_exts:
             try:
                 lpos_df = raw.get_extensions("linePosition").reset_index()
                 lpos_df = lpos_df[
@@ -132,26 +142,21 @@ def _extract_map_data(network):
                     & lpos_df["longitude"].between(-180, 180)
                 ]
                 if not lpos_df.empty:
-                    grouped = (
-                        lpos_df.sort_values("num")
-                        .groupby("id")
-                        .apply(
-                            lambda g: [
-                                {
-                                    "lat": _to_float(r["latitude"]),
-                                    "lon": _to_float(r["longitude"]),
-                                }
-                                for _, r in g.iterrows()
-                            ],
-                            include_groups=False,
-                        )
-                        .to_dict()
+                    # Vectorised grouping — the previous .apply(lambda +
+                    # iterrows) path was O(rows) in Python bytecode and
+                    # dominated network-load time on large grids.
+                    lpos_df = lpos_df.sort_values("num")
+                    lpos_df = lpos_df.rename(
+                        columns={"latitude": "lat", "longitude": "lon"}
                     )
-                    line_positions = [
-                        {"id": lid, "coordinates": coords}
-                        for lid, coords in grouped.items()
-                        if coords
-                    ]
+                    lpos_df["lat"] = lpos_df["lat"].astype(float)
+                    lpos_df["lon"] = lpos_df["lon"].astype(float)
+                    for lid, group in lpos_df.groupby("id", sort=False):
+                        coords = group[["lat", "lon"]].to_dict("records")
+                        if coords:
+                            line_positions.append(
+                                {"id": str(lid), "coordinates": coords}
+                            )
             except Exception:
                 pass
 
