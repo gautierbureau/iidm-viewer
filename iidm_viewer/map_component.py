@@ -35,6 +35,7 @@ def render_interactive_map(
     substation_positions,
     lines,
     line_positions=None,
+    version: int = 0,
     height: int = 670,
     key: str = "map",
 ):
@@ -43,6 +44,7 @@ def render_interactive_map(
         substationPositions=substation_positions,
         lines=lines,
         linePositions=line_positions or [],
+        version=version,
         height=height,
         default=None,
         key=key,

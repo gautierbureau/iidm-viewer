@@ -172,6 +172,8 @@ def _get_cached_map_data(network):
         return cache
     result = _extract_map_data(network)
     st.session_state["_map_data_cache"] = result
+    # Bump the version so the JS map component knows to rebuild layers.
+    st.session_state["_map_data_version"] = st.session_state.get("_map_data_version", 0) + 1
     return result
 
 
@@ -201,6 +203,7 @@ def render_network_map(network, selected_vl):
         substation_positions=substation_positions,
         lines=lines,
         line_positions=line_positions,
+        version=st.session_state.get("_map_data_version", 0),
         height=670,
         key="network_map",
     )
