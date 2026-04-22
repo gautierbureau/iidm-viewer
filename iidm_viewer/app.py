@@ -88,11 +88,13 @@ with st.sidebar:
     )
 
     if uploaded is not None:
-        # Only reload if it's a new file
+        # Use file_id (unique per upload event) so re-uploading the same
+        # filename with different content still triggers a reload.
         current = get_network()
-        if current is None or st.session_state.get("_last_file") != uploaded.name:
+        if current is None or st.session_state.get("_last_file_id") != uploaded.file_id:
             with st.spinner("Loading network..."):
                 load_network(uploaded)
+                st.session_state["_last_file_id"] = uploaded.file_id
                 st.session_state["_last_file"] = uploaded.name
             st.rerun()
 

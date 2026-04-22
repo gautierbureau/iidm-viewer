@@ -142,6 +142,7 @@ def create_empty_network(network_id: str = "network"):
     st.session_state.pop("_voltage_map_cache", None)
     st.session_state.pop("_injection_map_cache", None)
     st.session_state.pop("_last_file", None)
+    st.session_state.pop("_last_file_id", None)
     st.session_state.pop("_export_bytes", None)
     st.session_state.pop("_export_fmt", None)
     st.session_state.pop("_export_ext", None)
