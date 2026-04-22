@@ -153,7 +153,7 @@ def _render_voltage_section(buses: pd.DataFrame):
 
     st.markdown("**Bus detail**")
     col_nom, col_lo, col_hi = st.columns(3)
-    nom_options = sorted(buses["nominal_v"].dropna().unique())
+    nom_options = sorted(buses["nominal_v"].dropna().unique(), reverse=True)
     if st.session_state.get("va_nom_select") not in nom_options:
         st.session_state["va_nom_select"] = nom_options[-1]
     selected_nom = col_nom.selectbox(
