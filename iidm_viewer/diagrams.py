@@ -205,26 +205,26 @@ def render_nad_tab(network, selected_vl):
             st.rerun()
 
 
-def _get_substation_id(network, vl_id: str) -> str | None:
-    """Return the substation id for ``vl_id``, or None on any failure."""
+def _get_substation_info(network, vl_id: str) -> tuple[str | None, bool]:
+    """Return (substation_id, has_multiple_vls) for ``vl_id``.
+
+    Calls get_voltage_levels() exactly once so only two worker round-trips
+    are needed. Callers should cache the result in session state — the
+    VL → substation mapping is static for the lifetime of a network.
+    """
     try:
         vls = network.get_voltage_levels().reset_index()
         row = vls[vls["id"].astype(str) == str(vl_id)]
         if row.empty:
-            return None
+            return None, False
         sid = row.iloc[0].get("substation_id")
-        return str(sid) if sid else None
+        if not sid:
+            return None, False
+        sid = str(sid)
+        count = len(vls[vls["substation_id"].astype(str) == sid])
+        return sid, count > 1
     except Exception:
-        return None
-
-
-def _substation_has_multiple_vls(network, substation_id: str) -> bool:
-    """Return True if ``substation_id`` contains more than one voltage level."""
-    try:
-        vls = network.get_voltage_levels().reset_index()
-        return len(vls[vls["substation_id"].astype(str) == str(substation_id)]) > 1
-    except Exception:
-        return False
+        return None, False
 
 
 def render_sld_tab(network, selected_vl):
@@ -237,21 +237,25 @@ def render_sld_tab(network, selected_vl):
     if st.session_state.get("_sld_last_vl") != selected_vl:
         st.session_state["_sld_last_vl"] = selected_vl
         st.session_state["sld_show_substation"] = False
+        st.session_state.pop("_sld_sub_info", None)
 
     show_substation = bool(st.session_state.get("sld_show_substation", False))
 
+    # Substation lookup — cached so reruns don't issue extra worker calls.
+    if "_sld_sub_info" not in st.session_state:
+        st.session_state["_sld_sub_info"] = _get_substation_info(network, selected_vl)
+    substation_id, multi_vl = st.session_state["_sld_sub_info"]
+
     # Determine the container to render and the svgType for the viewer.
-    if show_substation:
-        substation_id = _get_substation_id(network, selected_vl)
-        container_id = substation_id or selected_vl
-        svg_type = "substation" if substation_id else "voltage-level"
+    if show_substation and substation_id:
+        container_id = substation_id
+        svg_type = "substation"
     else:
         container_id = selected_vl
         svg_type = "voltage-level"
-        substation_id = _get_substation_id(network, selected_vl)
 
     # Expand / collapse button (only shown when the substation has >1 VL).
-    if substation_id and _substation_has_multiple_vls(network, substation_id):
+    if substation_id and multi_vl:
         if show_substation:
             if st.button("Collapse to voltage level", key="sld_collapse_btn"):
                 st.session_state["sld_show_substation"] = False
