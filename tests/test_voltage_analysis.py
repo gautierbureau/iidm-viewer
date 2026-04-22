@@ -92,28 +92,29 @@ def test_shunt_compensation_b_per_section_positive_for_capacitive(network_with_s
 def test_shunt_compensation_current_q_estimated_without_lf(network_with_shunt):
     df = _shunt_compensation(network_with_shunt)
     row = df[df["id"] == _SHUNT_ID].iloc[0]
-    # No LF → estimated as b (total susceptance) × nominal_v²
+    # No LF → estimated as −b × V² (pypowsybl load-sign: Q < 0 for capacitors)
     # b = b_per_section × section_count = 1e-4 × 2 = 2e-4
     b_total = _SHUNT_B_PER_SECTION * _SHUNT_SECTION_COUNT
-    expected = b_total * row["nominal_v"] ** 2
+    expected = -b_total * row["nominal_v"] ** 2
     assert abs(row["current_q_mvar"] - expected) < 1e-6
 
 
 def test_shunt_compensation_available_q_covers_remaining_sections(network_with_shunt):
     df = _shunt_compensation(network_with_shunt)
     row = df[df["id"] == _SHUNT_ID].iloc[0]
-    # bps derived as b / section_count = (b_per_section × section_count) / section_count
+    # available = −bps × remaining × V² (load-sign convention)
     bps = _SHUNT_B_PER_SECTION
     remaining = _SHUNT_MAX_SECTION_COUNT - _SHUNT_SECTION_COUNT
-    expected = bps * remaining * row["nominal_v"] ** 2
+    expected = -bps * remaining * row["nominal_v"] ** 2
     assert abs(row["available_q_mvar"] - expected) < 1e-6
 
 
 def test_shunt_compensation_total_q_is_max_capacity(network_with_shunt):
     df = _shunt_compensation(network_with_shunt)
     row = df[df["id"] == _SHUNT_ID].iloc[0]
+    # total = −bps × max_section_count × V² (load-sign convention)
     bps = _SHUNT_B_PER_SECTION
-    expected = bps * _SHUNT_MAX_SECTION_COUNT * row["nominal_v"] ** 2
+    expected = -bps * _SHUNT_MAX_SECTION_COUNT * row["nominal_v"] ** 2
     assert abs(row["total_q_mvar"] - expected) < 1e-6
 
 
