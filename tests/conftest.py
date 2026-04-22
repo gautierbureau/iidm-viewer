@@ -15,6 +15,7 @@ class FakeUploadedFile:
     def __init__(self, name: str, data: bytes):
         self.name = name
         self._data = data
+        self.file_id = str(id(self))
 
     def getvalue(self) -> bytes:
         return self._data
