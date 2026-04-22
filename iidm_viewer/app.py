@@ -129,7 +129,7 @@ if network is None:
     st.header("IIDM Viewer")
     st.info(
         "Upload a network file in the sidebar to get started, "
-        "or click \"Start from blank network\" to build one from scratch."
+        "or click \"Start from empty network\" to build one from scratch."
     )
     st.stop()
 
