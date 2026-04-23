@@ -30,35 +30,6 @@ from iidm_viewer.short_circuit_analysis import render_short_circuit_analysis
 st.set_page_config(page_title="IIDM Viewer", layout="wide", page_icon="⚡")
 init_state()
 
-# With 13 top-level tabs the tab bar overflows any normal viewport. Streamlit's
-# BaseWeb tab list ships with its prev/next scroll arrows hidden by default and
-# also suppresses the native scrollbar, which leaves off-screen tabs with no
-# visible affordance. Force the tab list to show a thin horizontal scrollbar
-# and keep the overflow arrow buttons visible whenever BaseWeb renders them.
-st.markdown(
-    """
-    <style>
-    .stTabs [data-baseweb="tab-list"] {
-        overflow-x: auto !important;
-        scrollbar-width: thin;
-    }
-    .stTabs [data-baseweb="tab-list"]::-webkit-scrollbar {
-        height: 6px;
-    }
-    .stTabs [data-baseweb="tab-list"]::-webkit-scrollbar-thumb {
-        background: rgba(128, 128, 128, 0.5);
-        border-radius: 3px;
-    }
-    .stTabs [data-baseweb="tab-list"] button[kind="headerNoPadding"] {
-        display: inline-flex !important;
-        opacity: 1 !important;
-        visibility: visible !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 
 @st.dialog("Start with empty network")
 def _show_blank_network_dialog():
