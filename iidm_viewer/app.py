@@ -182,14 +182,25 @@ _TAB_NAMES = [
     tab_sc,
 ) = st.tabs(_TAB_NAMES)
 
-# Detect the active tab index. Returns 0 on first load; updates on each click.
-active = sync_active_tab(len(_TAB_NAMES))
+# Overview always renders so the first paint is not blank.
+# The active-tab sync component and prewarmer live here so they don't
+# insert stray block-level elements into the main body outside the tabs
+# widget — those elements upset Streamlit/Baseweb's tab-bar overflow
+# calculation and cause the left/right scroll arrows to disappear.
+with tab_overview:
+    # Detect the active tab index. Returns 0 on first load; updates on each
+    # click.  The iframe's JS listener is on window.parent.document (capture
+    # phase) so it fires for clicks on any tab, not just the overview.
+    active = sync_active_tab(len(_TAB_NAMES))
+    render_overview(network)
+    # Background prewarmer: silently populates shared caches for unvisited
+    # tabs.  The @st.fragment(run_every=0.1) keeps firing regardless of
+    # which tab panel is visible once the fragment is initialised here.
+    if _ACTIVE_TAB_GATE:
+        render_prewarmer(network)
+
 # When the gate is off, _tab(i) is always True so every body renders.
 _tab = (lambda i: active == i) if _ACTIVE_TAB_GATE else (lambda _: True)
-
-# Overview always renders so the first paint is not blank.
-with tab_overview:
-    render_overview(network)
 
 with tab_map:
     if _tab(1):
@@ -238,7 +249,3 @@ with tab_sa:
 with tab_sc:
     if _tab(12):
         render_short_circuit_analysis(network)
-
-# Background prewarmer: silently populates shared caches for unvisited tabs.
-if _ACTIVE_TAB_GATE:
-    render_prewarmer(network)
