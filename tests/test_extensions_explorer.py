@@ -13,6 +13,7 @@ def _prepare(xiidm_upload):
     at.run(timeout=30)
     at.session_state["network"] = load_network(xiidm_upload)
     at.session_state["_last_file"] = xiidm_upload.name
+    at.session_state["active_tab_sync"] = 5  # Data Explorer Extensions
     at.run(timeout=30)
     return at
 
@@ -348,10 +349,15 @@ def test_remove_extension_clears_vl_lookup_cache(node_breaker_network):
         {"participate": True, "droop": 4.0},
     )
 
-    with patch("iidm_viewer.state.st") as mock_st:
-        mock_st.session_state = {"_vl_lookup_cache": "stale"}
+    # remove_extension calls invalidate_on_topology_change() from caches.py,
+    # which reaches session_state via its own `st` import — patch both.
+    shared = {"_vl_lookup_cache": "stale"}
+    with patch("iidm_viewer.state.st") as state_st, \
+         patch("iidm_viewer.caches.st") as caches_st:
+        state_st.session_state = shared
+        caches_st.session_state = shared
         remove_extension(node_breaker_network, "activePowerControl", ["GH1"])
-        assert "_vl_lookup_cache" not in mock_st.session_state
+        assert "_vl_lookup_cache" not in shared
 
 
 # ---------------------------------------------------------------------------

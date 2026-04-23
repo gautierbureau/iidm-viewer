@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 
+from iidm_viewer.caches import get_extension_df
 from iidm_viewer.data_explorer import _column_config, _compute_changes
 from iidm_viewer.powsybl_worker import run
 from iidm_viewer.state import EDITABLE_EXTENSIONS, remove_extension, update_extension
@@ -128,6 +129,9 @@ def _render_ext_removal_log(extension_name: str):
         st.caption(f"• {entry['element_id']}")
 
 
+_READONLY_EXTENSIONS = frozenset({"substationPosition", "linePosition"})
+
+
 def render_extensions_explorer(network):
     names = _extensions_names()
     if not names:
@@ -153,9 +157,9 @@ def render_extensions_explorer(network):
 
     with st.spinner(f"Loading {extension} extensions..."):
         try:
-            df = network.get_extensions(extension)
+            df = get_extension_df(network, extension)
 
-            if df is None or df.empty:
+            if df.empty:
                 st.info(f"No {extension!r} extensions found in this network.")
                 return
 
@@ -175,75 +179,82 @@ def render_extensions_explorer(network):
             else:
                 st.caption(f"{len(df)} {extension!r} extensions")
 
-            editable_cols = [
-                c for c in EDITABLE_EXTENSIONS.get(extension, [])
-                if c in df.columns
-            ]
-
-            # Always use data_editor so rows can be marked for removal
-            df_display = df.copy()
-            df_display.insert(0, "_remove", False)
-            col_config = _column_config(df_display, set(editable_cols))
-            col_config["_remove"] = st.column_config.CheckboxColumn(
-                "Remove", default=False
-            )
-
-            edited_df = st.data_editor(
-                df_display,
-                use_container_width=True,
-                column_config=col_config,
-                key=f"ext_editor_{extension}",
-            )
-
-            ids_to_remove = edited_df[edited_df["_remove"] == True].index.tolist()
-            edited_df_clean = edited_df.drop(columns=["_remove"])
-
-            if editable_cols:
-                df_for_changes = df.drop(index=ids_to_remove, errors="ignore")
-                edited_for_changes = edited_df_clean.loc[df_for_changes.index]
-                changes = _compute_changes(df_for_changes, edited_for_changes, editable_cols)
-                n_changes = len(changes)
+            if extension in _READONLY_EXTENSIONS:
+                st.caption(
+                    f"The **{extension}** extension is read-only "
+                    "(geographical positions are managed outside the viewer)."
+                )
+                st.dataframe(df, use_container_width=True)
             else:
-                changes = pd.DataFrame()
-                n_changes = 0
+                editable_cols = [
+                    c for c in EDITABLE_EXTENSIONS.get(extension, [])
+                    if c in df.columns
+                ]
 
-            n_remove = len(ids_to_remove)
+                # Always use data_editor so rows can be marked for removal
+                df_display = df.copy()
+                df_display.insert(0, "_remove", False)
+                col_config = _column_config(df_display, set(editable_cols))
+                col_config["_remove"] = st.column_config.CheckboxColumn(
+                    "Remove", default=False
+                )
 
-            if n_changes:
-                label = f"change{'s' if n_changes > 1 else ''}"
-                if st.button(
-                    f"Apply {n_changes} {label}",
-                    key=f"apply_ext_{extension}",
-                ):
-                    try:
-                        update_extension(network, extension, changes)
-                        _add_to_ext_change_log(extension, changes, df)
-                        st.success(
-                            f"Updated {n_changes} {extension} "
-                            f"extension{'s' if n_changes > 1 else ''}: "
-                            f"{', '.join(str(i) for i in changes.index.tolist())}"
-                        )
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Update failed: {e}")
+                edited_df = st.data_editor(
+                    df_display,
+                    use_container_width=True,
+                    column_config=col_config,
+                    key=f"ext_editor_{extension}",
+                )
 
-            if n_remove:
-                label = f"extension{'s' if n_remove > 1 else ''}"
-                if st.button(
-                    f"Remove {n_remove} {label}",
-                    key=f"remove_ext_{extension}",
-                    type="primary",
-                ):
-                    try:
-                        remove_extension(network, extension, ids_to_remove)
-                        _add_to_ext_removal_log(extension, ids_to_remove, df)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Remove failed: {e}")
+                ids_to_remove = edited_df[edited_df["_remove"] == True].index.tolist()
+                edited_df_clean = edited_df.drop(columns=["_remove"])
 
-            if editable_cols:
-                _render_ext_change_log(network, extension)
-            _render_ext_removal_log(extension)
+                if editable_cols:
+                    df_for_changes = df.drop(index=ids_to_remove, errors="ignore")
+                    edited_for_changes = edited_df_clean.loc[df_for_changes.index]
+                    changes = _compute_changes(df_for_changes, edited_for_changes, editable_cols)
+                    n_changes = len(changes)
+                else:
+                    changes = pd.DataFrame()
+                    n_changes = 0
+
+                n_remove = len(ids_to_remove)
+
+                if n_changes:
+                    label = f"change{'s' if n_changes > 1 else ''}"
+                    if st.button(
+                        f"Apply {n_changes} {label}",
+                        key=f"apply_ext_{extension}",
+                    ):
+                        try:
+                            update_extension(network, extension, changes)
+                            _add_to_ext_change_log(extension, changes, df)
+                            st.success(
+                                f"Updated {n_changes} {extension} "
+                                f"extension{'s' if n_changes > 1 else ''}: "
+                                f"{', '.join(str(i) for i in changes.index.tolist())}"
+                            )
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Update failed: {e}")
+
+                if n_remove:
+                    label = f"extension{'s' if n_remove > 1 else ''}"
+                    if st.button(
+                        f"Remove {n_remove} {label}",
+                        key=f"remove_ext_{extension}",
+                        type="primary",
+                    ):
+                        try:
+                            remove_extension(network, extension, ids_to_remove)
+                            _add_to_ext_removal_log(extension, ids_to_remove, df)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Remove failed: {e}")
+
+                if editable_cols:
+                    _render_ext_change_log(network, extension)
+                _render_ext_removal_log(extension)
 
             csv = df.to_csv()
             st.download_button(

@@ -165,6 +165,8 @@ pypowsybl → result wrapped and handed back.
 | Change the Injection Map tab | [docs/injection-map.md](docs/injection-map.md) |
 | Add a new scalar-on-substation Leaflet map (reusing the shared renderer) | [docs/voltage-analysis.md § Shared scalar-on-substation renderer](docs/voltage-analysis.md#shared-scalar-on-substation-renderer---leaflet_scalar_mappy) |
 | Change the Pmax Visualization tab | [docs/pmax-visualization.md](docs/pmax-visualization.md) |
+| Explore skipping non-visible tabs to cut per-click round-trips | [docs/active-tab-gate.md](docs/active-tab-gate.md) |
+| Understand where worker round-trips are spent per tab | [docs/worker-round-trips.md](docs/worker-round-trips.md) |
 
 ## 4. Troubleshooting segfaults
 

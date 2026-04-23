@@ -15,6 +15,7 @@
  *     substations: MapSubstation[],
  *     substationPositions: GeoDataSubstation[],
  *     lines: MapLine[],                   // lines + 2W-transformers, untyped
+ *     linePositions: {id: string, coordinates: Coordinate[]}[],
  *     height: number,
  *   }
  *
@@ -37,10 +38,14 @@ import {
   type MapSubstation,
 } from '@powsybl/network-map-layers';
 
+type LinePosition = { id: string; coordinates: Coordinate[] };
+
 type RenderArgs = {
   substations?: MapSubstation[];
   substationPositions?: GeoDataSubstation[];
   lines?: MapLine[];
+  linePositions?: LinePosition[];
+  version?: number;
   height?: number;
 };
 
@@ -72,6 +77,7 @@ let map: maplibregl.Map | null = null;
 let overlay: MapboxOverlay | null = null;
 let legendEl: HTMLDivElement | null = null;
 let tooltipEl: HTMLDivElement | null = null;
+let lastDataVersion = -1;
 
 function sendParent(msg: Record<string, unknown>): void {
   // Streamlit drops any postMessage whose payload lacks the
@@ -148,6 +154,47 @@ function formatLineTooltip(line: MapLine): string {
   return `<b>${header}</b><br>P1: ${p1} MW, I1: ${i1} A`;
 }
 
+function buildLayers(
+  typedLines: MapLineWithType[],
+  network: MapEquipments,
+  geoData: GeoData,
+  substations: MapSubstation[],
+) {
+  return [
+    new LineLayer({
+      id: 'powsybl-lines',
+      data: typedLines,
+      network,
+      geoData,
+      getNominalVoltageColor,
+      disconnectedLineColor: [204, 204, 204, 255],
+      filteredNominalVoltages: network.getNominalVoltages(),
+      labelsVisible: false,
+      labelSize: 11,
+      labelColor: [0, 0, 0, 255],
+      lineFullPath: true,
+      lineParallelPath: true,
+      showLineFlow: true,
+      areFlowsValid: true,
+      updatedLines: [],
+      pickable: true,
+    }),
+    new SubstationLayer({
+      id: 'powsybl-substations',
+      data: substations,
+      network,
+      geoData,
+      getNominalVoltageColor,
+      filteredNominalVoltages: null,
+      labelsVisible: false,
+      labelColor: [0, 0, 0, 255],
+      labelSize: 12,
+      getNameOrId: (s: MapSubstation) => s.name || s.id,
+      pickable: true,
+    }),
+  ];
+}
+
 function render(args: RenderArgs): void {
   const root = document.getElementById(ROOT_ID);
   if (!root) return;
@@ -159,6 +206,7 @@ function render(args: RenderArgs): void {
   const substations = args.substations ?? [];
   const substationPositions = args.substationPositions ?? [];
   const lines = args.lines ?? [];
+  const linePositions = args.linePositions ?? [];
 
   // ------------------------------------------------------------------
   // Build MapEquipments / GeoData.
@@ -171,7 +219,11 @@ function render(args: RenderArgs): void {
 
   const subPosMap = new Map<string, Coordinate>();
   for (const p of substationPositions) subPosMap.set(p.id, p.coordinate);
-  const geoData = new GeoData(subPosMap, new Map());
+
+  const linePosMap = new Map<string, Coordinate[]>();
+  for (const lp of linePositions) linePosMap.set(lp.id, lp.coordinates);
+
+  const geoData = new GeoData(subPosMap, linePosMap);
 
   const typedLines: MapLineWithType[] = lines.map((l) => ({
     ...l,
@@ -180,12 +232,31 @@ function render(args: RenderArgs): void {
 
   // ------------------------------------------------------------------
   // MapLibre base map.
+  // If the map already exists (same component instance across reruns),
+  // skip teardown and just push new layers to the existing overlay.
+  // This avoids a full WebGL context rebuild + OSM tile reload on every
+  // Streamlit rerun triggered by VL navigation.
   // ------------------------------------------------------------------
-  if (map) {
-    map.remove();
-    map = null;
-    overlay = null;
+  const dataVersion = typeof args.version === 'number' ? args.version : 0;
+  if (map && overlay) {
+    if (dataVersion !== lastDataVersion) {
+      // Network data changed (new load, topology edit) — rebuild layers.
+      lastDataVersion = dataVersion;
+      overlay.setProps({ layers: buildLayers(typedLines, network, geoData, substations) });
+      if (legendEl && legendEl.parentElement) legendEl.parentElement.removeChild(legendEl);
+      const present = network.getNominalVoltages();
+      if (present.length > 0) {
+        legendEl = buildLegend(present);
+        root.appendChild(legendEl);
+      }
+    }
+    // Whether or not we rebuilt, height must be reported every render.
+    setFrameHeight(height);
+    return;
   }
+
+  // First render: create the map from scratch.
+  lastDataVersion = dataVersion;
   root.innerHTML = '';
 
   map = new maplibregl.Map({
@@ -202,39 +273,7 @@ function render(args: RenderArgs): void {
 
     overlay = new MapboxOverlay({
       interleaved: false,
-      layers: [
-        new LineLayer({
-          id: 'powsybl-lines',
-          data: typedLines,
-          network,
-          geoData,
-          getNominalVoltageColor,
-          disconnectedLineColor: [204, 204, 204, 255],
-          filteredNominalVoltages: network.getNominalVoltages(),
-          labelsVisible: false,
-          labelSize: 11,
-          labelColor: [0, 0, 0, 255],
-          lineFullPath: false,
-          lineParallelPath: true,
-          showLineFlow: true,
-          areFlowsValid: true,
-          updatedLines: [],
-          pickable: true,
-        }),
-        new SubstationLayer({
-          id: 'powsybl-substations',
-          data: substations,
-          network,
-          geoData,
-          getNominalVoltageColor,
-          filteredNominalVoltages: null,
-          labelsVisible: false,
-          labelColor: [0, 0, 0, 255],
-          labelSize: 12,
-          getNameOrId: (s: MapSubstation) => s.name || s.id,
-          pickable: true,
-        }),
-      ],
+      layers: buildLayers(typedLines, network, geoData, substations),
     });
 
     // MapboxOverlay is a `maplibregl.IControl`-compatible control.

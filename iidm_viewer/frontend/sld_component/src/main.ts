@@ -12,7 +12,12 @@
  *
  * Python contract (stable):
  *   render_interactive_sld(svg, metadata, height, key) ->
- *       None | {"type": "sld-vl-click", "vl": "VLx", "ts": ...}
+ *       None
+ *       | {"type": "sld-vl-click",     "vl": "VLx",   "ts": <ms>}
+ *       | {"type": "sld-breaker-click","breakerId": "SW1", "open": true, "ts": <ms>}
+ *
+ * "open" in sld-breaker-click is the *desired new state* (already toggled by
+ * the library before the callback fires).
  */
 import {
   SingleLineDiagramViewer,
@@ -23,6 +28,7 @@ type RenderArgs = {
   svg?: string;
   metadata?: string;
   height?: number;
+  svgType?: string;
 };
 
 const ROOT_ID = 'sld';
@@ -68,6 +74,10 @@ function render(args: RenderArgs): void {
 
   const svgContent = args.svg ?? '';
   const metadata = parseMetadata(args.metadata);
+  // "voltage-level" applies VL-scoped zoom limits; "substation" enables
+  // the multi-VL substation layout. Fall back to "voltage-level" for any
+  // unknown value so the viewer always initialises safely.
+  const svgType = args.svgType === 'substation' ? 'substation' : 'voltage-level';
 
   // Constructor signature (see index.d.ts:490):
   //   container, svgContent, svgMetadata, svgType,
@@ -75,13 +85,11 @@ function render(args: RenderArgs): void {
   //   onNextVoltageCallback, onBreakerCallback,
   //   onFeederCallback, onBusCallback,
   //   selectionBackColor, onToggleHoverCallback
-  // "voltage-level" is the only svgType that enables VL-scoped zoom
-  // limits (see powsybl-network-viewer-core.js ~3682).
   viewer = new SingleLineDiagramViewer(
     root,
     svgContent,
     metadata,
-    'voltage-level',
+    svgType,
     0,
     0,
     10000,
@@ -93,7 +101,14 @@ function render(args: RenderArgs): void {
         ts: Date.now(),
       });
     },
-    null,
+    (breakerId: string, open: boolean) => {
+      setComponentValue({
+        type: 'sld-breaker-click',
+        breakerId,
+        open,
+        ts: Date.now(),
+      });
+    },
     null,
     null,
     '#009eff',

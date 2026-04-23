@@ -1,6 +1,8 @@
 """NAD and SLD tab rendering."""
 import math
+from unittest.mock import patch
 
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from iidm_viewer.diagrams import (
@@ -90,6 +92,7 @@ def _prepare(xiidm_upload, selected_vl=None):
 def test_nad_tab_info_when_no_vl_selected(xiidm_upload):
     """Empty VL filter -> vl_selector returns None -> NAD tab shows its info."""
     at = _prepare(xiidm_upload)
+    at.session_state["active_tab_sync"] = 2  # Network Area Diagram
     at.text_input(key="vl_filter_text_0").set_value("ZZZZZZ").run(timeout=30)
     assert not at.exception
     infos = [i.value for i in at.info]
@@ -98,6 +101,7 @@ def test_nad_tab_info_when_no_vl_selected(xiidm_upload):
 
 def test_sld_tab_info_when_no_vl_selected(xiidm_upload):
     at = _prepare(xiidm_upload)
+    at.session_state["active_tab_sync"] = 3  # Single Line Diagram
     at.text_input(key="vl_filter_text_0").set_value("ZZZZZZ").run(timeout=30)
     assert not at.exception
     infos = [i.value for i in at.info]
@@ -107,3 +111,63 @@ def test_sld_tab_info_when_no_vl_selected(xiidm_upload):
 def test_nad_and_sld_render_without_exception_for_valid_vl(xiidm_upload):
     at = _prepare(xiidm_upload, selected_vl="VL1")
     assert not at.exception
+
+
+# ---------------------------------------------------------------------------
+# sld-breaker-click handler
+# ---------------------------------------------------------------------------
+
+def test_breaker_click_writes_to_change_log(node_breaker_network):
+    """Simulating a sld-breaker-click updates the switch and logs the change."""
+    sw = node_breaker_network.get_switches(all_attributes=True)
+    sw_id = sw.index[0]
+    original_open = bool(sw.loc[sw_id, "open"])
+
+    st.session_state.pop("_change_log_get_switches", None)
+    st.session_state.pop("_last_breaker_click_ts", None)
+
+    fake_click = {"type": "sld-breaker-click", "breakerId": sw_id,
+                  "open": not original_open, "ts": 12345}
+
+    with patch("iidm_viewer.diagrams.render_interactive_sld", return_value=fake_click), \
+         patch("iidm_viewer.diagrams._render_bus_legend"):
+        from iidm_viewer.diagrams import render_sld_tab
+        try:
+            render_sld_tab(node_breaker_network, "S1VL1")
+        except Exception:
+            pass  # st.rerun() raises in test context
+
+    log = st.session_state.get("_change_log_get_switches", [])
+    assert len(log) == 1
+    assert log[0]["element_id"] == sw_id
+    assert log[0]["property"] == "open"
+    assert log[0]["before"] == original_open
+    assert log[0]["after"] == (not original_open)
+
+
+def test_breaker_click_deduplication_skips_same_ts(node_breaker_network):
+    """Second render with same ts must not re-toggle the switch."""
+    sw = node_breaker_network.get_switches(all_attributes=True)
+    sw_id = sw.index[0]
+    original_open = bool(sw.loc[sw_id, "open"])
+
+    st.session_state.pop("_change_log_get_switches", None)
+    # Pre-set the ts so the handler thinks this event was already processed
+    st.session_state["_last_breaker_click_ts"] = 99999
+
+    fake_click = {"type": "sld-breaker-click", "breakerId": sw_id,
+                  "open": not original_open, "ts": 99999}
+
+    with patch("iidm_viewer.diagrams.render_interactive_sld", return_value=fake_click), \
+         patch("iidm_viewer.diagrams._render_bus_legend"):
+        from iidm_viewer.diagrams import render_sld_tab
+        try:
+            render_sld_tab(node_breaker_network, "S1VL1")
+        except Exception:
+            pass
+
+    # Log must be empty — duplicate ts was skipped
+    assert st.session_state.get("_change_log_get_switches", []) == []
+    # Switch state must be unchanged
+    sw2 = node_breaker_network.get_switches(all_attributes=True)
+    assert bool(sw2.loc[sw_id, "open"]) == original_open

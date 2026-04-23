@@ -10,6 +10,7 @@ Python contract: a single call
         lines=[{id, voltageLevelId1, voltageLevelId2,
                 terminal1Connected, terminal2Connected,
                 p1, p2, i1?, i2?, name?}, ...],
+        line_positions=[{id, coordinates: [{lat, lon}, ...]}, ...],
         height=670,
         key="map",
     ) -> None
@@ -33,6 +34,8 @@ def render_interactive_map(
     substations,
     substation_positions,
     lines,
+    line_positions=None,
+    version: int = 0,
     height: int = 670,
     key: str = "map",
 ):
@@ -40,6 +43,8 @@ def render_interactive_map(
         substations=substations,
         substationPositions=substation_positions,
         lines=lines,
+        linePositions=line_positions or [],
+        version=version,
         height=height,
         default=None,
         key=key,

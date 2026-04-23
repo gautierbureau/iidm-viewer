@@ -1,12 +1,13 @@
 """Geographical network map tab.
 
-Data extraction runs on the pypowsybl worker thread and produces three
+Data extraction runs on the pypowsybl worker thread and produces four
 lists matching the shape expected by
 ``@powsybl/network-map-layers``:
 
     substations:          MapSubstation[]       (id, name, voltageLevels[])
     substation_positions: GeoDataSubstation[]   (id, coordinate{lon,lat})
     lines:                MapLine[]             (lines + 2W transformers)
+    line_positions:       LinePosition[]        (id, coordinates[{lat,lon}])
 
 The frontend (``frontend/map_component/``) consumes them via
 ``render_interactive_map`` and draws the map with MapLibre + deck.gl.
@@ -46,11 +47,6 @@ def _extract_map_data(network):
     raw = object.__getattribute__(network, "_obj")
 
     def _extract():
-        from pypowsybl.network import get_extensions_names
-
-        if "substationPosition" not in get_extensions_names():
-            return None
-
         subs_pos_df = raw.get_extensions("substationPosition")
         if subs_pos_df.empty:
             return None
@@ -120,7 +116,36 @@ def _extract_map_data(network):
         except Exception:
             pass
 
-        return substations, substation_positions, lines
+        # Line positions from the linePosition extension (optional).
+        # Each entry: {id, coordinates: [{lat, lon}, ...]} sorted by num.
+        # Skipped entirely when the network doesn't carry the extension.
+        line_positions = []
+        try:
+            lpos_df = raw.get_extensions("linePosition").reset_index()
+            lpos_df = lpos_df[
+                lpos_df["latitude"].between(-90, 90)
+                & lpos_df["longitude"].between(-180, 180)
+            ]
+            if not lpos_df.empty:
+                # Vectorised grouping — the previous .apply(lambda +
+                # iterrows) path was O(rows) in Python bytecode and
+                # dominated network-load time on large grids.
+                lpos_df = lpos_df.sort_values("num")
+                lpos_df = lpos_df.rename(
+                    columns={"latitude": "lat", "longitude": "lon"}
+                )
+                lpos_df["lat"] = lpos_df["lat"].astype(float)
+                lpos_df["lon"] = lpos_df["lon"].astype(float)
+                for lid, group in lpos_df.groupby("id", sort=False):
+                    coords = group[["lat", "lon"]].to_dict("records")
+                    if coords:
+                        line_positions.append(
+                            {"id": str(lid), "coordinates": coords}
+                        )
+        except Exception:
+            pass
+
+        return substations, substation_positions, lines, line_positions
 
     return run(_extract)
 
@@ -140,13 +165,18 @@ def _line_record(row) -> dict:
     }
 
 
+_MISSING = object()  # sentinel: key absent from session state (distinct from None)
+
+
 def _get_cached_map_data(network):
     """Cache extraction in session state so reruns don't reprocess."""
-    cache = st.session_state.get("_map_data_cache")
-    if cache is not None:
-        return cache
+    cache = st.session_state.get("_map_data_cache", _MISSING)
+    if cache is not _MISSING:
+        return cache  # may be None when the network has no geo data
     result = _extract_map_data(network)
     st.session_state["_map_data_cache"] = result
+    # Bump the version so the JS map component knows to rebuild layers.
+    st.session_state["_map_data_version"] = st.session_state.get("_map_data_version", 0) + 1
     return result
 
 
@@ -162,7 +192,7 @@ def render_network_map(network, selected_vl):
         )
         return
 
-    substations, substation_positions, lines = data
+    substations, substation_positions, lines, line_positions = data
 
     if not substation_positions:
         st.info(
@@ -171,14 +201,35 @@ def render_network_map(network, selected_vl):
         )
         return
 
-    render_interactive_map(
-        substations=substations,
-        substation_positions=substation_positions,
-        lines=lines,
-        height=670,
-        key="network_map",
-    )
+    version = st.session_state.get("_map_data_version", 0)
 
-    st.caption(
-        f"{len(substations)} substations, {len(lines)} branches on the map"
-    )
+    if st.session_state.get("_map_last_sent_version") == version:
+        # Data unchanged — send empty arrays so Streamlit doesn't serialize
+        # and transfer the full network payload on every navigation rerun.
+        # The JS component skips layer rebuilds via the version check.
+        render_interactive_map(
+            substations=[],
+            substation_positions=[],
+            lines=[],
+            line_positions=[],
+            version=version,
+            height=670,
+            key="network_map",
+        )
+    else:
+        st.session_state["_map_last_sent_version"] = version
+        render_interactive_map(
+            substations=substations,
+            substation_positions=substation_positions,
+            lines=lines,
+            line_positions=line_positions,
+            version=version,
+            height=670,
+            key="network_map",
+        )
+
+    line_pos_count = len(line_positions)
+    caption = f"{len(substations)} substations, {len(lines)} branches"
+    if line_pos_count:
+        caption += f", {line_pos_count} lines with detailed geometry"
+    st.caption(caption)

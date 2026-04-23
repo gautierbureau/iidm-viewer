@@ -1537,3 +1537,76 @@ def test_validate_secondary_voltage_control_requires_pilot_bus():
 def test_create_secondary_voltage_control_raises_on_validation_error(node_breaker_network):
     with pytest.raises(ValueError, match="zone"):
         create_secondary_voltage_control(node_breaker_network, [], [])
+
+
+# ---------------------------------------------------------------------------
+# toggle_switch
+# ---------------------------------------------------------------------------
+
+def test_toggle_switch_changes_open_state(node_breaker_network):
+    from iidm_viewer.state import toggle_switch
+    sw = node_breaker_network.get_switches(all_attributes=True)
+    sw_id = sw.index[0]
+    original_open = bool(sw.loc[sw_id, "open"])
+
+    before, after = toggle_switch(node_breaker_network, sw_id, not original_open)
+
+    assert before == original_open
+    assert after == (not original_open)
+    sw2 = node_breaker_network.get_switches(all_attributes=True)
+    assert bool(sw2.loc[sw_id, "open"]) == (not original_open)
+
+
+def test_toggle_switch_returns_to_original(node_breaker_network):
+    from iidm_viewer.state import toggle_switch
+    sw = node_breaker_network.get_switches(all_attributes=True)
+    sw_id = sw.index[0]
+    original_open = bool(sw.loc[sw_id, "open"])
+
+    toggle_switch(node_breaker_network, sw_id, not original_open)
+    toggle_switch(node_breaker_network, sw_id, original_open)
+
+    sw2 = node_breaker_network.get_switches(all_attributes=True)
+    assert bool(sw2.loc[sw_id, "open"]) == original_open
+
+
+def test_toggle_switch_unknown_id_raises(node_breaker_network):
+    from iidm_viewer.state import toggle_switch
+    with pytest.raises(KeyError, match="NONEXISTENT"):
+        toggle_switch(node_breaker_network, "NONEXISTENT", True)
+
+
+# ---------------------------------------------------------------------------
+# add_to_change_log
+# ---------------------------------------------------------------------------
+
+def test_add_to_change_log_records_entry(node_breaker_network):
+    from iidm_viewer.state import add_to_change_log
+    import streamlit as st
+    st.session_state.pop("_change_log_get_switches", None)
+
+    changes = pd.DataFrame({"open": [True]}, index=pd.Index(["SW1"], name="id"))
+    original = pd.DataFrame({"open": [False]}, index=pd.Index(["SW1"], name="id"))
+    add_to_change_log("get_switches", changes, original)
+
+    log = st.session_state["_change_log_get_switches"]
+    assert len(log) == 1
+    assert log[0] == {"element_id": "SW1", "property": "open", "before": False, "after": True}
+
+
+def test_add_to_change_log_collapses_re_edit(node_breaker_network):
+    from iidm_viewer.state import add_to_change_log
+    import streamlit as st
+    st.session_state.pop("_change_log_get_switches", None)
+
+    original = pd.DataFrame({"open": [False]}, index=pd.Index(["SW1"], name="id"))
+    add_to_change_log("get_switches",
+                      pd.DataFrame({"open": [True]}, index=pd.Index(["SW1"], name="id")),
+                      original)
+    # Re-edit: set back to original value — entry should vanish
+    add_to_change_log("get_switches",
+                      pd.DataFrame({"open": [False]}, index=pd.Index(["SW1"], name="id")),
+                      original)
+
+    log = st.session_state.get("_change_log_get_switches", [])
+    assert log == []

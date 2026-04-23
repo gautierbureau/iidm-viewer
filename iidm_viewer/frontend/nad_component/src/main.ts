@@ -74,6 +74,13 @@ function render(args: RenderArgs): void {
     metadata,
     {
       enableDragInteraction: true,
+      // enableAdaptiveTextZoom makes the library call createLegendBox() during
+      // init, which creates interactive <div class="nad-label-box"> elements
+      // in its own <foreignObject class="nad-text-nodes"> container.
+      // Setting the threshold to MAX_VALUE ensures labels are always rendered
+      // (the adaptive path only hides labels when maxDisplayedSize > threshold).
+      enableAdaptiveTextZoom: true,
+      adaptiveTextZoomThreshold: Number.MAX_VALUE,
       onSelectNodeCallback: (equipmentId: string) => {
         setComponentValue({
           type: 'nad-vl-click',
@@ -83,6 +90,17 @@ function render(args: RenderArgs): void {
       },
     }
   );
+
+  // pypowsybl's Java library emits each text node as an individual
+  // <foreignObject id="textNodeId" x="…" y="…"> inside a
+  // <g class="nad-text-nodes"> group.  The JS viewer library creates its own
+  // <foreignObject class="nad-text-nodes"> container with interactive
+  // nad-label-box divs (via createLegendBox, triggered above by
+  // enableAdaptiveTextZoom).  We must remove the Java-generated SVG groups so
+  // that querySelector("[id='<legendSvgId>']") resolves to the interactive divs
+  // rather than the original foreignObjects, whose SVG x/y attributes cannot
+  // be updated via the CSS left/top writes that updateTextNodePosition uses.
+  root.querySelectorAll('g.nad-text-nodes').forEach((el) => el.remove());
 
   setFrameHeight(height);
 }

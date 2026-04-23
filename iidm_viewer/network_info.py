@@ -2,6 +2,10 @@ import streamlit as st
 import pandas as pd
 
 
+def _net_key(network) -> int:
+    return id(object.__getattribute__(network, "_obj"))
+
+
 COMPONENT_TYPES = {
     "Substations": "get_substations",
     "Voltage Levels": "get_voltage_levels",
@@ -199,6 +203,49 @@ def _country_totals(network) -> pd.DataFrame:
     return out
 
 
+def _get_overview_data(network) -> tuple:
+    """Compute and cache Overview tab data per (net_key, lf_gen).
+
+    Returns (country_df, losses, by_country, counts) where:
+      - country_df: DataFrame from _country_totals
+      - losses: dict from _branch_losses_totals
+      - by_country: Series from _losses_by_country
+      - counts: dict label -> int from COMPONENT_TYPES
+    """
+    net_key = _net_key(network)
+    lf_gen = st.session_state.get("_lf_gen", 0)
+
+    cached = st.session_state.get("_overview_cache")
+    if (
+        cached is not None
+        and cached.get("net_key") == net_key
+        and cached.get("lf_gen") == lf_gen
+    ):
+        return cached["data"]
+
+    country_df = _country_totals(network)
+    losses = _branch_losses_totals(network)
+    by_country = _losses_by_country(network)
+
+    counts = {}
+    for label, method in COMPONENT_TYPES.items():
+        try:
+            df = getattr(network, method)()
+            count = len(df)
+            if count > 0:
+                counts[label] = count
+        except Exception:
+            pass
+
+    data = (country_df, losses, by_country, counts)
+    st.session_state["_overview_cache"] = {
+        "net_key": net_key,
+        "lf_gen": lf_gen,
+        "data": data,
+    }
+    return data
+
+
 def render_overview(network):
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Network ID", network.id)
@@ -206,8 +253,9 @@ def render_overview(network):
     col3.metric("Format", network.source_format)
     col4.metric("Case Date", str(network.case_date.date()) if network.case_date else "-")
 
+    country_df, losses, by_country, counts = _get_overview_data(network)
+
     st.subheader("Generation and Consumption by Country")
-    country_df = _country_totals(network)
     if country_df.empty:
         st.info("No generation or consumption data available.")
     else:
@@ -225,7 +273,6 @@ def render_overview(network):
         st.dataframe(display, use_container_width=True, hide_index=True)
 
     st.subheader("Network Losses")
-    losses = _branch_losses_totals(network)
     if not losses.get("_has_data"):
         st.info("No loss data available (run a load flow first).")
     else:
@@ -234,7 +281,6 @@ def render_overview(network):
         lc2.metric("Line losses", f"{losses['lines']:.2f} MW")
         lc3.metric("Transformer losses", f"{losses['transformers']:.2f} MW")
 
-        by_country = _losses_by_country(network)
         if not by_country.empty:
             losses_df = by_country.round(2).reset_index()
             losses_df.columns = ["Country", "Losses (MW)"]
@@ -243,16 +289,6 @@ def render_overview(network):
 
     st.subheader("Component Statistics")
     with st.expander("Component statistics", expanded=False):
-        counts = {}
-        for label, method in COMPONENT_TYPES.items():
-            try:
-                df = getattr(network, method)()
-                count = len(df)
-                if count > 0:
-                    counts[label] = count
-            except Exception:
-                pass
-
         if counts:
             cols = st.columns(4)
             for i, (label, count) in enumerate(counts.items()):

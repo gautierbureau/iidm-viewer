@@ -73,6 +73,7 @@ def _prepare(xiidm_upload):
     at.run(timeout=30)
     at.session_state["network"] = load_network(xiidm_upload)
     at.session_state["_last_file"] = xiidm_upload.name
+    at.session_state["active_tab_sync"] = 4  # Data Explorer Components
     at.run(timeout=30)
     return at
 

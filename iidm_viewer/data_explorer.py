@@ -38,12 +38,12 @@ from iidm_viewer.state import (
     next_free_node,
     remove_components,
     run_loadflow,
+    add_to_change_log,
     update_components,
 )
+from iidm_viewer.caches import get_enriched_component
 from iidm_viewer.filters import (
     FILTERS,
-    build_vl_lookup,
-    enrich_with_joins,
     render_filters,
 )
 
@@ -147,39 +147,7 @@ def _compute_changes(original: pd.DataFrame, edited: pd.DataFrame,
 
 
 def _add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: pd.DataFrame):
-    """Accumulate successfully-applied cell changes into a per-component session-state log."""
-    key = f"_change_log_{method_name}"
-    log: list[dict] = list(st.session_state.get(key, []))
-
-    for element_id in changes_df.index:
-        for col in changes_df.columns:
-            new_val = changes_df.at[element_id, col]
-            try:
-                if pd.isna(new_val):
-                    continue
-            except (TypeError, ValueError):
-                pass
-            existing = next(
-                (e for e in log if e["element_id"] == element_id and e["property"] == col),
-                None,
-            )
-            if existing is None:
-                before_val = original_df.at[element_id, col] if col in original_df.columns else None
-                log.append({
-                    "element_id": element_id,
-                    "property": col,
-                    "before": before_val,
-                    "after": new_val,
-                })
-            else:
-                existing["after"] = new_val
-                try:
-                    if existing["before"] == existing["after"]:
-                        log.remove(existing)
-                except Exception:
-                    pass
-
-    st.session_state[key] = log
+    add_to_change_log(method_name, changes_df, original_df)
 
 
 def _render_change_log(network, component: str, method_name: str):
@@ -1148,23 +1116,18 @@ def render_data_explorer(network, selected_vl):
 
     with st.spinner(f"Loading {component}..."):
         try:
-            kwargs = {}
-            if filter_by_vl and selected_vl:
-                kwargs["voltage_level_id"] = selected_vl
-
-            try:
-                df = getattr(network, method_name)(all_attributes=True, **kwargs)
-            except Exception as e:
-                if filter_by_vl and "No data provided for index" in str(e):
-                    st.info(f"No {component.lower()} in this voltage level.")
-                    return
-                raise
+            df = get_enriched_component(network, method_name)
 
             if df.empty:
                 st.info(f"No {component.lower()} found in this network.")
                 return
 
-            df = enrich_with_joins(df, build_vl_lookup(network))
+            if filter_by_vl and selected_vl and "voltage_level_id" in df.columns:
+                df = df[df["voltage_level_id"].astype(str) == str(selected_vl)]
+                if df.empty:
+                    st.info(f"No {component.lower()} in this voltage level.")
+                    return
+
             df = _reorder_columns(df, component)
             total = len(df)
 

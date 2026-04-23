@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 
+from iidm_viewer.caches import get_vl_nominal_v
 from iidm_viewer.state import build_bus_faults, run_short_circuit_analysis
 
 
@@ -10,8 +11,8 @@ _STUDY_TYPES = ["SUB_TRANSIENT", "TRANSIENT"]
 
 def _get_nominal_voltages(network) -> list[float]:
     try:
-        vls = network.get_voltage_levels(attributes=["nominal_v"])
-        return sorted(vls["nominal_v"].dropna().unique().tolist())
+        df = get_vl_nominal_v(network)
+        return sorted(df["nominal_v"].dropna().unique().tolist())
     except Exception:
         return []
 

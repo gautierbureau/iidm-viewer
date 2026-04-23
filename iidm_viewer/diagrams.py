@@ -2,9 +2,11 @@ import html
 import math
 import re
 
+import pandas as pd
 import streamlit as st
 from iidm_viewer.nad_component import render_interactive_nad
 from iidm_viewer.sld_component import render_interactive_sld
+from iidm_viewer.state import add_to_change_log, toggle_switch
 
 
 # Fallback palette used only when the exact SLD-SVG color cannot be
@@ -33,6 +35,14 @@ _SLD_COLOR_RE = re.compile(
 _SLD_BUSBAR_RE = re.compile(
     r'<g\s+class="sld-busbar-section\s+sld-(vl\d+to\d+)\s+sld-bus-(\d+)"\s+id="id([^"]+)"'
 )
+# The SLG renderer encodes non-alphanumeric characters in SVG element IDs as
+# _<decimal ASCII>_  (e.g. underscore '_' → '_95_', hyphen '-' → '_45_').
+_SVG_ID_ENCODE_RE = re.compile(r'_(\d+)_')
+
+
+def _decode_svg_id(encoded: str) -> str:
+    """Decode the SLG id encoding back to the original network element id."""
+    return _SVG_ID_ENCODE_RE.sub(lambda m: chr(int(m.group(1))), encoded)
 
 
 def _parse_sld_palette(svg: str) -> dict:
@@ -44,9 +54,13 @@ def _parse_sld_palette(svg: str) -> dict:
 
 
 def _parse_sld_busbar_indices(svg: str) -> dict:
-    """Return ``{busbar_section_id: (band, bus_index)}`` from <g> elements."""
+    """Return ``{busbar_section_id: (band, bus_index)}`` from <g> elements.
+
+    SVG element ids use the SLG encoding (``_<decimal>_``) for special chars;
+    decoded back to the real network element id before returning.
+    """
     return {
-        m.group(3): (m.group(1), int(m.group(2)))
+        _decode_svg_id(m.group(3)): (m.group(1), int(m.group(2)))
         for m in _SLD_BUSBAR_RE.finditer(svg or "")
     }
 
@@ -71,25 +85,28 @@ def _resolve_bus_colors(network, selected_vl: str, svg: str) -> dict:
     # (get_busbar_sections lists real sections), then bus-breaker (the
     # SLG renderer injects a virtual busbar per bus-breaker bus, whose
     # id matches the bus-breaker bus id).
+    # Use the network-level cache — busbar topology never changes during navigation.
     bb_to_bus: dict = {}
-    try:
-        bbs = network.get_busbar_sections(all_attributes=True)
-        bbs = bbs[bbs["voltage_level_id"].astype(str) == str(selected_vl)]
-        for bb_id, row in bbs.iterrows():
-            bus_id = row.get("bus_id")
-            if bus_id:
-                bb_to_bus[str(bb_id)] = str(bus_id)
-    except Exception:
-        pass
-    if not bb_to_bus:
+    bbs = _get_busbar_sections(network)
+    if bbs is not None:
         try:
-            tp = network.get_bus_breaker_topology(selected_vl)
-            for bb_id, row in tp.buses.iterrows():
+            vl_bbs = bbs[bbs["voltage_level_id"].astype(str) == str(selected_vl)]
+            for bb_id, row in vl_bbs.iterrows():
                 bus_id = row.get("bus_id")
                 if bus_id:
                     bb_to_bus[str(bb_id)] = str(bus_id)
         except Exception:
             pass
+    if not bb_to_bus:
+        bbt_df = _get_bbt_buses(network, selected_vl)
+        if bbt_df is not None:
+            try:
+                for bb_id, row in bbt_df.iterrows():
+                    bus_id = row.get("bus_id")
+                    if bus_id:
+                        bb_to_bus[str(bb_id)] = str(bus_id)
+            except Exception:
+                pass
 
     colors: dict = {}
     for bb_id, key in busbars.items():
@@ -121,11 +138,8 @@ def _render_bus_legend(network, selected_vl: str, svg: str = "") -> None:
     pypowsybl's SLG output exactly; buses the SVG doesn't tag fall back
     to :data:`_BUS_LEGEND_PALETTE` (ordered by bus index in the VL).
     """
-    try:
-        buses = network.get_buses(all_attributes=True).reset_index()
-    except Exception:
-        return
-    if buses.empty:
+    buses = _get_buses_all(network)
+    if buses is None or buses.empty:
         return
 
     buses["voltage_level_id"] = buses["voltage_level_id"].astype(str)
@@ -176,19 +190,26 @@ def render_nad_tab(network, selected_vl):
         st.info("Select a voltage level in the sidebar to display the Network Area Diagram.")
         return
 
-    with st.spinner("Generating Network Area Diagram..."):
-        try:
-            nad_params = NadParameters(edge_name_displayed=True, power_value_precision=1)
-            nad = network.get_network_area_diagram(
-                voltage_level_ids=[selected_vl],
-                depth=depth,
-                nad_parameters=nad_params,
-            )
-            svg = nad.svg
-            metadata = nad.metadata
-        except Exception as e:
-            st.error(f"Error generating NAD: {e}")
-            return
+    cache_key = (selected_vl, depth)
+    nad_cache = st.session_state.setdefault("_nad_cache", {})
+    cached = nad_cache.get(cache_key)
+    if cached is not None:
+        svg, metadata = cached
+    else:
+        with st.spinner("Generating Network Area Diagram..."):
+            try:
+                nad_params = NadParameters(edge_name_displayed=True, power_value_precision=1)
+                nad = network.get_network_area_diagram(
+                    voltage_level_ids=[selected_vl],
+                    depth=depth,
+                    nad_parameters=nad_params,
+                )
+                svg = nad.svg
+                metadata = nad.metadata
+            except Exception as e:
+                st.error(f"Error generating NAD: {e}")
+                return
+        nad_cache[cache_key] = (svg, metadata)
 
     click = render_interactive_nad(
         svg=svg,
@@ -205,30 +226,150 @@ def render_nad_tab(network, selected_vl):
             st.rerun()
 
 
+def _net_key(network) -> int:
+    """Stable id for the underlying pypowsybl Network object."""
+    return id(object.__getattribute__(network, "_obj"))
+
+
+def _get_substation_map(network) -> dict:
+    """Return ``{vl_id: (substation_id, has_multi_vl)}`` for every VL.
+
+    Reuses the ``get_voltage_levels_df`` result that the VL selector already
+    fetches on every rerun — zero additional worker round-trips.
+    """
+    key = _net_key(network)
+    if st.session_state.get("_sub_map_net") == key:
+        return st.session_state["_sub_map_cache"]
+    mapping: dict = {}
+    try:
+        from iidm_viewer.state import get_voltage_levels_df
+        vls = get_voltage_levels_df(network)
+        sub_count = vls.groupby("substation_id")["id"].count().to_dict()
+        for _, row in vls.iterrows():
+            vl_id = str(row["id"])
+            sid_raw = row.get("substation_id")
+            sid = str(sid_raw) if sid_raw else None
+            mapping[vl_id] = (sid, sub_count.get(sid, 0) > 1 if sid else False)
+    except Exception:
+        mapping = {}
+    st.session_state["_sub_map_cache"] = mapping
+    st.session_state["_sub_map_net"] = key
+    return mapping
+
+
+def _get_busbar_sections(network):
+    """Cache ``get_busbar_sections(all_attributes=True)`` per network.
+
+    Busbar-section topology is static; caching avoids 2 round-trips on
+    every SLD tab rerun.  Returns ``None`` on failure.
+    """
+    key = _net_key(network)
+    if st.session_state.get("_bbs_net") == key:
+        return st.session_state["_bbs_cache"]
+    try:
+        bbs = network.get_busbar_sections(all_attributes=True)
+    except Exception:
+        bbs = None
+    st.session_state["_bbs_cache"] = bbs
+    st.session_state["_bbs_net"] = key
+    return bbs
+
+
+def _get_buses_all(network):
+    """Return ``get_buses(all_attributes=True)`` with ``reset_index()``, cached.
+
+    Delegates to :func:`iidm_viewer.caches.get_buses_all` which owns the
+    ``(net_key, lf_gen)`` invalidation. Returns ``None`` on empty result so
+    call sites can keep their ``if buses is None or buses.empty`` guard.
+    """
+    from iidm_viewer.caches import get_buses_all
+    df = get_buses_all(network)
+    return df.reset_index() if not df.empty else None
+
+
+def _get_bbt_buses(network, vl_id: str):
+    """Return the ``tp.buses`` DataFrame for ``vl_id``, cached per (net_key, vl).
+
+    ``get_bus_breaker_topology`` costs 2 RT and ``.buses`` costs 1 RT; caching
+    the result DataFrame eliminates all 3 RT on repeated SLD navigation.
+    Topology is static — invalidation is handled by ``_TOPOLOGY_CACHE_KEYS``
+    in caches.py popping ``"_bbt_cache"`` on every topology edit.
+    Returns ``None`` on failure.
+    """
+    key = _net_key(network)
+    cache = st.session_state.setdefault("_bbt_cache", {})
+    cache_key = (key, vl_id)
+    if cache_key in cache:
+        return cache[cache_key]
+    try:
+        tp = network.get_bus_breaker_topology(vl_id)
+        df = tp.buses
+    except Exception:
+        df = None
+    cache[cache_key] = df
+    return df
+
+
 def render_sld_tab(network, selected_vl):
     from pypowsybl.network import SldParameters
     if not selected_vl:
         st.info("Select a voltage level in the sidebar to display the Single Line Diagram.")
         return
 
-    with st.spinner("Generating Single Line Diagram..."):
-        try:
-            sld_params = SldParameters(use_name=True, tooltip_enabled=True)
-            sld = network.get_single_line_diagram(
-                selected_vl,
-                parameters=sld_params,
-            )
-            svg = sld.svg
-            metadata = sld.metadata
-        except Exception as e:
-            st.error(f"Error generating SLD: {e}")
-            return
+    # Reset expand state when the primary VL changes.
+    if st.session_state.get("_sld_last_vl") != selected_vl:
+        st.session_state["_sld_last_vl"] = selected_vl
+        st.session_state["sld_show_substation"] = False
+
+    show_substation = bool(st.session_state.get("sld_show_substation", False))
+
+    # Pure-Python lookup — the substation map is built once per network load.
+    substation_id, multi_vl = _get_substation_map(network).get(selected_vl, (None, False))
+
+    # Determine the container to render and the svgType for the viewer.
+    if show_substation and substation_id:
+        container_id = substation_id
+        svg_type = "substation"
+    else:
+        container_id = selected_vl
+        svg_type = "voltage-level"
+
+    # Expand / collapse button (only shown when the substation has >1 VL).
+    if substation_id and multi_vl:
+        if show_substation:
+            if st.button("Collapse to voltage level", key="sld_collapse_btn"):
+                st.session_state["sld_show_substation"] = False
+                st.rerun()
+        else:
+            if st.button("Expand to substation", key="sld_expand_btn"):
+                st.session_state["sld_show_substation"] = True
+                st.rerun()
+
+    sld_cache = st.session_state.setdefault("_sld_cache", {})
+    cached_sld = sld_cache.get(container_id)
+    if cached_sld is not None:
+        svg, metadata = cached_sld
+    else:
+        with st.spinner("Generating Single Line Diagram..."):
+            try:
+                sld_params = SldParameters(use_name=True, tooltip_enabled=True)
+                sld = network.get_single_line_diagram(
+                    container_id,
+                    parameters=sld_params,
+                )
+                svg = sld.svg
+                metadata = sld.metadata
+            except Exception as e:
+                st.error(f"Error generating SLD: {e}")
+                return
+        sld_cache[container_id] = (svg, metadata)
 
     click = render_interactive_sld(
         svg=svg,
         metadata=metadata,
         height=700,
-        key=f"sld_{selected_vl}",
+        svg_type=svg_type,
+        key=f"sld_{container_id}",
     )
 
     _render_bus_legend(network, selected_vl, svg)
@@ -239,3 +380,25 @@ def render_sld_tab(network, selected_vl):
             st.session_state.selected_vl = vl
             st.session_state["_vl_set_by_click"] = True
             st.rerun()
+
+    if click and click.get("type") == "sld-breaker-click":
+        ts = click.get("ts")
+        if ts and ts != st.session_state.get("_last_breaker_click_ts"):
+            st.session_state["_last_breaker_click_ts"] = ts
+            switch_id = _decode_svg_id(str(click.get("breakerId", "")))
+            new_open = bool(click.get("open", False))
+            if switch_id:
+                try:
+                    before_open, after_open = toggle_switch(network, switch_id, new_open)
+                    changes_df = pd.DataFrame(
+                        {"open": [after_open]},
+                        index=pd.Index([switch_id], name="id"),
+                    )
+                    original_df = pd.DataFrame(
+                        {"open": [before_open]},
+                        index=pd.Index([switch_id], name="id"),
+                    )
+                    add_to_change_log("get_switches", changes_df, original_df)
+                except Exception as exc:
+                    st.error(f"Switch toggle failed: {exc}")
+                st.rerun()

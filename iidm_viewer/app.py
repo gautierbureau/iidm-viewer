@@ -25,6 +25,8 @@ from iidm_viewer.voltage_analysis import render_voltage_analysis
 from iidm_viewer.injection_map import render_injection_map
 from iidm_viewer.security_analysis import render_security_analysis
 from iidm_viewer.short_circuit_analysis import render_short_circuit_analysis
+from iidm_viewer.active_tab import sync_active_tab
+from iidm_viewer.prewarming import render_prewarmer
 
 
 st.set_page_config(page_title="IIDM Viewer", layout="wide", page_icon="⚡")
@@ -145,6 +147,25 @@ if network is None:
     )
     st.stop()
 
+# Set to False to render every tab on every rerun (pre-gate behaviour).
+_ACTIVE_TAB_GATE = True
+
+_TAB_NAMES = [
+    "Overview",
+    "Network Map",
+    "Network Area Diagram",
+    "Single Line Diagram",
+    "Data Explorer Components",
+    "Data Explorer Extensions",
+    "Reactive Capability Curves",
+    "Operational Limits",
+    "Pmax Visualization",
+    "Voltage Analysis",
+    "Injection Map",
+    "Security Analysis",
+    "Short Circuit Analysis",
+]
+
 (
     tab_overview,
     tab_map,
@@ -159,59 +180,72 @@ if network is None:
     tab_injection,
     tab_sa,
     tab_sc,
-) = st.tabs(
-    [
-        "Overview",
-        "Network Map",
-        "Network Area Diagram",
-        "Single Line Diagram",
-        "Data Explorer Components",
-        "Data Explorer Extensions",
-        "Reactive Capability Curves",
-        "Operational Limits",
-        "Pmax Visualization",
-        "Voltage Analysis",
-        "Injection Map",
-        "Security Analysis",
-        "Short Circuit Analysis",
-    ]
-)
+) = st.tabs(_TAB_NAMES)
 
+# Overview always renders so the first paint is not blank.
+# The active-tab sync component and prewarmer live here so they don't
+# insert stray block-level elements into the main body outside the tabs
+# widget — those elements upset Streamlit/Baseweb's tab-bar overflow
+# calculation and cause the left/right scroll arrows to disappear.
 with tab_overview:
+    # Detect the active tab index. Returns 0 on first load; updates on each
+    # click.  The iframe's JS listener is on window.parent.document (capture
+    # phase) so it fires for clicks on any tab, not just the overview.
+    active = sync_active_tab(len(_TAB_NAMES))
     render_overview(network)
+    # Background prewarmer: silently populates shared caches for unvisited
+    # tabs.  The @st.fragment(run_every=0.1) keeps firing regardless of
+    # which tab panel is visible once the fragment is initialised here.
+    if _ACTIVE_TAB_GATE:
+        render_prewarmer(network)
+
+# When the gate is off, _tab(i) is always True so every body renders.
+_tab = (lambda i: active == i) if _ACTIVE_TAB_GATE else (lambda _: True)
 
 with tab_map:
-    render_network_map(network, selected_vl)
+    if _tab(1):
+        render_network_map(network, selected_vl)
 
 with tab_nad:
-    render_nad_tab(network, selected_vl)
+    if _tab(2):
+        render_nad_tab(network, selected_vl)
 
 with tab_sld:
-    render_sld_tab(network, selected_vl)
+    if _tab(3):
+        render_sld_tab(network, selected_vl)
 
 with tab_components:
-    render_data_explorer(network, selected_vl)
+    if _tab(4):
+        render_data_explorer(network, selected_vl)
 
 with tab_extensions:
-    render_extensions_explorer(network)
+    if _tab(5):
+        render_extensions_explorer(network)
 
 with tab_rcc:
-    render_reactive_curves(network, selected_vl)
+    if _tab(6):
+        render_reactive_curves(network, selected_vl)
 
 with tab_limits:
-    render_operational_limits(network, selected_vl)
+    if _tab(7):
+        render_operational_limits(network, selected_vl)
 
 with tab_pmax:
-    render_pmax_visualization(network, selected_vl)
+    if _tab(8):
+        render_pmax_visualization(network, selected_vl)
 
 with tab_voltage:
-    render_voltage_analysis(network)
+    if _tab(9):
+        render_voltage_analysis(network)
 
 with tab_injection:
-    render_injection_map(network)
+    if _tab(10):
+        render_injection_map(network)
 
 with tab_sa:
-    render_security_analysis(network)
+    if _tab(11):
+        render_security_analysis(network)
 
 with tab_sc:
-    render_short_circuit_analysis(network)
+    if _tab(12):
+        render_short_circuit_analysis(network)

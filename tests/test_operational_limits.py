@@ -189,11 +189,8 @@ def test_compute_loading_valid_mocked_data():
         {"i1": [200.0], "i2": [150.0], "name": ["Line 1"]},
         index=pd.Index(["L1"], name="id"),
     )
-    get_lines_mock = MagicMock()
-    get_lines_mock.reset_index.return_value = lines_df.reset_index()
-
     net = MagicMock()
-    net.get_lines.return_value = get_lines_mock
+    net.get_lines.return_value = lines_df
     net.get_2_windings_transformers.side_effect = RuntimeError("unavailable")
 
     with patch("iidm_viewer.operational_limits._get_branch_losses", return_value={}):
@@ -208,18 +205,17 @@ def test_compute_loading_valid_mocked_data():
 
 
 def test_get_filtered_element_ids_exception_skips_method():
-    """Lines 180-181 (except/continue): both methods raise → empty set."""
+    """Both component getters raise → get_enriched_component returns empty → empty set."""
     net = _mock_net(get_lines=True, get_2_windings_transformers=True)
-    with patch("iidm_viewer.operational_limits.build_vl_lookup", return_value={}):
+    with patch("iidm_viewer.operational_limits.get_enriched_component", return_value=pd.DataFrame()):
         result = _get_filtered_element_ids(net, None)
     assert result == set()
 
 
 def test_get_filtered_element_ids_empty_df_skips():
-    """Line 183 (continue when df.empty): both methods return empty df → empty set."""
-    empty = pd.DataFrame()
-    net = _mock_net(get_lines=empty, get_2_windings_transformers=empty)
-    with patch("iidm_viewer.operational_limits.build_vl_lookup", return_value={}):
+    """Both component getters return empty df → empty set."""
+    net = _mock_net(get_lines=pd.DataFrame(), get_2_windings_transformers=pd.DataFrame())
+    with patch("iidm_viewer.operational_limits.get_enriched_component", return_value=pd.DataFrame()):
         result = _get_filtered_element_ids(net, None)
     assert result == set()
 
