@@ -171,7 +171,7 @@ function buildLayers(
       network,
       geoData,
       getNominalVoltageColor,
-      disconnectedLineColor: [204, 204, 204, 255],
+      disconnectedLineColor: [100, 100, 100, 255],
       filteredNominalVoltages: network.getNominalVoltages(),
       labelsVisible: false,
       labelSize: 11,

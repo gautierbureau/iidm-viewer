@@ -17,8 +17,10 @@ def test_extract_map_data_returns_expected_counts(xiidm_upload):
 
     assert len(positions) == 11  # 11 substations in IEEE14
     assert len(substations) == 11
-    # 17 lines + 3 transformers = 20 branches
-    assert len(lines) == 20
+    # 17 lines (pypowsybl-jupyter's extract_map_data does not include
+    # 2-winding transformers; tie lines / HVDC lines are merged in but
+    # IEEE14 has none).
+    assert len(lines) == 17
     assert isinstance(line_positions, list)
 
 
