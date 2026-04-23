@@ -178,8 +178,8 @@ function buildLayers(
       labelColor: [0, 0, 0, 255],
       lineFullPath: true,
       lineParallelPath: true,
-      showLineFlow: true,
-      areFlowsValid: true,
+      showLineFlow: false,
+      areFlowsValid: false,
       updatedLines: [],
       pickable: true,
     }),
@@ -282,26 +282,41 @@ function render(args: RenderArgs): void {
 
     map.addControl(overlay as unknown as maplibregl.IControl);
 
-    // MapboxOverlay syncs the deck.gl viewport via the MapLibre 'render'
-    // event, but inside a Streamlit iframe the event sometimes doesn't
-    // propagate viewport changes reliably.  Add an explicit 'move'
-    // handler that forces a viewport sync on every pan/zoom.
-    map.on('move', () => {
+    // Diagnostics: check that the deck.gl overlay is properly set up.
+    setTimeout(() => {
       const deck = (overlay as any)?._deck;
-      if (!deck || !map) return;
-      const { lng, lat } = map.getCenter();
-      deck.setProps({
-        viewState: {
-          longitude: ((lng + 540) % 360) - 180,
-          latitude: lat,
-          zoom: map.getZoom(),
-          bearing: map.getBearing(),
-          pitch: map.getPitch(),
-          padding: map.getPadding(),
-          repeat: map.getRenderWorldCopies(),
-        },
-      });
-      if (deck.isInitialized) deck.redraw();
+      console.info('[map-diag] overlay._deck exists:', !!deck);
+      console.info('[map-diag] deck.isInitialized:', deck?.isInitialized);
+      const deckCanvas = root.querySelector('canvas:not(.maplibregl-canvas)');
+      console.info('[map-diag] deck canvas:', deckCanvas
+        ? `${(deckCanvas as HTMLCanvasElement).width}x${(deckCanvas as HTMLCanvasElement).height}`
+        : 'MISSING');
+      console.info('[map-diag] deck viewState:', JSON.stringify(deck?.viewManager?.getViewState?.()));
+      // List sub-layers to check if LineLayer actually produced sub-layers.
+      const layerIds = deck?.props?.layers?.map((l: any) => l.id) ?? [];
+      console.info('[map-diag] top-level layer ids:', layerIds);
+      const internalLayers = deck?.layerManager?.getLayers?.()?.map((l: any) => l.id) ?? [];
+      console.info('[map-diag] all rendered layer ids:', internalLayers);
+    }, 1000);
+
+    // Log the first few 'render' events to confirm viewport sync fires.
+    let renderCount = 0;
+    map.on('render', () => {
+      renderCount++;
+      if (renderCount <= 5) {
+        const { lng, lat } = map!.getCenter();
+        console.info(`[map-diag] render #${renderCount} center=(${lng.toFixed(3)},${lat.toFixed(3)}) zoom=${map!.getZoom().toFixed(2)}`);
+      }
+    });
+
+    // Log the first few 'move' events.
+    let moveCount = 0;
+    map.on('move', () => {
+      moveCount++;
+      if (moveCount <= 10) {
+        const { lng, lat } = map!.getCenter();
+        console.info(`[map-diag] move #${moveCount} center=(${lng.toFixed(3)},${lat.toFixed(3)}) zoom=${map!.getZoom().toFixed(2)}`);
+      }
     });
   });
 
