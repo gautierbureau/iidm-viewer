@@ -9,8 +9,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from iidm_viewer.caches import get_buses_all, get_lines_all
-from iidm_viewer.filters import build_vl_lookup, enrich_with_joins
+from iidm_viewer.caches import (
+    _cache_key,
+    get_buses_all,
+    get_enriched_component,
+    get_lines_all,
+)
 
 
 def _compute_pmax_data(network) -> pd.DataFrame:
@@ -19,17 +23,26 @@ def _compute_pmax_data(network) -> pd.DataFrame:
     Requires a completed load flow (v_mag > 0 on both terminal buses).
     Columns: name, voltage_level1_id, voltage_level2_id, x_ohm, v1_kv, v2_kv,
              pmax_mw, p_actual_mw, p_pmax_ratio, delta_deg, margin_pct.
+
+    Cached by ``(net_key, lf_gen)`` so repeated tab visits hit the cache
+    instead of re-iterating every line.
     """
+    key = _cache_key(network)
+    cached = st.session_state.get("_pmax_cache")
+    if cached is not None and cached.get("key") == key:
+        return cached["df"]
+
     lines = get_lines_all(network)
     if lines.empty:
+        st.session_state["_pmax_cache"] = {"key": key, "df": pd.DataFrame()}
         return pd.DataFrame()
 
     buses = get_buses_all(network)
     if buses.empty:
+        st.session_state["_pmax_cache"] = {"key": key, "df": pd.DataFrame()}
         return pd.DataFrame()
 
-    vl_lookup = build_vl_lookup(network)
-    lines_en = enrich_with_joins(lines, vl_lookup)
+    lines_en = get_enriched_component(network, "get_lines")
 
     rows = []
     for line_id, r in lines_en.iterrows():
@@ -78,10 +91,14 @@ def _compute_pmax_data(network) -> pd.DataFrame:
         })
 
     if not rows:
+        st.session_state["_pmax_cache"] = {"key": key, "df": pd.DataFrame()}
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows).set_index("line_id")
-    return df.sort_values("margin_pct", ascending=True)
+    df = pd.DataFrame(rows).set_index("line_id").sort_values(
+        "margin_pct", ascending=True
+    )
+    st.session_state["_pmax_cache"] = {"key": key, "df": df}
+    return df
 
 
 def _build_pangle_chart(line_id: str, row: pd.Series) -> go.Figure:

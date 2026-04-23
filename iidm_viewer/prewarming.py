@@ -61,8 +61,10 @@ def _prewarm_limits(network) -> None:
     caches.get_operational_limits_df(network)
 
 
-def _prewarm_pmax(_network) -> None:
-    pass  # uses get_lines_all / get_2wt_all (warmed by overview step)
+def _prewarm_pmax(network) -> None:
+    # Populates _pmax_cache so first tab visit is instant.
+    from iidm_viewer.pmax_visualization import _compute_pmax_data
+    _compute_pmax_data(network)
 
 
 def _prewarm_voltage(_network) -> None:
