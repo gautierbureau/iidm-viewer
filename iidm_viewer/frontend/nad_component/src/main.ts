@@ -102,6 +102,18 @@ function render(args: RenderArgs): void {
   // be updated via the CSS left/top writes that updateTextNodePosition uses.
   root.querySelectorAll('g.nad-text-nodes').forEach((el) => el.remove());
 
+  // Ensure the foreignObject that hosts interactive label boxes is
+  // styled correctly.  Some pypowsybl versions omit the CSS rule
+  //   foreignObject.nad-text-nodes { overflow: visible; color: black }
+  // from the SVG <style> block, which leaves the foreignObject clipped
+  // and text colorless.  Apply these properties explicitly so labels
+  // render regardless of the pypowsybl version.
+  const fo = root.querySelector<SVGForeignObjectElement>('foreignObject.nad-text-nodes');
+  if (fo) {
+    fo.style.overflow = 'visible';
+    fo.style.color = 'black';
+  }
+
   setFrameHeight(height);
 }
 
