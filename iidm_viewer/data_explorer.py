@@ -38,6 +38,7 @@ from iidm_viewer.state import (
     next_free_node,
     remove_components,
     run_loadflow,
+    add_to_change_log,
     update_components,
 )
 from iidm_viewer.caches import get_enriched_component
@@ -146,39 +147,7 @@ def _compute_changes(original: pd.DataFrame, edited: pd.DataFrame,
 
 
 def _add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: pd.DataFrame):
-    """Accumulate successfully-applied cell changes into a per-component session-state log."""
-    key = f"_change_log_{method_name}"
-    log: list[dict] = list(st.session_state.get(key, []))
-
-    for element_id in changes_df.index:
-        for col in changes_df.columns:
-            new_val = changes_df.at[element_id, col]
-            try:
-                if pd.isna(new_val):
-                    continue
-            except (TypeError, ValueError):
-                pass
-            existing = next(
-                (e for e in log if e["element_id"] == element_id and e["property"] == col),
-                None,
-            )
-            if existing is None:
-                before_val = original_df.at[element_id, col] if col in original_df.columns else None
-                log.append({
-                    "element_id": element_id,
-                    "property": col,
-                    "before": before_val,
-                    "after": new_val,
-                })
-            else:
-                existing["after"] = new_val
-                try:
-                    if existing["before"] == existing["after"]:
-                        log.remove(existing)
-                except Exception:
-                    pass
-
-    st.session_state[key] = log
+    add_to_change_log(method_name, changes_df, original_df)
 
 
 def _render_change_log(network, component: str, method_name: str):

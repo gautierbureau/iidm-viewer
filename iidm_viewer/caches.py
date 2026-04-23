@@ -362,6 +362,7 @@ _TOPOLOGY_CACHE_KEYS = (
     "_oplimits_cache",
     "_reactive_curves_cache",
     "_bbt_cache",
+    "_sld_cache",               # switch open/closed state is topology, not load-flow
     "_sa_id_cache",
     "_sa_manual_df_cache",
     "_de_component_cache",
@@ -377,7 +378,6 @@ _GEOGRAPHY_CACHE_KEYS = (
 # Caches depending on load-flow results (p, q, i, bus voltages).
 _LOAD_FLOW_CACHE_KEYS = (
     "_nad_cache",
-    "_sld_cache",
     "_buses_all",
     "_buses_all_net",   # stale key written by old diagrams._get_buses_all — clean up
     "_shunts_all_cache",

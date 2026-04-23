@@ -2,9 +2,11 @@ import html
 import math
 import re
 
+import pandas as pd
 import streamlit as st
 from iidm_viewer.nad_component import render_interactive_nad
 from iidm_viewer.sld_component import render_interactive_sld
+from iidm_viewer.state import add_to_change_log, toggle_switch
 
 
 # Fallback palette used only when the exact SLD-SVG color cannot be
@@ -378,3 +380,25 @@ def render_sld_tab(network, selected_vl):
             st.session_state.selected_vl = vl
             st.session_state["_vl_set_by_click"] = True
             st.rerun()
+
+    if click and click.get("type") == "sld-breaker-click":
+        ts = click.get("ts")
+        if ts and ts != st.session_state.get("_last_breaker_click_ts"):
+            st.session_state["_last_breaker_click_ts"] = ts
+            switch_id = _decode_svg_id(str(click.get("breakerId", "")))
+            new_open = bool(click.get("open", False))
+            if switch_id:
+                try:
+                    before_open, after_open = toggle_switch(network, switch_id, new_open)
+                    changes_df = pd.DataFrame(
+                        {"open": [after_open]},
+                        index=pd.Index([switch_id], name="id"),
+                    )
+                    original_df = pd.DataFrame(
+                        {"open": [before_open]},
+                        index=pd.Index([switch_id], name="id"),
+                    )
+                    add_to_change_log("get_switches", changes_df, original_df)
+                except Exception as exc:
+                    st.error(f"Switch toggle failed: {exc}")
+                st.rerun()
