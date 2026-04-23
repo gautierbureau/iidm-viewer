@@ -108,11 +108,18 @@ function render(args: RenderArgs): void {
   // from the SVG <style> block, which leaves the foreignObject clipped
   // and text colorless.  Apply these properties explicitly so labels
   // render regardless of the pypowsybl version.
-  const fo = root.querySelector<SVGForeignObjectElement>('foreignObject.nad-text-nodes');
-  if (fo) {
-    fo.style.overflow = 'visible';
-    fo.style.color = 'black';
-  }
+  // The library may create the foreignObject asynchronously (debounced
+  // MutationObserver on viewBox changes), so defer the patch.
+  const patchForeignObject = () => {
+    const fo = root.querySelector('foreignObject.nad-text-nodes');
+    if (fo) {
+      (fo as SVGForeignObjectElement).style.overflow = 'visible';
+      (fo as SVGForeignObjectElement).style.color = 'black';
+    }
+  };
+  patchForeignObject();
+  // Retry once after the library's debounced init (50ms) completes.
+  setTimeout(patchForeignObject, 100);
 
   setFrameHeight(height);
 }
