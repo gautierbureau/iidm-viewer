@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as st_components
 from iidm_viewer.state import (
     create_empty_network,
     export_network,
@@ -175,6 +176,98 @@ if network is None:
         "Security Analysis",
         "Short Circuit Analysis",
     ]
+)
+
+# 13 top-level tabs overflow any normal viewport. Inject a 0-height iframe
+# that reaches into the parent document and attaches explicit ◀ / ▶ scroll
+# buttons to every overflowing tab list, so off-screen tabs always have a
+# visible navigation affordance regardless of what Streamlit's BaseWeb
+# chrome chooses to render.
+st_components.html(
+    """
+    <script>
+    (function () {
+        const doc = window.parent.document;
+        if (!doc) return;
+
+        const ARROW_CLASS = '__iidm_tab_arrow__';
+        const STYLE_ID = '__iidm_tab_arrow_style__';
+
+        if (!doc.getElementById(STYLE_ID)) {
+            const style = doc.createElement('style');
+            style.id = STYLE_ID;
+            style.textContent = `
+                .stTabs > div[data-baseweb="tab-list"] {
+                    position: relative;
+                }
+                .${ARROW_CLASS} {
+                    position: absolute;
+                    top: 0;
+                    bottom: 0;
+                    width: 32px;
+                    background: rgba(255, 255, 255, 0.85);
+                    border: none;
+                    cursor: pointer;
+                    font-size: 18px;
+                    line-height: 1;
+                    display: none;
+                    align-items: center;
+                    justify-content: center;
+                    z-index: 10;
+                    box-shadow: 0 0 6px rgba(0, 0, 0, 0.12);
+                }
+                .${ARROW_CLASS}.visible { display: flex; }
+                .${ARROW_CLASS}.prev { left: 0; }
+                .${ARROW_CLASS}.next { right: 0; }
+            `;
+            doc.head.appendChild(style);
+        }
+
+        function decorate(list) {
+            if (!list || list.dataset.iidmArrowed) return;
+            list.dataset.iidmArrowed = '1';
+
+            const prev = doc.createElement('button');
+            const next = doc.createElement('button');
+            prev.type = 'button';
+            next.type = 'button';
+            prev.className = ARROW_CLASS + ' prev';
+            next.className = ARROW_CLASS + ' next';
+            prev.textContent = '◀';
+            next.textContent = '▶';
+            prev.setAttribute('aria-label', 'Scroll tabs left');
+            next.setAttribute('aria-label', 'Scroll tabs right');
+
+            const scrollBy = (dx) => list.scrollBy({ left: dx, behavior: 'smooth' });
+            prev.addEventListener('click', () => scrollBy(-200));
+            next.addEventListener('click', () => scrollBy(200));
+
+            const update = () => {
+                const overflow = list.scrollWidth > list.clientWidth + 1;
+                prev.classList.toggle('visible', overflow && list.scrollLeft > 2);
+                next.classList.toggle(
+                    'visible',
+                    overflow && list.scrollLeft + list.clientWidth < list.scrollWidth - 2
+                );
+            };
+
+            list.appendChild(prev);
+            list.appendChild(next);
+            list.addEventListener('scroll', update);
+            new ResizeObserver(update).observe(list);
+            update();
+        }
+
+        function scan() {
+            doc.querySelectorAll('.stTabs > div[data-baseweb="tab-list"]').forEach(decorate);
+        }
+
+        scan();
+        new MutationObserver(scan).observe(doc.body, { childList: true, subtree: true });
+    })();
+    </script>
+    """,
+    height=0,
 )
 
 with tab_overview:
