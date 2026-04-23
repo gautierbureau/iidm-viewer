@@ -19,7 +19,7 @@
     "@luma.gl/engine": "~9.2.0",
     "@luma.gl/shadertools": "~9.2.0",
     "@powsybl/network-map-layers": "3.4.0",
-    "maplibre-gl": "^5.0.0"
+    "maplibre-gl": "^4.7.1"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

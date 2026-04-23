@@ -31,29 +31,43 @@ st.set_page_config(page_title="IIDM Viewer", layout="wide", page_icon="⚡")
 init_state()
 
 # With 13 top-level tabs the tab bar overflows any normal viewport. Streamlit's
-# BaseWeb tab list ships with its prev/next scroll arrows hidden by default and
-# also suppresses the native scrollbar, which leaves off-screen tabs with no
-# visible affordance. Force the tab list to show a thin horizontal scrollbar
-# and keep the overflow arrow buttons visible whenever BaseWeb renders them.
+# BaseWeb tab list hides overflow by default, leaving off-screen tabs
+# unreachable. Inject small arrow buttons (< >) on the sides of the tab bar
+# that scroll the list when clicked — no scrollbar, just arrows.
+# CSS via st.markdown (script tags are stripped), JS via st.components.v1.html
+# which renders in an iframe that can access the parent document.
 st.markdown(
     """
     <style>
     .stTabs [data-baseweb="tab-list"] {
         overflow-x: auto !important;
-        scrollbar-width: thin;
+        scroll-behavior: smooth;
+        scrollbar-width: none;          /* Firefox */
+        -ms-overflow-style: none;       /* IE/Edge */
     }
     .stTabs [data-baseweb="tab-list"]::-webkit-scrollbar {
-        height: 6px;
+        display: none;                  /* Chrome/Safari */
     }
-    .stTabs [data-baseweb="tab-list"]::-webkit-scrollbar-thumb {
-        background: rgba(128, 128, 128, 0.5);
-        border-radius: 3px;
+    .tab-scroll-btn {
+        position: absolute;
+        top: 0;
+        height: 100%;
+        width: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        z-index: 3;
+        background: rgba(255, 255, 255, 0.92);
+        border: none;
+        font-size: 18px;
+        color: #555;
+        padding: 0;
+        user-select: none;
     }
-    .stTabs [data-baseweb="tab-list"] button[kind="headerNoPadding"] {
-        display: inline-flex !important;
-        opacity: 1 !important;
-        visibility: visible !important;
-    }
+    .tab-scroll-btn:hover { color: #000; background: rgba(255, 255, 255, 1); }
+    .tab-scroll-btn.left  { left: 0;  box-shadow:  4px 0 6px -2px rgba(0,0,0,0.08); }
+    .tab-scroll-btn.right { right: 0; box-shadow: -4px 0 6px -2px rgba(0,0,0,0.08); }
     </style>
     """,
     unsafe_allow_html=True,
@@ -204,6 +218,53 @@ if network is None:
         "Security Analysis",
         "Short Circuit Analysis",
     ]
+)
+
+# Inject tab-scroll arrow buttons after tabs are created.
+import streamlit.components.v1 as _components
+_components.html(
+    """
+    <script>
+    (function() {
+        var doc = window.parent.document;
+        function setup() {
+            var tabList = doc.querySelector('.stTabs [data-baseweb="tab-list"]');
+            if (!tabList) return false;
+            doc.querySelectorAll('.tab-scroll-btn').forEach(function(b) { b.remove(); });
+            var wrapper = tabList.parentElement;
+            wrapper.style.position = 'relative';
+
+            var btnL = doc.createElement('button');
+            btnL.className = 'tab-scroll-btn left';
+            btnL.textContent = '\\u2039';
+            btnL.onclick = function() { tabList.scrollBy({left: -200, behavior: 'smooth'}); };
+
+            var btnR = doc.createElement('button');
+            btnR.className = 'tab-scroll-btn right';
+            btnR.textContent = '\\u203a';
+            btnR.onclick = function() { tabList.scrollBy({left: 200, behavior: 'smooth'}); };
+
+            wrapper.appendChild(btnL);
+            wrapper.appendChild(btnR);
+
+            function updateVisibility() {
+                btnL.style.display = tabList.scrollLeft > 0 ? 'flex' : 'none';
+                btnR.style.display = tabList.scrollLeft + tabList.clientWidth < tabList.scrollWidth - 1 ? 'flex' : 'none';
+            }
+            tabList.addEventListener('scroll', updateVisibility);
+            new ResizeObserver(updateVisibility).observe(tabList);
+            updateVisibility();
+            return true;
+        }
+        var attempts = 0;
+        var iv = setInterval(function() {
+            attempts++;
+            if (setup() || attempts > 50) clearInterval(iv);
+        }, 200);
+    })();
+    </script>
+    """,
+    height=0,
 )
 
 with tab_overview:

@@ -9,7 +9,7 @@ lists matching the shape expected by
     lines:                MapLine[]             (lines + 2W transformers)
     line_positions:       LinePosition[]        (id, coordinates[{lat,lon}])
 
-The frontend (``frontend/map_component/``) consumes them via
+The frontend (``frontend/map_component/``) consumwe reallyes them via
 ``render_interactive_map`` and draws the map with MapLibre + deck.gl.
 """
 from __future__ import annotations
@@ -99,6 +99,16 @@ def _extract_map_data(network):
             )
 
         # Lines + 2W transformers (the map layer treats both as lines).
+        # Only keep branches where *both* voltage levels belong to a
+        # substation that has valid coordinates — the deck.gl LineLayer
+        # throws when it encounters a VL it doesn't know about, which
+        # kills the entire layer.
+        known_vl_ids = set(
+            vls_df.loc[
+                vls_df["substation_id"].isin(subs_with_coords), "id"
+            ].tolist()
+        )
+
         line_cols = [
             "id", "name", "voltage_level1_id", "voltage_level2_id",
             "connected1", "connected2", "p1", "p2", "i1", "i2",
@@ -106,12 +116,20 @@ def _extract_map_data(network):
         lines_df = raw.get_lines().reset_index()
         present = [c for c in line_cols if c in lines_df.columns]
         lines_df = lines_df[present].fillna(0)
+        lines_df = lines_df[
+            lines_df["voltage_level1_id"].isin(known_vl_ids)
+            & lines_df["voltage_level2_id"].isin(known_vl_ids)
+        ]
         lines = [_line_record(r) for _, r in lines_df.iterrows()]
 
         try:
             t2w_df = raw.get_2_windings_transformers().reset_index()
             present_t = [c for c in line_cols if c in t2w_df.columns]
             t2w_df = t2w_df[present_t].fillna(0)
+            t2w_df = t2w_df[
+                t2w_df["voltage_level1_id"].isin(known_vl_ids)
+                & t2w_df["voltage_level2_id"].isin(known_vl_ids)
+            ]
             lines.extend(_line_record(r) for _, r in t2w_df.iterrows())
         except Exception:
             pass

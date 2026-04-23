@@ -157,8 +157,6 @@ def _render_change_log(network, component: str, method_name: str):
     if not log:
         return
 
-    n = len(log)
-    st.markdown(f"**Applied changes ({n})**")
     hdr = st.columns([3, 2, 2, 2, 1])
     for widget, label in zip(hdr, ["Element", "Property", "Before", "After", ""]):
         widget.caption(label)
@@ -212,6 +210,37 @@ def _render_removal_log(component: str):
     st.markdown(f"**:red[Removed {component.lower()} ({n})]**")
     for entry in log:
         st.caption(f"• {entry['element_id']}")
+
+
+def _render_all_change_logs(network):
+    """Render applied changes and removals across all component types.
+
+    Always visible regardless of the currently selected component so the
+    user never loses sight of pending modifications.
+    """
+    total_changes = 0
+    total_removals = 0
+    for comp, meth in COMPONENT_TYPES.items():
+        change_key = f"_change_log_{meth}"
+        removal_key = f"_removal_log_{comp}"
+        total_changes += len(st.session_state.get(change_key, []))
+        total_removals += len(st.session_state.get(removal_key, []))
+
+    if total_changes == 0 and total_removals == 0:
+        return
+
+    st.divider()
+    st.markdown(f"**Applied changes ({total_changes + total_removals})**")
+
+    for comp, meth in COMPONENT_TYPES.items():
+        change_log = st.session_state.get(f"_change_log_{meth}", [])
+        removal_log = st.session_state.get(f"_removal_log_{comp}", [])
+        if not change_log and not removal_log:
+            continue
+
+        st.caption(comp)
+        _render_change_log(network, comp, meth)
+        _render_removal_log(comp)
 
 
 def _render_field(field: dict, key: str):
@@ -1250,8 +1279,6 @@ def render_data_explorer(network, selected_vl):
                         except Exception as e:
                             st.error(f"Remove failed: {e}")
 
-                _render_change_log(network, component, method_name)
-                _render_removal_log(component)
             else:
                 st.dataframe(df, use_container_width=True)
 
@@ -1264,3 +1291,5 @@ def render_data_explorer(network, selected_vl):
             )
         except Exception as e:
             st.error(f"Error loading {component}: {e}")
+
+    _render_all_change_logs(network)
