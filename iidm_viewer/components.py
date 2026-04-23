@@ -22,36 +22,30 @@ def vl_selector(network):
     label_map = dict(zip(options, labels))
 
     current = st.session_state.get("selected_vl")
-    index = 0
-    if current in options:
-        index = options.index(current)
 
-    # Sync the selectbox's widget state with selected_vl *before* the
-    # widget is instantiated only for the two cases where the browser's
-    # stale value would otherwise win:
+    # Determine what value the selectbox should show:
     #
-    # 1. A NAD/SLD click wrote selected_vl externally then called
-    #    st.rerun(). The click handler sets _vl_set_by_click so we know
-    #    to push that value into the widget (which still shows the old VL).
+    # 1. A NAD/SLD click set selected_vl externally and flagged it with
+    #    _vl_set_by_click so we push that value into the widget key,
+    #    overriding whatever the browser still shows.
+    # 2. First render for this gen (key absent) — seed from current or
+    #    fall back to first option.
+    # 3. Normal user-driven rerun — Streamlit already updated the key
+    #    from the widget interaction; leave it alone.
     #
-    # 2. A new network was just loaded (selected_vl is None). Force the
-    #    widget to options[0] so the old network's VL id is not restored.
-    #
-    # We must NOT override when the user directly changed the selectbox —
-    # st.session_state.get(selectbox_key) returns the browser's pending
-    # NEW value before the widget renders, so comparing it with current
-    # (the previous run's value) would falsely fire and revert the
-    # user's selection.
+    # We must never combine "set key via Session State API" with passing
+    # index= to st.selectbox — that triggers Streamlit's
+    # "created with a default value but also had its value set via the
+    # Session State API" warning.
     vl_set_by_click = st.session_state.pop("_vl_set_by_click", False)
     if vl_set_by_click and current in options:
         st.session_state[selectbox_key] = current
-    elif current is None and options:
-        st.session_state[selectbox_key] = options[0]
+    elif selectbox_key not in st.session_state:
+        st.session_state[selectbox_key] = current if current in options else options[0]
 
     selected = st.selectbox(
         "Voltage Level",
         options=options,
-        index=index,
         format_func=lambda x: label_map.get(x, x),
         key=selectbox_key,
     )
