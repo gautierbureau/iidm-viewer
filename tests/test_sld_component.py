@@ -97,6 +97,7 @@ def test_bundle_wires_streamlit_protocol_and_library_callback():
         # omits it, breaking the iframe handshake.
         "isStreamlitMessage",
         "sld-vl-click",
+        "sld-breaker-click",
         "voltage-level",
         "substation",
         "onNextVoltageCallback",

@@ -12,7 +12,12 @@
  *
  * Python contract (stable):
  *   render_interactive_sld(svg, metadata, height, key) ->
- *       None | {"type": "sld-vl-click", "vl": "VLx", "ts": ...}
+ *       None
+ *       | {"type": "sld-vl-click",     "vl": "VLx",   "ts": <ms>}
+ *       | {"type": "sld-breaker-click","breakerId": "SW1", "open": true, "ts": <ms>}
+ *
+ * "open" in sld-breaker-click is the *desired new state* (already toggled by
+ * the library before the callback fires).
  */
 import {
   SingleLineDiagramViewer,
@@ -96,7 +101,14 @@ function render(args: RenderArgs): void {
         ts: Date.now(),
       });
     },
-    null,
+    (breakerId: string, open: boolean) => {
+      setComponentValue({
+        type: 'sld-breaker-click',
+        breakerId,
+        open,
+        ts: Date.now(),
+      });
+    },
     null,
     null,
     '#009eff',

@@ -398,6 +398,72 @@ def update_components(network, component: str, changes_df):
     invalidate_on_topology_change()
 
 
+def add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: pd.DataFrame):
+    """Accumulate successfully-applied cell changes into a per-component session-state log.
+
+    Writes to ``st.session_state[f"_change_log_{method_name}"]``.  Re-edits
+    collapse into the existing entry; if the value returns to the original the
+    entry is removed so the log only shows net differences.
+    """
+    key = f"_change_log_{method_name}"
+    log: list[dict] = list(st.session_state.get(key, []))
+
+    for element_id in changes_df.index:
+        for col in changes_df.columns:
+            new_val = changes_df.at[element_id, col]
+            try:
+                if pd.isna(new_val):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            existing = next(
+                (e for e in log if e["element_id"] == element_id and e["property"] == col),
+                None,
+            )
+            if existing is None:
+                before_val = original_df.at[element_id, col] if col in original_df.columns else None
+                log.append({
+                    "element_id": element_id,
+                    "property": col,
+                    "before": before_val,
+                    "after": new_val,
+                })
+            else:
+                existing["after"] = new_val
+                try:
+                    if existing["before"] == existing["after"]:
+                        log.remove(existing)
+                except Exception:
+                    pass
+
+    st.session_state[key] = log
+
+
+def toggle_switch(network, switch_id: str, new_open: bool) -> tuple[bool, bool]:
+    """Open or close a single switch; return ``(before_open, after_open)``.
+
+    Fetches the current open state on the worker thread, applies the change
+    via ``update_components``, and returns ``(old, new)`` so the caller can
+    record a change-log entry.  Raises ``KeyError`` if the switch is not found.
+    """
+    raw = object.__getattribute__(network, "_obj")
+
+    def _get_current():
+        df = raw.get_switches(attributes=["open"])
+        if switch_id not in df.index:
+            raise KeyError(f"Switch {switch_id!r} not found in network")
+        return bool(df.at[switch_id, "open"])
+
+    current_open: bool = run(_get_current)
+
+    changes_df = pd.DataFrame(
+        {"open": [new_open]},
+        index=pd.Index([switch_id], name="id"),
+    )
+    update_components(network, "Switches", changes_df)
+    return current_open, new_open
+
+
 # Extension name -> list of columns that pypowsybl's update_extensions accepts.
 #
 # Extensions not listed here (substationPosition, position, slackTerminal, ...)
