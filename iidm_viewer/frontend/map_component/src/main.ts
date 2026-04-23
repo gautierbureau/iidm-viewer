@@ -21,6 +21,10 @@
  *
  * JS -> Python: nothing for now (tooltips handled entirely in the
  * browser, matching parity with the previous Leaflet implementation).
+ *
+ * Uses MapboxOverlay (interleaved: false) from @deck.gl/mapbox on top
+ * of MapLibre GL JS v4, matching the integration used by
+ * @powsybl/network-viewer.
  */
 import { MapboxOverlay } from '@deck.gl/mapbox';
 import maplibregl, { LngLatBoundsLike, StyleSpecification } from 'maplibre-gl';
@@ -276,8 +280,29 @@ function render(args: RenderArgs): void {
       layers: buildLayers(typedLines, network, geoData, substations),
     });
 
-    // MapboxOverlay is a `maplibregl.IControl`-compatible control.
     map.addControl(overlay as unknown as maplibregl.IControl);
+
+    // MapboxOverlay syncs the deck.gl viewport via the MapLibre 'render'
+    // event, but inside a Streamlit iframe the event sometimes doesn't
+    // propagate viewport changes reliably.  Add an explicit 'move'
+    // handler that forces a viewport sync on every pan/zoom.
+    map.on('move', () => {
+      const deck = (overlay as any)?._deck;
+      if (!deck || !map) return;
+      const { lng, lat } = map.getCenter();
+      deck.setProps({
+        viewState: {
+          longitude: ((lng + 540) % 360) - 180,
+          latitude: lat,
+          zoom: map.getZoom(),
+          bearing: map.getBearing(),
+          pitch: map.getPitch(),
+          padding: map.getPadding(),
+          repeat: map.getRenderWorldCopies(),
+        },
+      });
+      if (deck.isInitialized) deck.redraw();
+    });
   });
 
   // ------------------------------------------------------------------
