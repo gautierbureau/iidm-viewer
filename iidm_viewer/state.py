@@ -56,20 +56,29 @@ def get_export_formats() -> list[str]:
     return st.session_state["export_formats"]
 
 
-def export_network(network, format_name: str) -> tuple[bytes, str]:
+def export_network(
+    network,
+    format_name: str,
+    parameters: dict[str, str] | None = None,
+) -> tuple[bytes, str]:
     """Export the network; return (bytes, file_extension).
 
     pypowsybl wraps some formats (e.g. XIIDM) in a ZIP archive.  Single-file
     ZIPs are unwrapped so the caller gets the real content and the correct
     extension.  Multi-file ZIPs are served as-is with extension ``zip``.
+
+    *parameters* is forwarded verbatim to ``save_to_binary_buffer`` so callers
+    can pass format-specific options discovered via
+    :func:`~iidm_viewer.io_options.get_format_parameters`.
     """
     import io as _io
     import zipfile as _zf
 
     raw = object.__getattribute__(network, "_obj")
+    params = parameters or {}
 
     def _export():
-        return raw.save_to_binary_buffer(format_name).getvalue()
+        return raw.save_to_binary_buffer(format_name, parameters=params).getvalue()
 
     data = run(_export)
 
@@ -88,20 +97,32 @@ def export_network(network, format_name: str) -> tuple[bytes, str]:
     return data, format_name.lower()
 
 
-def load_network(uploaded_file):
+def load_network(uploaded_file, parameters: dict[str, str] | None = None):
+    """Load a network from an uploaded file into session state.
+
+    *parameters* is forwarded to ``load_from_binary_buffer`` so callers can
+    pass format-specific import options discovered via
+    :func:`~iidm_viewer.io_options.get_format_parameters`.
+
+    The raw file bytes are stored in ``_last_file_bytes`` so the UI can offer
+    a "Reload with options" flow without requiring a second upload.
+    """
     from io import BytesIO
+    raw_bytes = uploaded_file.getvalue()
     if uploaded_file.name.lower().endswith(".zip"):
-        buf = BytesIO(uploaded_file.getbuffer())
+        buf = BytesIO(raw_bytes)
     else:
         import zipfile
         buf = BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(uploaded_file.name, uploaded_file.getvalue())
+            zf.writestr(uploaded_file.name, raw_bytes)
         buf.seek(0)
+
+    params = parameters or {}
 
     def _load():
         import pypowsybl.network as pn
-        return pn.load_from_binary_buffer(buf)
+        return pn.load_from_binary_buffer(buf, parameters=params)
 
     network = NetworkProxy(run(_load))
     st.session_state.network = network
@@ -110,6 +131,7 @@ def load_network(uploaded_file):
     st.session_state.pop("_vl_set_by_click", None)
     st.session_state.pop("_lf_report_json", None)
     invalidate_on_network_replace()
+    st.session_state["_last_file_bytes"] = raw_bytes
     st.session_state.pop("_export_bytes", None)
     st.session_state.pop("_export_fmt", None)
     st.session_state.pop("_export_ext", None)

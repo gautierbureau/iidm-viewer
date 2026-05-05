@@ -9,6 +9,12 @@ from iidm_viewer.state import (
     load_network,
     run_loadflow,
 )
+from iidm_viewer.io_options import (
+    ext_to_format,
+    get_format_parameters,
+    get_import_formats,
+    render_parameters_form,
+)
 from iidm_viewer.lf_parameters import show_lf_parameters_dialog
 from iidm_viewer.lf_report_dialog import show_lf_report_dialog
 from iidm_viewer.network_reduction import show_network_reduction_dialog
@@ -85,6 +91,55 @@ def _show_blank_network_dialog():
         st.rerun()
 
 
+@st.dialog("Load with options")
+def _show_load_options_dialog():
+    """Re-load the last uploaded file with custom import parameters."""
+    last_name: str = st.session_state.get("_last_file", "")
+    last_bytes: bytes | None = st.session_state.get("_last_file_bytes")
+    if not last_name or last_bytes is None:
+        st.warning("No file loaded yet. Upload a file first, then use this dialog to reload it with different options.")
+        return
+
+    st.write(f"File: `{last_name}`")
+
+    # Default to the format that matches the file extension.
+    file_ext = last_name.rsplit(".", 1)[-1] if "." in last_name else ""
+    guessed_fmt = ext_to_format(file_ext)
+    import_formats = get_import_formats()
+    default_idx = import_formats.index(guessed_fmt) if guessed_fmt in import_formats else 0
+    selected_fmt = st.selectbox(
+        "Import format",
+        options=import_formats,
+        index=default_idx,
+        key="load_opts_fmt_select",
+    )
+
+    import_params_df = get_format_parameters("import", selected_fmt)
+    params: dict[str, str] = {}
+    if not import_params_df.empty:
+        params = render_parameters_form(import_params_df, f"import_opt_{selected_fmt}")
+    else:
+        st.caption("No configurable options for this format.")
+
+    if st.button("Reload", key="load_opts_reload_btn", type="primary"):
+        class _FakeUpload:
+            def __init__(self, name: str, data: bytes) -> None:
+                self.name = name
+                self._data = data
+                self.file_id = f"reload_{id(self)}"
+
+            def getvalue(self) -> bytes:
+                return self._data
+
+            def getbuffer(self) -> memoryview:
+                return memoryview(self._data)
+
+        with st.spinner("Loading network…"):
+            load_network(_FakeUpload(last_name, last_bytes), parameters=params or None)
+            st.session_state["_last_file_id"] = None  # prevent the uploader from re-triggering
+        st.rerun()
+
+
 @st.dialog("Save network")
 def _show_save_network_dialog():
     network = get_network()
@@ -92,12 +147,23 @@ def _show_save_network_dialog():
         st.warning("No network loaded.")
         return
     fmt = st.selectbox("Export format", get_export_formats(), key="export_format_select")
+
+    # Render format-specific export options (collapsed by default).
+    params: dict[str, str] = {}
+    export_params_df = get_format_parameters("export", fmt)
+    if not export_params_df.empty:
+        with st.expander("Export options", expanded=False):
+            params = render_parameters_form(export_params_df, f"export_opt_{fmt}")
+
+    # The cache key covers both the format and any non-default option values so
+    # that changing options re-triggers the export without a page reload.
+    params_fingerprint = "_".join(f"{k}={v}" for k, v in sorted(params.items()))
     net_obj_id = id(object.__getattribute__(network, "_obj"))
-    cache_key = f"_export_cache_{net_obj_id}_{fmt}"
+    cache_key = f"_export_cache_{net_obj_id}_{fmt}_{params_fingerprint}"
     if cache_key not in st.session_state:
         with st.spinner(f"Preparing {fmt} export…"):
             try:
-                data, ext = export_network(network, fmt)
+                data, ext = export_network(network, fmt, parameters=params or None)
                 st.session_state[cache_key] = (data, ext)
             except Exception as exc:
                 st.error(f"Export failed: {exc}")
@@ -143,6 +209,12 @@ with st.sidebar:
 
     if st.button("Start with empty network", key="blank_network_open_btn", use_container_width=True):
         _show_blank_network_dialog()
+
+    # "Load with options" is only available when a real file was uploaded
+    # (not when the user started from an empty network).
+    if st.session_state.get("_last_file_bytes") is not None:
+        if st.button("Load with options…", key="load_opts_btn", use_container_width=True):
+            _show_load_options_dialog()
 
     network = get_network()
 
