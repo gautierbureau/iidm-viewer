@@ -97,12 +97,20 @@ def export_network(
     return data, format_name.lower()
 
 
-def load_network(uploaded_file, parameters: dict[str, str] | None = None):
+def load_network(
+    uploaded_file,
+    parameters: dict[str, str] | None = None,
+    post_processors: list[str] | None = None,
+):
     """Load a network from an uploaded file into session state.
 
     *parameters* is forwarded to ``load_from_binary_buffer`` so callers can
     pass format-specific import options discovered via
     :func:`~iidm_viewer.io_options.get_format_parameters`.
+
+    *post_processors* is a list of post-processor names to apply after
+    parsing, e.g. ``['loadflowResultsCompletion']``.  Available names are
+    returned by :func:`~iidm_viewer.io_options.get_import_post_processors`.
 
     The raw file bytes are stored in ``_last_file_bytes`` so the UI can offer
     a "Reload with options" flow without requiring a second upload.
@@ -119,10 +127,11 @@ def load_network(uploaded_file, parameters: dict[str, str] | None = None):
         buf.seek(0)
 
     params = parameters or {}
+    pp_list = post_processors or []
 
     def _load():
         import pypowsybl.network as pn
-        return pn.load_from_binary_buffer(buf, parameters=params)
+        return pn.load_from_binary_buffer(buf, parameters=params, post_processors=pp_list)
 
     network = NetworkProxy(run(_load))
     st.session_state.network = network
