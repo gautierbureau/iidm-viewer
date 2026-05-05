@@ -13,6 +13,7 @@ from iidm_viewer.io_options import (
     ext_to_format,
     get_format_parameters,
     get_import_formats,
+    get_import_post_processors,
     render_parameters_form,
 )
 from iidm_viewer.lf_parameters import show_lf_parameters_dialog
@@ -117,9 +118,22 @@ def _show_load_options_dialog():
     import_params_df = get_format_parameters("import", selected_fmt)
     params: dict[str, str] = {}
     if not import_params_df.empty:
-        params = render_parameters_form(import_params_df, f"import_opt_{selected_fmt}")
-    else:
-        st.caption("No configurable options for this format.")
+        with st.expander("Format options", expanded=True):
+            params = render_parameters_form(import_params_df, f"import_opt_{selected_fmt}")
+
+    # Post-processors are opt-in, format-independent transformations applied
+    # after parsing (e.g. geometry import, load-flow result completion).
+    all_post_processors = get_import_post_processors()
+    selected_post_processors: list[str] = []
+    if all_post_processors:
+        with st.expander("Post-processors", expanded=False):
+            st.caption(
+                "Post-processors are applied after the network is loaded. "
+                "Enable only those relevant to your file."
+            )
+            for pp_name in all_post_processors:
+                if st.checkbox(pp_name, value=False, key=f"load_opts_pp_{pp_name}"):
+                    selected_post_processors.append(pp_name)
 
     if st.button("Reload", key="load_opts_reload_btn", type="primary"):
         class _FakeUpload:
@@ -135,7 +149,11 @@ def _show_load_options_dialog():
                 return memoryview(self._data)
 
         with st.spinner("Loading network…"):
-            load_network(_FakeUpload(last_name, last_bytes), parameters=params or None)
+            load_network(
+                _FakeUpload(last_name, last_bytes),
+                parameters=params or None,
+                post_processors=selected_post_processors or None,
+            )
             st.session_state["_last_file_id"] = None  # prevent the uploader from re-triggering
         st.rerun()
 

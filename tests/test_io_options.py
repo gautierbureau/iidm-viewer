@@ -10,6 +10,7 @@ from iidm_viewer.io_options import (
     ext_to_format,
     get_format_parameters,
     get_import_formats,
+    get_import_post_processors,
     render_parameters_form,
 )
 from iidm_viewer.state import export_network, load_network
@@ -186,3 +187,72 @@ def test_export_network_default_and_explicit_produce_same_bytes(xiidm_upload):
     data_default, _ = export_network(net, "XIIDM")
     data_explicit, _ = export_network(net, "XIIDM", parameters={})
     assert data_default == data_explicit
+
+
+# ---------------------------------------------------------------------------
+# get_import_post_processors
+# ---------------------------------------------------------------------------
+
+
+def test_get_import_post_processors_returns_list():
+    st.session_state.clear()
+    pps = get_import_post_processors()
+    assert isinstance(pps, list)
+    assert all(isinstance(p, str) for p in pps)
+
+
+def test_get_import_post_processors_not_empty():
+    st.session_state.clear()
+    pps = get_import_post_processors()
+    assert len(pps) > 0
+
+
+def test_get_import_post_processors_cached():
+    st.session_state.clear()
+    pps1 = get_import_post_processors()
+    pps2 = get_import_post_processors()
+    assert pps1 is pps2
+
+
+def test_get_import_post_processors_contains_known_names():
+    st.session_state.clear()
+    pps = get_import_post_processors()
+    # pypowsybl ships at least these three in 1.14+
+    assert "loadflowResultsCompletion" in pps
+    assert "geoJsonImporter" in pps
+    assert "replaceTieLinesByLines" in pps
+
+
+# ---------------------------------------------------------------------------
+# load_network with post_processors
+# ---------------------------------------------------------------------------
+
+
+def test_load_network_with_empty_post_processors(xiidm_upload):
+    """Empty list must not break loading."""
+    net = load_network(xiidm_upload, post_processors=[])
+    assert len(net.get_voltage_levels()) == 14
+
+
+def test_load_network_with_none_post_processors(xiidm_upload):
+    net = load_network(xiidm_upload, post_processors=None)
+    assert len(net.get_voltage_levels()) == 14
+
+
+def test_load_network_with_loadflow_completion_post_processor(xiidm_upload):
+    """loadflowResultsCompletion is a no-op on IEEE14 but must not raise."""
+    net = load_network(
+        xiidm_upload,
+        post_processors=["loadflowResultsCompletion"],
+    )
+    assert len(net.get_voltage_levels()) == 14
+
+
+def test_load_network_parameters_and_post_processors_together(xiidm_upload):
+    """Both options can be provided simultaneously without error."""
+    net = load_network(
+        xiidm_upload,
+        parameters={},
+        post_processors=["loadflowResultsCompletion"],
+    )
+    assert len(net.get_voltage_levels()) == 14

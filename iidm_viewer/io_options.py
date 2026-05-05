@@ -32,6 +32,26 @@ def ext_to_format(extension: str) -> str | None:
     return _EXT_TO_FORMAT.get(extension.lower().lstrip("."))
 
 
+def get_import_post_processors() -> list[str]:
+    """Return the available import post-processor names (cached per session).
+
+    Post-processors are opt-in transformations applied after the network is
+    parsed.  They are passed as a list of strings to ``load_from_binary_buffer``
+    (``post_processors`` argument).  Typical values include
+    ``'loadflowResultsCompletion'``, ``'geoJsonImporter'``, and
+    ``'replaceTieLinesByLines'``.
+    """
+    if "_import_post_processors" not in st.session_state:
+        def _get():
+            import pypowsybl.network as pn
+            try:
+                return list(pn.get_import_post_processors())
+            except Exception:
+                return []
+        st.session_state["_import_post_processors"] = run(_get)
+    return st.session_state["_import_post_processors"]
+
+
 def get_import_formats() -> list[str]:
     """Return import format names supported by pypowsybl (cached per session)."""
     if "_import_formats" not in st.session_state:
