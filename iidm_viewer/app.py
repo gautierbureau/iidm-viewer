@@ -92,37 +92,47 @@ def _show_blank_network_dialog():
         st.rerun()
 
 
-@st.dialog("Load with options")
+@st.dialog("Import options")
 def _show_load_options_dialog():
-    """Re-load the last uploaded file with custom import parameters."""
+    """Configure import options for the next file upload or for reloading the current file."""
     last_name: str = st.session_state.get("_last_file", "")
     last_bytes: bytes | None = st.session_state.get("_last_file_bytes")
-    if not last_name or last_bytes is None:
-        st.warning("No file loaded yet. Upload a file first, then use this dialog to reload it with different options.")
-        return
+    has_file = bool(last_name and last_bytes is not None)
 
-    st.write(f"File: `{last_name}`")
+    if has_file:
+        st.caption(f"Current file: `{last_name}`")
+    else:
+        st.info("No file loaded yet. Configure options below — they will be applied automatically when you upload a file.")
 
-    # Default to the format that matches the file extension.
-    file_ext = last_name.rsplit(".", 1)[-1] if "." in last_name else ""
-    guessed_fmt = ext_to_format(file_ext)
+    # Format selector: "Auto-detect" (from file extension) + explicit overrides.
     import_formats = get_import_formats()
-    default_idx = import_formats.index(guessed_fmt) if guessed_fmt in import_formats else 0
-    selected_fmt = st.selectbox(
+    format_options = ["Auto-detect"] + import_formats
+
+    # Pre-select from previous session or from the current file's extension.
+    prev = st.session_state.get("_pending_import_fmt_override", "Auto-detect")
+    if has_file and prev == "Auto-detect":
+        file_ext = last_name.rsplit(".", 1)[-1] if "." in last_name else ""
+        guessed = ext_to_format(file_ext)
+        prev = guessed if guessed in import_formats else "Auto-detect"
+    default_idx = format_options.index(prev) if prev in format_options else 0
+    selected_fmt_raw = st.selectbox(
         "Import format",
-        options=import_formats,
+        options=format_options,
         index=default_idx,
         key="load_opts_fmt_select",
+        help="Choose the format explicitly, or let the app detect it from the file extension.",
     )
+    selected_fmt = None if selected_fmt_raw == "Auto-detect" else selected_fmt_raw
 
-    import_params_df = get_format_parameters("import", selected_fmt)
+    # Format-specific parameters (only shown when a format is explicitly chosen).
     params: dict[str, str] = {}
-    if not import_params_df.empty:
-        with st.expander("Format options", expanded=True):
-            params = render_parameters_form(import_params_df, f"import_opt_{selected_fmt}")
+    if selected_fmt:
+        import_params_df = get_format_parameters("import", selected_fmt)
+        if not import_params_df.empty:
+            with st.expander("Format parameters", expanded=True):
+                params = render_parameters_form(import_params_df, f"import_opt_{selected_fmt}")
 
-    # Post-processors are opt-in, format-independent transformations applied
-    # after parsing (e.g. geometry import, load-flow result completion).
+    # Post-processors are format-independent — always show them.
     all_post_processors = get_import_post_processors()
     selected_post_processors: list[str] = []
     if all_post_processors:
@@ -135,27 +145,45 @@ def _show_load_options_dialog():
                 if st.checkbox(pp_name, value=False, key=f"load_opts_pp_{pp_name}"):
                     selected_post_processors.append(pp_name)
 
-    if st.button("Reload", key="load_opts_reload_btn", type="primary"):
-        class _FakeUpload:
-            def __init__(self, name: str, data: bytes) -> None:
-                self.name = name
-                self._data = data
-                self.file_id = f"reload_{id(self)}"
+    st.divider()
 
-            def getvalue(self) -> bytes:
-                return self._data
+    def _save_pending():
+        st.session_state["_pending_import_fmt_override"] = selected_fmt_raw
+        st.session_state["_pending_import_params"] = params
+        st.session_state["_pending_import_post_processors"] = selected_post_processors
 
-            def getbuffer(self) -> memoryview:
-                return memoryview(self._data)
+    if has_file:
+        col_save, col_reload = st.columns(2)
+        if col_save.button("Save for next upload", key="load_opts_save_btn"):
+            _save_pending()
+            st.success("Saved — options will be applied on the next upload.")
+        if col_reload.button("Reload now", key="load_opts_reload_btn", type="primary"):
+            _save_pending()
 
-        with st.spinner("Loading network…"):
-            load_network(
-                _FakeUpload(last_name, last_bytes),
-                parameters=params or None,
-                post_processors=selected_post_processors or None,
-            )
-            st.session_state["_last_file_id"] = None  # prevent the uploader from re-triggering
-        st.rerun()
+            class _FakeUpload:
+                def __init__(self, name: str, data: bytes) -> None:
+                    self.name = name
+                    self._data = data
+                    self.file_id = f"reload_{id(self)}"
+
+                def getvalue(self) -> bytes:
+                    return self._data
+
+                def getbuffer(self) -> memoryview:
+                    return memoryview(self._data)
+
+            with st.spinner("Loading network…"):
+                load_network(
+                    _FakeUpload(last_name, last_bytes),
+                    parameters=params or None,
+                    post_processors=selected_post_processors or None,
+                )
+                st.session_state["_last_file_id"] = None  # prevent the uploader from re-triggering
+            st.rerun()
+    else:
+        if st.button("Save for next upload", key="load_opts_save_btn", type="primary"):
+            _save_pending()
+            st.success("Saved — options will be applied on the next upload.")
 
 
 @st.dialog("Save network")
@@ -219,8 +247,15 @@ with st.sidebar:
         # filename with different content still triggers a reload.
         current = get_network()
         if current is None or st.session_state.get("_last_file_id") != uploaded.file_id:
+            # Apply any options the user configured before uploading.
+            pending_params = st.session_state.get("_pending_import_params", {})
+            pending_pps = st.session_state.get("_pending_import_post_processors", [])
             with st.spinner("Loading network..."):
-                load_network(uploaded)
+                load_network(
+                    uploaded,
+                    parameters=pending_params or None,
+                    post_processors=pending_pps or None,
+                )
                 st.session_state["_last_file_id"] = uploaded.file_id
                 st.session_state["_last_file"] = uploaded.name
             st.rerun()
@@ -228,11 +263,8 @@ with st.sidebar:
     if st.button("Start with empty network", key="blank_network_open_btn", use_container_width=True):
         _show_blank_network_dialog()
 
-    # "Load with options" is only available when a real file was uploaded
-    # (not when the user started from an empty network).
-    if st.session_state.get("_last_file_bytes") is not None:
-        if st.button("Load with options…", key="load_opts_btn", use_container_width=True):
-            _show_load_options_dialog()
+    if st.button("Import options…", key="load_opts_btn", use_container_width=True):
+        _show_load_options_dialog()
 
     network = get_network()
 
