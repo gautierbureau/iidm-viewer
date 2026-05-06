@@ -1,12 +1,12 @@
 import streamlit as st
 
-from .caches import invalidate_on_network_replace
+from .caches import get_vl_nominal_v, invalidate_on_network_replace
 from .state import get_network
 
 
 def _get_voltage_level_ids(network):
-    df = network.get_voltage_levels()
-    return df.index.tolist()
+    df = get_vl_nominal_v(network)
+    return df["voltage_level_id"].tolist()
 
 
 def _clear_caches():
