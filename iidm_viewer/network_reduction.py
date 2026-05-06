@@ -1,5 +1,6 @@
 import streamlit as st
 
+from .caches import invalidate_on_network_replace
 from .state import get_network
 
 
@@ -9,13 +10,25 @@ def _get_voltage_level_ids(network):
 
 
 def _clear_caches():
-    st.session_state.pop("_map_data_cache", None)
-    st.session_state.pop("_vl_lookup_cache", None)
-    st.session_state.pop("_export_bytes", None)
-    st.session_state.pop("_export_fmt", None)
+    invalidate_on_network_replace()
     st.session_state["selected_vl"] = None
+    st.session_state["vl_selector_gen"] = st.session_state.get("vl_selector_gen", 0) + 1
+    for key in (
+        "_export_bytes",
+        "_export_fmt",
+        "_export_ext",
+        "_lf_report_json",
+        "_vl_set_by_click",
+    ):
+        st.session_state.pop(key, None)
     for k in list(st.session_state.keys()):
-        if k.startswith("_change_log_") or k.startswith("_removal_log_"):
+        if (
+            k.startswith("_change_log_")
+            or k.startswith("_removal_log_")
+            or k.startswith("_ext_change_log_")
+            or k.startswith("_ext_removal_log_")
+            or k.startswith("_export_cache_")
+        ):
             del st.session_state[k]
 
 
