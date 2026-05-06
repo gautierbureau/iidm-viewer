@@ -1316,19 +1316,20 @@ def render_data_explorer(network, selected_vl):
                 else:
                     changes = pd.DataFrame()
                 n_changes = len(changes)
+                n_property_changes = int(changes.notna().to_numpy().sum()) if n_changes else 0
                 n_remove = len(ids_to_remove)
 
                 if n_changes:
-                    label = f"change{'s' if n_changes > 1 else ''}"
+                    label = f"change{'s' if n_property_changes > 1 else ''}"
                     col_apply, col_apply_lf, _ = st.columns([1, 2, 5], gap="small")
                     with col_apply:
                         apply_only = st.button(
-                            f"Apply {n_changes} {label}",
+                            f"Apply {n_property_changes} {label}",
                             key=f"apply_{method_name}",
                         )
                     with col_apply_lf:
                         apply_and_lf = st.button(
-                            f"Apply {n_changes} {label} & Run Load Flow",
+                            f"Apply {n_property_changes} {label} & Run Load Flow",
                             key=f"apply_lf_{method_name}",
                         )
                     if apply_only or apply_and_lf:
