@@ -144,6 +144,7 @@ def load_network(
     st.session_state.pop("_export_bytes", None)
     st.session_state.pop("_export_fmt", None)
     st.session_state.pop("_export_ext", None)
+    st.session_state.pop("va_nom_select", None)
     for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_") or k.startswith("_export_cache_")]:
         del st.session_state[k]
     return network

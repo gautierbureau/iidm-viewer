@@ -21,6 +21,13 @@ def vl_selector(network):
     labels = filtered["display"].tolist()
     label_map = dict(zip(options, labels))
 
+    # Default to the highest nominal voltage (e.g. 400 kV) rather than
+    # the first alphabetical entry.
+    if "nominal_v" in filtered.columns:
+        default_vl = filtered.loc[filtered["nominal_v"].idxmax(), "id"]
+    else:
+        default_vl = options[0]
+
     current = st.session_state.get("selected_vl")
 
     # Determine what value the selectbox should show:
@@ -41,7 +48,7 @@ def vl_selector(network):
     if vl_set_by_click and current in options:
         st.session_state[selectbox_key] = current
     elif selectbox_key not in st.session_state:
-        st.session_state[selectbox_key] = current if current in options else options[0]
+        st.session_state[selectbox_key] = current if current in options else default_vl
 
     selected = st.selectbox(
         "Voltage Level",

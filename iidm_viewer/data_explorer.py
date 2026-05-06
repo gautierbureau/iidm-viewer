@@ -150,6 +150,76 @@ def _add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: 
     add_to_change_log(method_name, changes_df, original_df)
 
 
+def _bump_editor_version(method_name: str) -> None:
+    """Force the next `st.data_editor` for *method_name* to remount fresh.
+
+    `st.data_editor` keeps the user's edits in widget state keyed by its
+    `key` argument. After we mutate the network from outside the editor
+    (apply, revert, revert-all) those stale edits would otherwise be
+    re-applied on top of the freshly-fetched DataFrame and resurrect the
+    "Apply N changes" button.
+    """
+    key = f"_editor_ver_{method_name}"
+    st.session_state[key] = st.session_state.get(key, 0) + 1
+
+
+def _editor_key(method_name: str) -> str:
+    ver = st.session_state.get(f"_editor_ver_{method_name}", 0)
+    return f"editor_{method_name}_v{ver}"
+
+
+def _revert_all_changes(network) -> None:
+    """Revert every logged change across all components in one pass."""
+    total_reverted = 0
+    skipped = 0
+    errors: list[tuple[str, str]] = []
+    for comp, meth in COMPONENT_TYPES.items():
+        log_key = f"_change_log_{meth}"
+        log: list[dict] = list(st.session_state.get(log_key, []))
+        if not log:
+            continue
+        rows: dict[str, dict] = {}
+        unrevertable: list[dict] = []
+        for entry in log:
+            before = entry["before"]
+            is_missing = before is None
+            if not is_missing:
+                try:
+                    is_missing = bool(pd.isna(before))
+                except (TypeError, ValueError):
+                    is_missing = False
+            if is_missing:
+                unrevertable.append(entry)
+                skipped += 1
+                continue
+            rows.setdefault(entry["element_id"], {})[entry["property"]] = before
+        if not rows:
+            continue
+        revert_df = pd.DataFrame.from_dict(rows, orient="index")
+        try:
+            update_components(network, comp, revert_df)
+        except Exception as e:
+            errors.append((comp, str(e)))
+            continue
+        total_reverted += len(log) - len(unrevertable)
+        st.session_state[log_key] = unrevertable
+        _bump_editor_version(meth)
+
+    parts: list[str] = []
+    if total_reverted:
+        parts.append(f"Reverted {total_reverted} change(s).")
+    if skipped:
+        parts.append(f"{skipped} skipped (original value unavailable).")
+    if parts:
+        st.session_state["_revert_status_message"] = (" ".join(parts), not errors)
+    if errors:
+        msg = "; ".join(f"{c}: {m}" for c, m in errors)
+        st.session_state["_revert_status_message"] = (
+            f"Revert failed — {msg}", False
+        )
+    st.rerun()
+
+
 def _render_change_log(network, component: str, method_name: str):
     """Display applied changes with individual Revert buttons below the data editor."""
     key = f"_change_log_{method_name}"
@@ -183,6 +253,7 @@ def _render_change_log(network, component: str, method_name: str):
                     update_components(network, component, revert_df)
                     log.pop(i)
                     st.session_state[key] = log
+                    _bump_editor_version(method_name)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Revert failed: {e}")
@@ -218,6 +289,11 @@ def _render_all_change_logs(network):
     Always visible regardless of the currently selected component so the
     user never loses sight of pending modifications.
     """
+    status = st.session_state.pop("_revert_status_message", None)
+    if status:
+        text, ok = status
+        (st.success if ok else st.error)(text)
+
     total_changes = 0
     total_removals = 0
     for comp, meth in COMPONENT_TYPES.items():
@@ -230,7 +306,18 @@ def _render_all_change_logs(network):
         return
 
     st.divider()
-    st.markdown(f"**Applied changes ({total_changes + total_removals})**")
+    hdr_left, hdr_right = st.columns([5, 2])
+    with hdr_left:
+        st.markdown(f"**Applied changes ({total_changes + total_removals})**")
+    with hdr_right:
+        if total_changes > 0:
+            if st.button(
+                f"Revert all {total_changes} change(s)",
+                key="revert_all_changes",
+                help="Revert every property edit logged across all components. "
+                     "Removals are not reverted.",
+            ):
+                _revert_all_changes(network)
 
     for comp, meth in COMPONENT_TYPES.items():
         change_log = st.session_state.get(f"_change_log_{meth}", [])
@@ -1210,7 +1297,7 @@ def render_data_explorer(network, selected_vl):
                     df_display,
                     use_container_width=True,
                     column_config=col_config,
-                    key=f"editor_{method_name}",
+                    key=_editor_key(method_name),
                 )
 
                 # Separate removal selection from property edits
@@ -1248,6 +1335,7 @@ def render_data_explorer(network, selected_vl):
                         try:
                             update_components(network, component, changes)
                             _add_to_change_log(method_name, changes, df)
+                            _bump_editor_version(method_name)
                             st.success(
                                 f"Updated {n_changes} "
                                 f"{component.lower().rstrip('s') if n_changes == 1 else component.lower()}: "
