@@ -86,6 +86,102 @@ def get_format_parameters(which: str, fmt: str) -> pd.DataFrame:
     return st.session_state[cache_key]
 
 
+def _parse_possible_values(raw: str) -> list[str] | None:
+    """Parse a `[a, b, c]`-style possible_values string into a list, or None."""
+    s = (raw or "").strip()
+    if not (s.startswith("[") and s.endswith("]")):
+        return None
+    opts = [o.strip() for o in s[1:-1].split(",") if o.strip()]
+    return opts if len(opts) > 1 else None
+
+
+def _csv_split(value: str) -> list[str]:
+    """Split a pypowsybl STRING_LIST value (no spaces) back into items."""
+    return [s.strip() for s in (value or "").split(",") if s.strip()]
+
+
+def _render_paired_extension_lists(
+    rows: list[tuple[str, pd.Series]],
+    session_key_prefix: str,
+) -> dict[str, str]:
+    """Render two STRING_LIST params sharing the same possible_values as one table.
+
+    Each option in the shared list gets a 3-state selector — *Default* (the
+    extension is in neither list), or one of the two parameter-specific
+    states.  This makes it impossible to put the same item in both lists,
+    which pypowsybl rejects.
+
+    Returns ``{param_name: comma_joined_value}`` for both rows.
+    """
+    name_a, row_a = rows[0]
+    name_b, row_b = rows[1]
+    desc_a = str(row_a.get("description") or name_a)
+    desc_b = str(row_b.get("description") or name_b)
+
+    options = _parse_possible_values(str(row_a.get("possible_values") or "")) or []
+
+    # Short, table-friendly state labels; long descriptions go in the caption.
+    label_default = "Default"
+    label_a = "Include only"
+    label_b = "Exclude"
+    states = [label_default, label_a, label_b]
+
+    key_a = f"{session_key_prefix}__{name_a}"
+    key_b = f"{session_key_prefix}__{name_b}"
+    sel_a = set(_csv_split(st.session_state.get(key_a, "")))
+    sel_b = set(_csv_split(st.session_state.get(key_b, "")))
+    # If a stale session put the same item in both, prefer "Exclude" to keep
+    # the editor consistent — the table can't represent the conflict.
+    sel_a -= sel_b
+
+    st.caption(
+        f"For each extension, pick **{label_default}** (pypowsybl decides), "
+        f"**{label_a}** ({desc_a}), or **{label_b}** ({desc_b}). "
+        "Each extension can be in at most one list."
+    )
+
+    initial = pd.DataFrame(
+        {
+            "Extension": options,
+            "State": [
+                label_a if x in sel_a else (label_b if x in sel_b else label_default)
+                for x in options
+            ],
+        }
+    ).set_index("Extension")
+
+    edited = st.data_editor(
+        initial,
+        use_container_width=True,
+        column_config={
+            "State": st.column_config.SelectboxColumn(
+                "State", options=states, required=True,
+            ),
+        },
+        key=f"{session_key_prefix}__paired_{name_a}_{name_b}",
+    )
+
+    new_a = ",".join(x for x in options if edited.at[x, "State"] == label_a)
+    new_b = ",".join(x for x in options if edited.at[x, "State"] == label_b)
+    # Mirror into the per-param session keys so subsequent renders pre-load the
+    # same selection even if the editor state is dropped.
+    st.session_state[key_a] = new_a
+    st.session_state[key_b] = new_b
+    return {name_a: new_a, name_b: new_b}
+
+
+def _render_single_string_list(
+    name: str, row: pd.Series, options: list[str], session_key_prefix: str,
+) -> str:
+    """Render one STRING_LIST parameter as an `st.multiselect`."""
+    desc = str(row.get("description") or name)
+    widget_key = f"{session_key_prefix}__{name}"
+    prev_csv = str(st.session_state.get(widget_key, row.get("default") or ""))
+    prev = [x for x in _csv_split(prev_csv) if x in options]
+    sel = st.multiselect(desc, options=options, default=prev, key=widget_key)
+    return ",".join(sel)
+
+
 def render_parameters_form(
     params_df: pd.DataFrame,
     session_key_prefix: str,
@@ -95,6 +191,11 @@ def render_parameters_form(
     Each row in *params_df* becomes one widget.  The row index is the
     parameter name; expected columns are ``description``, ``type``,
     ``default``, and optionally ``possible_values``.
+
+    STRING_LIST parameters that share the same ``possible_values`` (e.g.
+    ``iidm.import.xml.included.extensions`` and the matching ``excluded``
+    one) are rendered jointly as a single state-per-item table so the
+    user cannot put the same value in both lists.
 
     Returns a ``dict[str, str]`` ready to pass as the ``parameters``
     argument of :func:`load_from_binary_buffer` or
@@ -106,24 +207,43 @@ def render_parameters_form(
         st.caption("No configurable options for this format.")
         return {}
 
-    values: dict[str, str] = {}
+    # Group STRING_LIST rows by their possible_values list so that pairs
+    # (typical case: included/excluded extensions) can be rendered jointly.
+    paired: dict[tuple[str, ...], list[tuple[str, pd.Series]]] = {}
+    for name, row in params_df.iterrows():
+        if str(row.get("type") or "").upper() != "STRING_LIST":
+            continue
+        opts = _parse_possible_values(str(row.get("possible_values") or ""))
+        if not opts:
+            continue
+        paired.setdefault(tuple(opts), []).append((str(name), row))
+    paired_names: set[str] = set()
+    paired_results: dict[str, str] = {}
+    for items in paired.values():
+        if len(items) >= 2:
+            paired_results.update(
+                _render_paired_extension_lists(items[:2], session_key_prefix)
+            )
+            paired_names.update(n for n, _ in items[:2])
+
+    values: dict[str, str] = dict(paired_results)
 
     for name, row in params_df.iterrows():
+        if str(name) in paired_names:
+            continue
         desc = str(row.get("description") or name)
         ptype = str(row.get("type") or "STRING").upper()
         default = str(row.get("default") or "")
-        possible_values_raw = str(row.get("possible_values") or "").strip()
+        options = _parse_possible_values(str(row.get("possible_values") or ""))
 
         widget_key = f"{session_key_prefix}__{name}"
 
-        # Parse enum option list: '[val1, val2, ...]'
-        options: list[str] | None = None
-        if possible_values_raw.startswith("[") and possible_values_raw.endswith("]"):
-            opts = [o.strip() for o in possible_values_raw[1:-1].split(",") if o.strip()]
-            if len(opts) > 1:
-                options = opts
+        if ptype == "STRING_LIST" and options:
+            values[name] = _render_single_string_list(
+                str(name), row, options, session_key_prefix,
+            )
 
-        if options:
+        elif options:
             current = st.session_state.get(widget_key, default)
             idx = options.index(str(current)) if str(current) in options else 0
             val = st.selectbox(desc, options=options, index=idx, key=widget_key)
