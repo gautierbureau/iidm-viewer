@@ -53,8 +53,10 @@ def test_clear_caches_removes_cache_keys():
         "selected_vl": "VL1",
         "network": "kept",
     }
-    with patch("iidm_viewer.network_reduction.st") as mock_st:
+    with patch("iidm_viewer.network_reduction.st") as mock_st, \
+         patch("iidm_viewer.caches.st") as mock_caches_st:
         mock_st.session_state = fake
+        mock_caches_st.session_state = fake
         nr._clear_caches()
 
     assert "_map_data_cache" not in fake
@@ -74,8 +76,10 @@ def test_clear_caches_removes_log_keys():
         "_removal_log_lines": [{"id": "L1"}],
         "_change_log_loads": [],
     }
-    with patch("iidm_viewer.network_reduction.st") as mock_st:
+    with patch("iidm_viewer.network_reduction.st") as mock_st, \
+         patch("iidm_viewer.caches.st") as mock_caches_st:
         mock_st.session_state = fake
+        mock_caches_st.session_state = fake
         nr._clear_caches()
 
     assert "_change_log_generators" not in fake
@@ -87,8 +91,10 @@ def test_clear_caches_tolerates_absent_keys():
     import iidm_viewer.network_reduction as nr
 
     fake = {"selected_vl": "VL5"}
-    with patch("iidm_viewer.network_reduction.st") as mock_st:
+    with patch("iidm_viewer.network_reduction.st") as mock_st, \
+         patch("iidm_viewer.caches.st") as mock_caches_st:
         mock_st.session_state = fake
+        mock_caches_st.session_state = fake
         nr._clear_caches()  # must not raise
 
     assert fake["selected_vl"] is None
@@ -156,8 +162,10 @@ def test_reduce_by_ids_keeps_subset():
     net.reduce_by_ids(ids=keep)
 
     remaining = _get_voltage_level_ids(net)
-    assert set(remaining).issubset(set(keep))
-    assert 0 < len(remaining) <= 3
+    # pypowsybl keeps the requested VLs plus elements between them, so the
+    # result is a superset of `keep` and at most as large as the original.
+    assert set(keep).issubset(set(remaining))
+    assert 0 < len(remaining) <= len(all_ids)
 
 
 def test_reduce_by_ids_single_vl_reduces_count():
