@@ -388,6 +388,7 @@ _LOAD_FLOW_CACHE_KEYS = (
     "_shunts_enriched_cache",
     "_svcs_enriched_cache",
     "_loading_cache",        # operational limits loading %
+    "_dq_dv_cache",          # AC sensitivity dQ_bus/dV_target per (network, lf_gen, gen)
 )
 
 # Caches holding pre-rendered map payloads or positions — only need to
