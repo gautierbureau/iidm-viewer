@@ -11,6 +11,106 @@ from iidm_viewer.filters import (
 )
 
 
+_TARGET_TOLERANCE = 0.1
+
+_STATUS_DIAMOND_COLOR = {
+    "inside": "green",
+    "edge": "orange",
+    "outside": "red",
+    "n/a": "gray",
+}
+
+
+def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
+    """Classify (target_p, target_q) for each generator vs. its capability polygon.
+
+    The polygon is convex and piecewise-linear in P, so containment reduces to
+    target_p in [p_lo, p_hi] AND target_q in [min_q_at_target_p, max_q_at_target_p].
+    P bounds come from the curve's extreme points when present, else from min_p/max_p.
+    """
+    needed = ["target_p", "target_q", "min_p", "max_p",
+              "min_q_at_target_p", "max_q_at_target_p"]
+    df = gens_df.reindex(columns=needed).copy()
+
+    if not curves_df.empty:
+        curve_p_range = (
+            curves_df.groupby(level="id")["p"]
+            .agg(["min", "max"])
+            .rename(columns={"min": "p_lo", "max": "p_hi"})
+        )
+        df = df.join(curve_p_range, how="left")
+    else:
+        df["p_lo"] = float("nan")
+        df["p_hi"] = float("nan")
+
+    df["p_lo"] = df["p_lo"].fillna(df["min_p"])
+    df["p_hi"] = df["p_hi"].fillna(df["max_p"])
+
+    valid = (
+        df["target_p"].notna() & df["target_q"].notna()
+        & df["p_lo"].notna() & df["p_hi"].notna()
+        & df["min_q_at_target_p"].notna() & df["max_q_at_target_p"].notna()
+    )
+
+    distances = pd.concat(
+        [
+            df["p_lo"] - df["target_p"],
+            df["target_p"] - df["p_hi"],
+            df["min_q_at_target_p"] - df["target_q"],
+            df["target_q"] - df["max_q_at_target_p"],
+        ],
+        axis=1,
+    )
+    max_signed = distances.max(axis=1)
+    df["violation"] = max_signed.where(max_signed > 0, 0.0)
+
+    status = pd.Series("inside", index=df.index, dtype="object")
+    status[max_signed.abs() <= tolerance] = "edge"
+    status[max_signed > tolerance] = "outside"
+    status[~valid] = "n/a"
+    df["status"] = status
+
+    return df
+
+
+def _render_target_containment_summary(classified, gens_df):
+    n_inside = int((classified["status"] == "inside").sum())
+    n_edge = int((classified["status"] == "edge").sum())
+    n_outside = int((classified["status"] == "outside").sum())
+    n_na = int((classified["status"] == "n/a").sum())
+
+    label = f"Target P/Q containment — {n_outside} outside, {n_edge} on edge"
+    with st.expander(label, expanded=(n_outside + n_edge > 0)):
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Inside", n_inside)
+        c2.metric("On edge", n_edge)
+        c3.metric("Outside", n_outside)
+        c4.metric("Unknown", n_na)
+
+        issues = classified[classified["status"].isin(["outside", "edge"])]
+        if issues.empty:
+            st.success("All targets are inside their capability curves.")
+            return
+
+        order = issues["status"].map({"outside": 0, "edge": 1})
+        issues = (
+            issues.assign(_order=order)
+            .sort_values(["_order", "violation"], ascending=[True, False])
+            .drop(columns="_order")
+        )
+
+        extra = [c for c in ("voltage_level_id", "nominal_v", "country")
+                 if c in gens_df.columns]
+        if extra:
+            issues = issues.join(gens_df[extra], how="left")
+
+        cols = extra + [
+            "status", "violation", "target_p", "target_q",
+            "p_lo", "p_hi", "min_q_at_target_p", "max_q_at_target_p",
+        ]
+        st.dataframe(issues[cols], use_container_width=True)
+
+
 def render_reactive_curves(network, selected_vl):
     curves_df = get_reactive_curve_points(network)
     curve_gen_ids = set(
@@ -57,6 +157,9 @@ def render_reactive_curves(network, selected_vl):
 
     gen_ids = gens_df.index.tolist()
     st.caption(f"{len(gen_ids)} generators with reactive limits")
+
+    classified = classify_targets(gens_df, curves_df)
+    _render_target_containment_summary(classified, gens_df)
 
     selected_gen = st.selectbox(
         "Generator",
@@ -122,11 +225,20 @@ def render_reactive_curves(network, selected_vl):
         target_p = gen_row.get("target_p")
         target_q = gen_row.get("target_q")
         if pd.notna(target_p) and pd.notna(target_q):
+            status = (
+                classified.loc[selected_gen, "status"]
+                if selected_gen in classified.index
+                else "n/a"
+            )
             fig.add_trace(go.Scatter(
                 x=[float(target_p)], y=[float(target_q)],
                 mode="markers",
-                marker=dict(size=12, color="green", symbol="diamond"),
-                name=f"Target (P={target_p:.1f}, Q={target_q:.1f})",
+                marker=dict(
+                    size=12,
+                    color=_STATUS_DIAMOND_COLOR.get(status, "green"),
+                    symbol="diamond",
+                ),
+                name=f"Target (P={target_p:.1f}, Q={target_q:.1f}, {status})",
             ))
 
     fig.update_layout(
