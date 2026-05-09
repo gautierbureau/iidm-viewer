@@ -168,6 +168,7 @@ pypowsybl → result wrapped and handed back.
 | Explore skipping non-visible tabs to cut per-click round-trips | [docs/active-tab-gate.md](docs/active-tab-gate.md) |
 | Understand where worker round-trips are spent per tab | [docs/worker-round-trips.md](docs/worker-round-trips.md) |
 | Investigate why a rerun feels slow on a large network | [docs/profiling-rerun-cost.md](docs/profiling-rerun-cost.md) |
+| Plan the N vs N-K variant-comparison refactor | [docs/n-k-variant-comparison.md](docs/n-k-variant-comparison.md) |
 
 ## 4. Troubleshooting segfaults
 
