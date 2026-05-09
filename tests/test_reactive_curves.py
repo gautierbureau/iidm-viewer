@@ -63,19 +63,23 @@ def test_classify_minmax_inside_outside_edge():
         {"id": "G_in",   "target_p": 50.0, "target_q":   0.0,
          "min_p": 0.0, "max_p": 100.0,
          "min_q": -50.0, "max_q": 50.0,
-         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0},
+         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0,
+         "voltage_regulator_on": True},
         {"id": "G_out_q", "target_p": 50.0, "target_q":  60.0,
          "min_p": 0.0, "max_p": 100.0,
          "min_q": -50.0, "max_q": 50.0,
-         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0},
+         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0,
+         "voltage_regulator_on": True},
         {"id": "G_out_p", "target_p": 150.0, "target_q":  0.0,
          "min_p": 0.0, "max_p": 100.0,
          "min_q": -50.0, "max_q": 50.0,
-         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0},
+         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0,
+         "voltage_regulator_on": False},
         {"id": "G_edge",  "target_p": 50.0, "target_q":  50.0,
          "min_p": 0.0, "max_p": 100.0,
          "min_q": -50.0, "max_q": 50.0,
-         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0},
+         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0,
+         "voltage_regulator_on": False},
     ])
     out = classify_targets(gens, pd.DataFrame())
 
@@ -86,6 +90,23 @@ def test_classify_minmax_inside_outside_edge():
     assert out.loc["G_out_p", "status"] == "outside"
     assert out.loc["G_out_p", "violation"] == 50.0
     assert out.loc["G_edge", "status"] == "edge"
+
+    assert out.loc["G_in", "regulation"] == "PV"
+    assert out.loc["G_out_q", "regulation"] == "PV"
+    assert out.loc["G_out_p", "regulation"] == "PQ"
+    assert out.loc["G_edge", "regulation"] == "PQ"
+
+
+def test_classify_regulation_unknown_when_no_target_q_and_off():
+    gens = _make_gens_df([
+        {"id": "G", "target_p": 50.0, "target_q": float("nan"),
+         "min_p": 0.0, "max_p": 100.0,
+         "min_q": -50.0, "max_q": 50.0,
+         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0,
+         "voltage_regulator_on": False},
+    ])
+    out = classify_targets(gens, pd.DataFrame())
+    assert out.loc["G", "regulation"] == "?"
 
 
 def test_classify_uses_curve_p_range_when_present():

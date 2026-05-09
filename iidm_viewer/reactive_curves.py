@@ -27,9 +27,15 @@ def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
     The polygon is convex and piecewise-linear in P, so containment reduces to
     target_p in [p_lo, p_hi] AND target_q in [min_q_at_target_p, max_q_at_target_p].
     P bounds come from the curve's extreme points when present, else from min_p/max_p.
+
+    Also tags each generator with a ``regulation`` column: ``"PV"`` when the
+    voltage regulator is on, ``"PQ"`` when it is off and a target_q is set,
+    ``"?"`` otherwise. PV generators outside their diagram will be switched to
+    PQ during a load flow, which is the most actionable subset of the report.
     """
     needed = ["target_p", "target_q", "min_p", "max_p",
-              "min_q_at_target_p", "max_q_at_target_p"]
+              "min_q_at_target_p", "max_q_at_target_p",
+              "voltage_regulator_on"]
     df = gens_df.reindex(columns=needed).copy()
 
     if not curves_df.empty:
@@ -70,6 +76,13 @@ def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
     status[~valid] = "n/a"
     df["status"] = status
 
+    regulator_on = df["voltage_regulator_on"].fillna(False).astype(bool)
+    has_target_q = df["target_q"].notna()
+    regulation = pd.Series("?", index=df.index, dtype="object")
+    regulation[regulator_on] = "PV"
+    regulation[~regulator_on & has_target_q] = "PQ"
+    df["regulation"] = regulation
+
     return df
 
 
@@ -79,13 +92,29 @@ def _render_target_containment_summary(classified, gens_df):
     n_outside = int((classified["status"] == "outside").sum())
     n_na = int((classified["status"] == "n/a").sum())
 
+    outside_mask = classified["status"] == "outside"
+    n_outside_pv = int((outside_mask & (classified["regulation"] == "PV")).sum())
+    n_outside_pq = int((outside_mask & (classified["regulation"] == "PQ")).sum())
+
     label = f"Target P/Q containment — {n_outside} outside, {n_edge} on edge"
     with st.expander(label, expanded=(n_outside + n_edge > 0)):
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Inside", n_inside)
         c2.metric("On edge", n_edge)
-        c3.metric("Outside", n_outside)
+        c3.metric(
+            "Outside",
+            n_outside,
+            delta=f"{n_outside_pv} PV → PQ" if n_outside_pv else None,
+            delta_color="inverse",
+        )
         c4.metric("Unknown", n_na)
+
+        if n_outside_pv or n_outside_pq:
+            st.caption(
+                f"Of the {n_outside} outside: {n_outside_pv} PV "
+                f"(will switch to PQ in load flow), {n_outside_pq} PQ, "
+                f"{n_outside - n_outside_pv - n_outside_pq} other."
+            )
 
         issues = classified[classified["status"].isin(["outside", "edge"])]
         if issues.empty:
@@ -105,7 +134,7 @@ def _render_target_containment_summary(classified, gens_df):
             issues = issues.join(gens_df[extra], how="left")
 
         cols = extra + [
-            "status", "violation", "target_p", "target_q",
+            "status", "regulation", "violation", "target_p", "target_q",
             "p_lo", "p_hi", "min_q_at_target_p", "max_q_at_target_p",
         ]
         st.dataframe(issues[cols], use_container_width=True)
@@ -171,11 +200,17 @@ def render_reactive_curves(network, selected_vl):
     gen_row = gens_df.loc[selected_gen] if selected_gen in gens_df.index else None
 
     if gen_row is not None:
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("target_p", f"{gen_row.get('target_p', float('nan')):.1f} MW")
         col2.metric("target_q", f"{gen_row.get('target_q', float('nan')):.1f} MVar")
         col3.metric("min_q at target_p", f"{gen_row.get('min_q_at_target_p', float('nan')):.1f} MVar")
         col4.metric("max_q at target_p", f"{gen_row.get('max_q_at_target_p', float('nan')):.1f} MVar")
+        regulation = (
+            classified.loc[selected_gen, "regulation"]
+            if selected_gen in classified.index
+            else "?"
+        )
+        col5.metric("Type", regulation)
 
     has_curve_points = selected_gen in curve_gen_ids
 
@@ -225,11 +260,12 @@ def render_reactive_curves(network, selected_vl):
         target_p = gen_row.get("target_p")
         target_q = gen_row.get("target_q")
         if pd.notna(target_p) and pd.notna(target_q):
-            status = (
-                classified.loc[selected_gen, "status"]
-                if selected_gen in classified.index
-                else "n/a"
-            )
+            if selected_gen in classified.index:
+                status = classified.loc[selected_gen, "status"]
+                regulation = classified.loc[selected_gen, "regulation"]
+            else:
+                status = "n/a"
+                regulation = "?"
             fig.add_trace(go.Scatter(
                 x=[float(target_p)], y=[float(target_q)],
                 mode="markers",
@@ -238,7 +274,10 @@ def render_reactive_curves(network, selected_vl):
                     color=_STATUS_DIAMOND_COLOR.get(status, "green"),
                     symbol="diamond",
                 ),
-                name=f"Target (P={target_p:.1f}, Q={target_q:.1f}, {status})",
+                name=(
+                    f"Target [{regulation}] (P={target_p:.1f}, "
+                    f"Q={target_q:.1f}, {status})"
+                ),
             ))
 
     fig.update_layout(
