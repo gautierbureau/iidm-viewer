@@ -24,6 +24,20 @@ run without bringing the JVM online.
 reset on every successful `load_network` / `create_empty` and the new
 op is appended in its place — there is no "before-load" garbage.
 
+## Pause / resume
+
+Recording is on by default.  The Session Script tab carries a
+*Recording* toggle; flipping it off makes every subsequent `record_*`
+call a silent no-op.  The op log itself is preserved, so toggling
+back on resumes appending.
+
+The pause flag (`st.session_state["_op_log_paused"]`) is reset to
+``False`` on every session boundary — `record_load_network`,
+`record_create_empty`, and `clear_log` all auto-resume so the next
+session always starts recording.  Loading a new network also pops the
+widget's session-state key (`script_recorder.RECORDING_WIDGET_KEY`)
+so the toggle visibly snaps back to ON.
+
 Op kinds (all phases):
 
 | Kind | Source | Generator path |
