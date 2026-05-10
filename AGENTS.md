@@ -150,9 +150,9 @@ pypowsybl → result wrapped and handed back.
 | `injection_map.py` | Leaflet net-injection map (P/Q per substation) — Injection Map tab | [docs/injection-map.md](docs/injection-map.md) |
 | `leaflet_scalar_map.py` | Shared Leaflet scalar-on-substation renderer (`DivergingColorScale`, `get_substation_positions`, `render_scalar_map`) used by `voltage_map` and `injection_map` | [docs/voltage-analysis.md § Shared scalar-on-substation renderer](docs/voltage-analysis.md#shared-scalar-on-substation-renderer---leaflet_scalar_mappy) |
 | `cli.py` | `iidm-viewer` entry-point shim | — |
-| `script_recorder.py` | Session-state op log appended by `state.py` mutators | — |
-| `script_generator.py` | Pure-Python op-log → runnable script | — |
-| `session_script.py` | "Session Script" tab: preview, toggle, download, clear | — |
+| `script_recorder.py` | Session-state op log appended by `state.py` mutators | [docs/hmi-mirror-script.md](docs/hmi-mirror-script.md) |
+| `script_generator.py` | Pure-Python op-log → runnable script | [docs/hmi-mirror-script.md](docs/hmi-mirror-script.md) |
+| `session_script.py` | "Session Script" tab: preview, toggle, download, clear | [docs/hmi-mirror-script.md](docs/hmi-mirror-script.md) |
 
 ### Quick-start by task
 
@@ -168,6 +168,7 @@ pypowsybl → result wrapped and handed back.
 | Change the Injection Map tab | [docs/injection-map.md](docs/injection-map.md) |
 | Add a new scalar-on-substation Leaflet map (reusing the shared renderer) | [docs/voltage-analysis.md § Shared scalar-on-substation renderer](docs/voltage-analysis.md#shared-scalar-on-substation-renderer---leaflet_scalar_mappy) |
 | Change the Pmax Visualization tab | [docs/pmax-visualization.md](docs/pmax-visualization.md) |
+| Change the HMI-mirror Session Script feature (recorder, generator, tab) | [docs/hmi-mirror-script.md](docs/hmi-mirror-script.md) |
 | Explore skipping non-visible tabs to cut per-click round-trips | [docs/active-tab-gate.md](docs/active-tab-gate.md) |
 | Understand where worker round-trips are spent per tab | [docs/worker-round-trips.md](docs/worker-round-trips.md) |
 | Investigate why a rerun feels slow on a large network | [docs/profiling-rerun-cost.md](docs/profiling-rerun-cost.md) |
