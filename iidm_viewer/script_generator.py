@@ -304,6 +304,135 @@ def _create_secondary_voltage_control(network, zones, units):
     network.create_extensions("secondaryVoltageControl", [zones_df, units_df])'''
 
 
+_SECURITY_ANALYSIS_HELPER = '''\
+import pypowsybl.security as sa
+
+
+def _apply_action(analysis, action):
+    """Mirror of iidm_viewer.state._apply_action — dispatches one remedial
+    action dict to the right add_*_action call."""
+    from pypowsybl._pypowsybl import Side
+    action_id = action["action_id"]
+    atype = action["type"]
+    side = Side.__members__.get(action.get("side", "NONE"), Side.NONE)
+    if atype == "SWITCH":
+        analysis.add_switch_action(action_id, action["switch_id"], bool(action["open"]))
+    elif atype == "TERMINALS_CONNECTION":
+        analysis.add_terminals_connection_action(
+            action_id, action["element_id"], side=side,
+            opening=bool(action.get("opening", True)),
+        )
+    elif atype == "GENERATOR_ACTIVE_POWER":
+        analysis.add_generator_active_power_action(
+            action_id, action["generator_id"],
+            bool(action["is_relative"]), float(action["active_power"]),
+        )
+    elif atype == "LOAD_ACTIVE_POWER":
+        analysis.add_load_active_power_action(
+            action_id, action["load_id"],
+            bool(action["is_relative"]), float(action["active_power"]),
+        )
+    elif atype == "PHASE_TAP_CHANGER_POSITION":
+        analysis.add_phase_tap_changer_position_action(
+            action_id, action["transformer_id"],
+            bool(action["is_relative"]), int(action["tap_position"]), side=side,
+        )
+    elif atype == "RATIO_TAP_CHANGER_POSITION":
+        analysis.add_ratio_tap_changer_position_action(
+            action_id, action["transformer_id"],
+            bool(action["is_relative"]), int(action["tap_position"]), side=side,
+        )
+    elif atype == "SHUNT_COMPENSATOR_POSITION":
+        analysis.add_shunt_compensator_position_action(
+            action_id, action["shunt_id"], int(action["section"]),
+        )
+    else:
+        raise ValueError(f"Unsupported action type: {atype!r}")
+
+
+def _run_security_analysis(
+    network,
+    contingencies=None,
+    monitored_elements=None,
+    limit_reductions=None,
+    actions=None,
+    operator_strategies=None,
+    contingencies_json_paths=None,
+    actions_json_paths=None,
+    operator_strategies_json_paths=None,
+    lf_generic=None,
+    lf_provider=None,
+):
+    """Mirror of iidm_viewer.state.run_security_analysis."""
+    from pypowsybl.flowdecomposition import ContingencyContextType
+    from pypowsybl._pypowsybl import ConditionType, ViolationType
+
+    contingencies = contingencies or []
+    monitored_elements = monitored_elements or []
+    limit_reductions = limit_reductions or []
+    actions = actions or []
+    operator_strategies = operator_strategies or []
+    contingencies_json_paths = contingencies_json_paths or []
+    actions_json_paths = actions_json_paths or []
+    operator_strategies_json_paths = operator_strategies_json_paths or []
+
+    analysis = sa.create_analysis()
+    for c in contingencies:
+        eids = list(c.get("element_ids") or ([c["element_id"]] if "element_id" in c else []))
+        if len(eids) == 1:
+            analysis.add_single_element_contingency(eids[0], c["id"])
+        elif len(eids) > 1:
+            analysis.add_multiple_elements_contingency(eids, c["id"])
+    for p in contingencies_json_paths:
+        analysis.add_contingencies_from_json_file(p)
+
+    for me in monitored_elements:
+        ctx_name = me.get("contingency_context_type", "ALL")
+        ctx = ContingencyContextType.__members__.get(ctx_name, ContingencyContextType.ALL)
+        analysis.add_monitored_elements(
+            contingency_context_type=ctx,
+            contingency_ids=me.get("contingency_ids") or None,
+            branch_ids=me.get("branch_ids") or None,
+            voltage_level_ids=me.get("voltage_level_ids") or None,
+            three_windings_transformer_ids=me.get("three_windings_transformer_ids") or None,
+        )
+
+    if limit_reductions:
+        lr_df = pd.DataFrame(limit_reductions).set_index("limit_type")
+        analysis.add_limit_reductions(lr_df)
+
+    for action in actions:
+        _apply_action(analysis, action)
+    for p in actions_json_paths:
+        analysis.add_actions_from_json_file(p)
+
+    for strat in operator_strategies:
+        cond_name = strat.get("condition_type", "TRUE_CONDITION")
+        cond = ConditionType.__members__.get(cond_name, ConditionType.TRUE_CONDITION)
+        vtype_names = strat.get("violation_types") or []
+        vtypes = [
+            ViolationType.__members__[n] for n in vtype_names
+            if n in ViolationType.__members__
+        ] or None
+        vsubjects = list(strat.get("violation_subject_ids") or []) or None
+        analysis.add_operator_strategy(
+            strat["operator_strategy_id"], strat["contingency_id"],
+            list(strat["action_ids"]),
+            condition_type=cond,
+            violation_subject_ids=vsubjects, violation_types=vtypes,
+        )
+    for p in operator_strategies_json_paths:
+        analysis.add_operator_strategies_from_json_file(p)
+
+    lf_params = lf.Parameters(**(lf_generic or {}))
+    if lf_provider:
+        lf_params.provider_parameters = {k: str(v) for k, v in lf_provider.items()}
+    params = sa.Parameters(load_flow_parameters=lf_params)
+    result = analysis.run_ac(network, parameters=params)
+    print(f"Security analysis pre-contingency status: {result.pre_contingency_result.status.name}")
+    return result'''
+
+
 _HELPERS_REGISTRY: dict[str, str] = {
     "remove": _REMOVE_HELPER,
     "bay_df": _BAY_DF_HELPER,
@@ -314,6 +443,7 @@ _HELPERS_REGISTRY: dict[str, str] = {
     "operational_limits": _OPERATIONAL_LIMITS_HELPER,
     "extension": _EXTENSION_HELPER,
     "secondary_voltage_control": _SVC_HELPER,
+    "security_analysis": _SECURITY_ANALYSIS_HELPER,
 }
 
 
@@ -333,6 +463,7 @@ _KIND_HELPER_DEPS: dict[str, set[str]] = {
     "create_operational_limits": {"operational_limits"},
     "create_extension": {"extension"},
     "create_secondary_voltage_control": {"secondary_voltage_control"},
+    "run_security_analysis": {"security_analysis"},
 }
 
 
@@ -406,6 +537,9 @@ def _emit_body(ops: list[dict[str, Any]]) -> list[str]:
             i += 1
         elif kind == "run_loadflow":
             body.extend(_emit_run_loadflow(op))
+            i += 1
+        elif kind == "run_security_analysis":
+            body.extend(_emit_run_security_analysis(op))
             i += 1
         elif kind in _CREATE_EMITTERS:
             body.extend(_CREATE_EMITTERS[kind](op))
@@ -604,6 +738,43 @@ def _emit_create_secondary_voltage_control(op: dict[str, Any]) -> list[str]:
         "    # Create secondary voltage control",
         "    _create_secondary_voltage_control(",
         f"        network, {op['zones']!r}, {op['units']!r},",
+        "    )",
+    ]
+
+
+def _emit_run_security_analysis(op: dict[str, Any]) -> list[str]:
+    """Emit a single ``_run_security_analysis(...)`` call.
+
+    Only includes kwargs that have a non-empty value to keep the script
+    readable for the common case of a small contingency list with no
+    monitored elements / actions / strategies.
+    """
+    kwargs: list[str] = []
+    for key in (
+        "contingencies",
+        "monitored_elements",
+        "limit_reductions",
+        "actions",
+        "operator_strategies",
+        "contingencies_json_paths",
+        "actions_json_paths",
+        "operator_strategies_json_paths",
+        "lf_generic",
+        "lf_provider",
+    ):
+        value = op.get(key)
+        if value:
+            kwargs.append(f"        {key}={value!r},")
+    if not kwargs:
+        return [
+            "    # Run AC security analysis",
+            "    _run_security_analysis(network)",
+        ]
+    return [
+        "    # Run AC security analysis",
+        "    _run_security_analysis(",
+        "        network,",
+        *kwargs,
         "    )",
     ]
 

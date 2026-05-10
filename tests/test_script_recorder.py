@@ -396,3 +396,86 @@ def test_record_create_secondary_voltage_control_captures_both_lists():
     assert op["kind"] == "create_secondary_voltage_control"
     assert len(op["zones"]) == 1
     assert len(op["units"]) == 1
+
+
+# ----------------------------------------------------------- Phase 4 SA
+
+
+def test_record_run_security_analysis_captures_every_kwarg():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_run_security_analysis(
+        contingencies=[{"id": "N1", "element_id": "L1"}],
+        monitored_elements=[{"contingency_context_type": "ALL"}],
+        limit_reductions=[{"limit_type": "CURRENT", "permanent": True,
+                           "temporary": False, "value": 0.9}],
+        actions=[{"action_id": "A1", "type": "SWITCH",
+                  "switch_id": "BR1", "open": True}],
+        operator_strategies=[{
+            "operator_strategy_id": "OS1", "contingency_id": "N1",
+            "action_ids": ["A1"], "condition_type": "TRUE_CONDITION",
+        }],
+        contingencies_json_paths=["/tmp/c.json"],
+        actions_json_paths=["/tmp/a.json"],
+        operator_strategies_json_paths=["/tmp/o.json"],
+        lf_generic={"distributed_slack": True},
+        lf_provider={"slackBusSelectionMode": "MOST_MESHED"},
+    )
+    op = script_recorder.get_log()[-1]
+    assert op["kind"] == "run_security_analysis"
+    assert len(op["contingencies"]) == 1
+    assert len(op["monitored_elements"]) == 1
+    assert len(op["limit_reductions"]) == 1
+    assert len(op["actions"]) == 1
+    assert len(op["operator_strategies"]) == 1
+    assert op["contingencies_json_paths"] == ["/tmp/c.json"]
+    assert op["actions_json_paths"] == ["/tmp/a.json"]
+    assert op["operator_strategies_json_paths"] == ["/tmp/o.json"]
+    assert op["lf_generic"]["distributed_slack"] is True
+    assert op["lf_provider"]["slackBusSelectionMode"] == "MOST_MESHED"
+
+
+def test_record_run_security_analysis_normalises_none_to_empty():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_run_security_analysis(
+        contingencies=[],
+        monitored_elements=None,
+        limit_reductions=None,
+        actions=None,
+        operator_strategies=None,
+        contingencies_json_paths=None,
+        actions_json_paths=None,
+        operator_strategies_json_paths=None,
+        lf_generic=None,
+        lf_provider=None,
+    )
+    op = script_recorder.get_log()[-1]
+    for key in (
+        "contingencies", "monitored_elements", "limit_reductions",
+        "actions", "operator_strategies",
+        "contingencies_json_paths", "actions_json_paths",
+        "operator_strategies_json_paths",
+    ):
+        assert op[key] == []
+    assert op["lf_generic"] == {}
+    assert op["lf_provider"] == {}
+
+
+def test_record_run_security_analysis_deep_copies_payload():
+    """Mutating the input dicts after recording must not affect the log."""
+    script_recorder.record_load_network("a.xiidm", None, None)
+    contingencies = [{"id": "N1", "element_id": "L1"}]
+    script_recorder.record_run_security_analysis(
+        contingencies=contingencies,
+        monitored_elements=None,
+        limit_reductions=None,
+        actions=None,
+        operator_strategies=None,
+        contingencies_json_paths=None,
+        actions_json_paths=None,
+        operator_strategies_json_paths=None,
+        lf_generic=None,
+        lf_provider=None,
+    )
+    contingencies[0]["id"] = "MUTATED"
+    op = script_recorder.get_log()[-1]
+    assert op["contingencies"][0]["id"] == "N1"

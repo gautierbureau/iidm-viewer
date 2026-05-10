@@ -471,3 +471,43 @@ def record_create_secondary_voltage_control(
             "units": [dict(u) for u in units],
         }
     )
+
+
+# ----------------------------------------------------------- security analysis
+
+
+def record_run_security_analysis(
+    contingencies: list[dict[str, Any]],
+    monitored_elements: list[dict[str, Any]] | None,
+    limit_reductions: list[dict[str, Any]] | None,
+    actions: list[dict[str, Any]] | None,
+    operator_strategies: list[dict[str, Any]] | None,
+    contingencies_json_paths: list[str] | None,
+    actions_json_paths: list[str] | None,
+    operator_strategies_json_paths: list[str] | None,
+    lf_generic: dict[str, Any] | None,
+    lf_provider: dict[str, Any] | None,
+) -> None:
+    """Record an AC security analysis run.
+
+    Captures the full configuration the user assembled in the Security
+    Analysis tab — every dict is deep-copied so subsequent edits in
+    session state cannot mutate the recorded op. Filesystem JSON paths
+    are recorded as-is; replaying the script needs the same files at
+    the same paths.
+    """
+    _append(
+        {
+            "kind": "run_security_analysis",
+            "contingencies": [dict(c) for c in (contingencies or [])],
+            "monitored_elements": [dict(m) for m in (monitored_elements or [])],
+            "limit_reductions": [dict(r) for r in (limit_reductions or [])],
+            "actions": [dict(a) for a in (actions or [])],
+            "operator_strategies": [dict(s) for s in (operator_strategies or [])],
+            "contingencies_json_paths": list(contingencies_json_paths or []),
+            "actions_json_paths": list(actions_json_paths or []),
+            "operator_strategies_json_paths": list(operator_strategies_json_paths or []),
+            "lf_generic": dict(lf_generic or {}),
+            "lf_provider": dict(lf_provider or {}),
+        }
+    )

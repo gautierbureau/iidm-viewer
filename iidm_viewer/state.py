@@ -2481,7 +2481,20 @@ def run_security_analysis(
             "json_export": json_export_bytes,
         }
 
-    return run(_run_sa)
+    sa_result = run(_run_sa)
+    script_recorder.record_run_security_analysis(
+        contingencies,
+        monitored_elements,
+        limit_reductions,
+        actions,
+        operator_strategies,
+        contingencies_json_paths,
+        actions_json_paths,
+        operator_strategies_json_paths,
+        generic,
+        provider,
+    )
+    return sa_result
 
 
 # --- Short Circuit Analysis ---
