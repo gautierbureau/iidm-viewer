@@ -7,6 +7,7 @@ from iidm_viewer.caches import (
     invalidate_on_network_replace,
     invalidate_on_topology_change,
 )
+from iidm_viewer import script_recorder
 
 
 def init_state():
@@ -147,6 +148,7 @@ def load_network(
     st.session_state.pop("va_nom_select", None)
     for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_") or k.startswith("_export_cache_")]:
         del st.session_state[k]
+    script_recorder.record_load_network(uploaded_file.name, params, pp_list)
     return network
 
 
@@ -179,6 +181,7 @@ def create_empty_network(network_id: str = "network"):
     st.session_state.pop("_export_ext", None)
     for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_") or k.startswith("_export_cache_")]:
         del st.session_state[k]
+    script_recorder.record_create_empty(nid)
     return network
 
 
@@ -208,6 +211,7 @@ def run_loadflow(network):
     st.session_state["_lf_report_json"] = report_json
     # Invalidate cached lookups so tabs reload fresh data
     invalidate_on_load_flow()
+    script_recorder.record_run_loadflow(generic, provider)
     return results
 
 
