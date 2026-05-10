@@ -14,14 +14,15 @@ Design notes:
   matching op. The generator filters when emitting so the user can
   choose between "net state only" and "full transcript" at download
   time.
-- Phase 1 only records ``load_network``, ``create_empty`` and
-  ``run_loadflow``. Later phases append more op kinds without changing
-  this module's public surface.
+- Phase 1 recorded ``load_network``, ``create_empty`` and
+  ``run_loadflow``.  Phase 2 adds component edits, component removals,
+  extension edits, extension removals, and their revert counterparts.
 """
 from __future__ import annotations
 
 from typing import Any
 
+import pandas as pd
 import streamlit as st
 
 
@@ -101,5 +102,203 @@ def record_run_loadflow(
             "kind": "run_loadflow",
             "generic": dict(generic or {}),
             "provider": dict(provider or {}),
+        }
+    )
+
+
+# --------------------------------------------------------- component edits
+
+
+def _is_na(value: Any) -> bool:
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _scalar(value: Any) -> Any:
+    """Coerce numpy scalars / NaN to plain Python so the generator can ``repr()``."""
+    if _is_na(value):
+        return None
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return item()
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _mark_first_matching_reverted(
+    log: list[dict[str, Any]],
+    kind: str,
+    **match: Any,
+) -> bool:
+    """Mark the latest non-reverted op matching ``kind`` and ``**match``.
+
+    Walks backwards so the most recent edit on a given cell is the one
+    that gets cancelled, which is what the HMI revert always means.
+    Returns True when a match was found.
+    """
+    for op in reversed(log):
+        if op.get("kind") != kind:
+            continue
+        if op.get("reverted"):
+            continue
+        if all(op.get(k) == v for k, v in match.items()):
+            op["reverted"] = True
+            return True
+    return False
+
+
+def _iter_cells(changes_df: pd.DataFrame):
+    """Yield ``(element_id, column, value)`` for each non-null cell."""
+    for element_id in changes_df.index:
+        for col in changes_df.columns:
+            value = changes_df.at[element_id, col]
+            if _is_na(value):
+                continue
+            yield element_id, col, value
+
+
+def record_update_components(
+    component: str,
+    method_name: str,
+    changes_df: pd.DataFrame,
+    original_df: pd.DataFrame,
+    *,
+    is_revert: bool = False,
+) -> None:
+    """Record a component update — one op per non-null cell.
+
+    ``is_revert=True`` flips the semantics: the matching prior
+    ``update_components`` op for each cell is marked ``reverted=True``
+    and a ``revert_update_components`` op is appended so the full
+    transcript still shows the revert as a distinct step.
+    """
+    if changes_df.empty:
+        return
+    log = list(st.session_state.get(_OP_LOG_KEY, []))
+    for element_id, col, value in _iter_cells(changes_df):
+        after = _scalar(value)
+        if is_revert:
+            _mark_first_matching_reverted(
+                log,
+                "update_components",
+                component=component,
+                element_id=element_id,
+                property=col,
+            )
+            log.append(
+                {
+                    "kind": "revert_update_components",
+                    "component": component,
+                    "method_name": method_name,
+                    "element_id": element_id,
+                    "property": col,
+                    "value": after,
+                }
+            )
+        else:
+            before_val = None
+            if element_id in original_df.index and col in original_df.columns:
+                before_val = _scalar(original_df.at[element_id, col])
+            log.append(
+                {
+                    "kind": "update_components",
+                    "component": component,
+                    "method_name": method_name,
+                    "element_id": element_id,
+                    "property": col,
+                    "before": before_val,
+                    "after": after,
+                    "reverted": False,
+                }
+            )
+    st.session_state[_OP_LOG_KEY] = log
+
+
+def record_remove_components(component: str, ids: list[str]) -> None:
+    """Record a component removal as a single op.
+
+    The Data Explorer does not currently expose revert for removals, so
+    ``reverted`` stays False — the field is kept for schema uniformity.
+    """
+    if not ids:
+        return
+    _append(
+        {
+            "kind": "remove_components",
+            "component": component,
+            "ids": [str(i) for i in ids],
+            "reverted": False,
+        }
+    )
+
+
+# --------------------------------------------------------- extension edits
+
+
+def record_update_extension(
+    extension_name: str,
+    changes_df: pd.DataFrame,
+    original_df: pd.DataFrame,
+    *,
+    is_revert: bool = False,
+) -> None:
+    """Record an extension update — one op per non-null cell.
+
+    Same revert semantics as :func:`record_update_components`.
+    """
+    if changes_df.empty:
+        return
+    log = list(st.session_state.get(_OP_LOG_KEY, []))
+    for element_id, col, value in _iter_cells(changes_df):
+        after = _scalar(value)
+        if is_revert:
+            _mark_first_matching_reverted(
+                log,
+                "update_extension",
+                extension_name=extension_name,
+                element_id=element_id,
+                property=col,
+            )
+            log.append(
+                {
+                    "kind": "revert_update_extension",
+                    "extension_name": extension_name,
+                    "element_id": element_id,
+                    "property": col,
+                    "value": after,
+                }
+            )
+        else:
+            before_val = None
+            if element_id in original_df.index and col in original_df.columns:
+                before_val = _scalar(original_df.at[element_id, col])
+            log.append(
+                {
+                    "kind": "update_extension",
+                    "extension_name": extension_name,
+                    "element_id": element_id,
+                    "property": col,
+                    "before": before_val,
+                    "after": after,
+                    "reverted": False,
+                }
+            )
+    st.session_state[_OP_LOG_KEY] = log
+
+
+def record_remove_extension(extension_name: str, ids: list[str]) -> None:
+    """Record an extension removal as a single op."""
+    if not ids:
+        return
+    _append(
+        {
+            "kind": "remove_extension",
+            "extension_name": extension_name,
+            "ids": [str(i) for i in ids],
+            "reverted": False,
         }
     )

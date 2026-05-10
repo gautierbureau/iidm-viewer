@@ -46,6 +46,7 @@ from iidm_viewer.filters import (
     FILTERS,
     render_filters,
 )
+from iidm_viewer import script_recorder
 
 
 # Columns to promote right after 'name' for specific component types.
@@ -198,6 +199,13 @@ def _revert_all_changes(network) -> None:
         revert_df = pd.DataFrame.from_dict(rows, orient="index")
         try:
             update_components(network, comp, revert_df)
+            script_recorder.record_update_components(
+                comp,
+                EDITABLE_COMPONENTS[comp][0],
+                revert_df,
+                pd.DataFrame(),
+                is_revert=True,
+            )
         except Exception as e:
             errors.append((comp, str(e)))
             continue
@@ -251,6 +259,13 @@ def _render_change_log(network, component: str, method_name: str):
                 )
                 try:
                     update_components(network, component, revert_df)
+                    script_recorder.record_update_components(
+                        component,
+                        EDITABLE_COMPONENTS[component][0],
+                        revert_df,
+                        pd.DataFrame(),
+                        is_revert=True,
+                    )
                     log.pop(i)
                     st.session_state[key] = log
                     _bump_editor_version(method_name)
@@ -1336,6 +1351,12 @@ def render_data_explorer(network, selected_vl):
                         try:
                             update_components(network, component, changes)
                             _add_to_change_log(method_name, changes, df)
+                            script_recorder.record_update_components(
+                                component,
+                                EDITABLE_COMPONENTS[component][0],
+                                changes,
+                                df,
+                            )
                             _bump_editor_version(method_name)
                             st.success(
                                 f"Updated {n_changes} "
@@ -1364,6 +1385,7 @@ def render_data_explorer(network, selected_vl):
                         try:
                             actually_removed = remove_components(network, component, ids_to_remove)
                             _add_to_removal_log(component, actually_removed, df)
+                            script_recorder.record_remove_components(component, ids_to_remove)
                             st.rerun()
                         except Exception as e:
                             st.error(f"Remove failed: {e}")

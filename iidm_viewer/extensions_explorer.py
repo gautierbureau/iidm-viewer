@@ -5,6 +5,7 @@ from iidm_viewer.caches import get_extension_df
 from iidm_viewer.data_explorer import _column_config, _compute_changes
 from iidm_viewer.powsybl_worker import run
 from iidm_viewer.state import EDITABLE_EXTENSIONS, remove_extension, update_extension
+from iidm_viewer import script_recorder
 
 
 @st.cache_data(show_spinner=False)
@@ -98,6 +99,12 @@ def _render_ext_change_log(network, extension_name: str):
                 )
                 try:
                     update_extension(network, extension_name, revert_df)
+                    script_recorder.record_update_extension(
+                        extension_name,
+                        revert_df,
+                        pd.DataFrame(),
+                        is_revert=True,
+                    )
                     log.pop(i)
                     st.session_state[key] = log
                     st.rerun()
@@ -229,6 +236,9 @@ def render_extensions_explorer(network):
                         try:
                             update_extension(network, extension, changes)
                             _add_to_ext_change_log(extension, changes, df)
+                            script_recorder.record_update_extension(
+                                extension, changes, df
+                            )
                             st.success(
                                 f"Updated {n_changes} {extension} "
                                 f"extension{'s' if n_changes > 1 else ''}: "
@@ -248,6 +258,9 @@ def render_extensions_explorer(network):
                         try:
                             remove_extension(network, extension, ids_to_remove)
                             _add_to_ext_removal_log(extension, ids_to_remove, df)
+                            script_recorder.record_remove_extension(
+                                extension, ids_to_remove
+                            )
                             st.rerun()
                         except Exception as e:
                             st.error(f"Remove failed: {e}")

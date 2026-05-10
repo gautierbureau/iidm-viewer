@@ -6,7 +6,8 @@ import pandas as pd
 import streamlit as st
 from iidm_viewer.nad_component import render_interactive_nad
 from iidm_viewer.sld_component import render_interactive_sld
-from iidm_viewer.state import add_to_change_log, toggle_switch
+from iidm_viewer.state import EDITABLE_COMPONENTS, add_to_change_log, toggle_switch
+from iidm_viewer import script_recorder
 
 
 # Fallback palette used only when the exact SLD-SVG color cannot be
@@ -399,6 +400,12 @@ def render_sld_tab(network, selected_vl):
                         index=pd.Index([switch_id], name="id"),
                     )
                     add_to_change_log("get_switches", changes_df, original_df)
+                    script_recorder.record_update_components(
+                        "Switches",
+                        EDITABLE_COMPONENTS["Switches"][0],
+                        changes_df,
+                        original_df,
+                    )
                 except Exception as exc:
                     st.error(f"Switch toggle failed: {exc}")
                 st.rerun()

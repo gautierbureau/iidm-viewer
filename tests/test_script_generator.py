@@ -147,3 +147,159 @@ def test_run_loadflow_without_load_network_still_compiles():
 )
 def test_generated_scripts_always_compile(ops):
     _compile(generate_script(ops, timestamp=FIXED_TS))
+
+
+# ---------------------------------------------------------- Phase 2 op kinds
+
+
+def _mk_update_op(eid, prop, before, after, component="Loads",
+                  method="update_loads", reverted=False):
+    return {
+        "kind": "update_components",
+        "component": component, "method_name": method,
+        "element_id": eid, "property": prop,
+        "before": before, "after": after,
+        "reverted": reverted,
+    }
+
+
+def _mk_revert_op(eid, prop, value, component="Loads", method="update_loads"):
+    return {
+        "kind": "revert_update_components",
+        "component": component, "method_name": method,
+        "element_id": eid, "property": prop,
+        "value": value,
+    }
+
+
+def test_single_update_emits_dataframe_call_and_imports_pandas():
+    ops = [
+        {"kind": "load_network", "parameters": {}, "post_processors": []},
+        _mk_update_op("L1", "p0", 21.7, 30.0),
+    ]
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "import pandas as pd" in script
+    assert "network.update_loads(" in script
+    assert "'L1': {'p0': 30.0}" in script
+
+
+def test_no_update_ops_means_no_pandas_import():
+    ops = [
+        {"kind": "load_network", "parameters": {}, "post_processors": []},
+        {"kind": "run_loadflow", "generic": {}, "provider": {}},
+    ]
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "import pandas as pd" not in script
+
+
+def test_adjacent_updates_with_same_method_are_batched():
+    """Two cell-level ops sharing a method should fuse into one call."""
+    ops = [
+        {"kind": "load_network", "parameters": {}, "post_processors": []},
+        _mk_update_op("L1", "p0", 21.7, 30.0),
+        _mk_update_op("L2", "q0", 10.0, 15.0),
+    ]
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    # One update call mentioning both rows.
+    assert script.count("network.update_loads(") == 1
+    assert "'L1': {'p0': 30.0}" in script
+    assert "'L2': {'q0': 15.0}" in script
+
+
+def test_different_methods_do_not_batch():
+    ops = [
+        {"kind": "load_network", "parameters": {}, "post_processors": []},
+        _mk_update_op("L1", "p0", 21.7, 30.0, component="Loads", method="update_loads"),
+        _mk_update_op("G1", "target_p", 100.0, 120.0,
+                      component="Generators", method="update_generators"),
+    ]
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "network.update_loads(" in script
+    assert "network.update_generators(" in script
+
+
+def test_reverted_update_excluded_in_net_state_mode():
+    """In net-state mode the original edit AND its revert disappear."""
+    ops = [
+        {"kind": "load_network", "parameters": {}, "post_processors": []},
+        _mk_update_op("L1", "p0", 21.7, 30.0, reverted=True),
+        _mk_revert_op("L1", "p0", 21.7),
+    ]
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "update_loads" not in script
+    assert "def process(network):\n    pass" in script
+
+
+def test_full_transcript_emits_revert_step():
+    ops = [
+        {"kind": "load_network", "parameters": {}, "post_processors": []},
+        _mk_update_op("L1", "p0", 21.7, 30.0, reverted=True),
+        _mk_revert_op("L1", "p0", 21.7),
+    ]
+    script = generate_script(
+        ops, source_filename="g.xiidm", timestamp=FIXED_TS, include_reverted=True
+    )
+    _compile(script)
+    # Two distinct update_loads calls: the edit and the revert.
+    assert script.count("network.update_loads(") == 2
+    assert "'L1': {'p0': 30.0}" in script
+    assert "'L1': {'p0': 21.7}" in script
+    assert "# Revert Loads" in script
+
+
+def test_remove_components_emits_helper_and_dispatcher_call():
+    ops = [
+        {"kind": "load_network", "parameters": {}, "post_processors": []},
+        {"kind": "remove_components", "component": "Loads",
+         "ids": ["L1", "L2"], "reverted": False},
+    ]
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "def _remove(network, component, ids):" in script
+    assert "_remove(network, 'Loads', ['L1', 'L2'])" in script
+    # Helper imports nothing extra — relies on the module-level pn import.
+    assert "pn.remove_feeder_bays" in script
+
+
+def test_no_remove_op_means_no_remove_helper():
+    ops = [
+        {"kind": "load_network", "parameters": {}, "post_processors": []},
+        _mk_update_op("L1", "p0", 21.7, 30.0),
+    ]
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "def _remove(" not in script
+
+
+def test_remove_extension_uses_native_call_not_helper():
+    ops = [
+        {"kind": "load_network", "parameters": {}, "post_processors": []},
+        {"kind": "remove_extension", "extension_name": "activePowerControl",
+         "ids": ["G1"], "reverted": False},
+    ]
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "network.remove_extensions('activePowerControl', ['G1'])" in script
+    assert "def _remove(" not in script
+
+
+def test_update_extension_uses_update_extensions_call():
+    ops = [
+        {"kind": "load_network", "parameters": {}, "post_processors": []},
+        {
+            "kind": "update_extension",
+            "extension_name": "activePowerControl",
+            "element_id": "G1", "property": "droop",
+            "before": 4.0, "after": 5.0, "reverted": False,
+        },
+    ]
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "network.update_extensions('activePowerControl'" in script
+    assert "'G1': {'droop': 5.0}" in script
+
