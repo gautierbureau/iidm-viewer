@@ -302,3 +302,172 @@ def record_remove_extension(extension_name: str, ids: list[str]) -> None:
             "reverted": False,
         }
     )
+
+
+# ---------------------------------------------------------------- creations
+#
+# These mirror the create_* helpers in ``state.py``. They are called
+# *after* the worker thread has applied the change, so we know the
+# operation succeeded. None / empty-string entries are dropped from the
+# payload up front — the generator emits ``repr(dict)`` straight into
+# the script, and a literal ``None`` there would fail validation in
+# pypowsybl on replay.
+
+
+def _clean(fields: dict[str, Any]) -> dict[str, Any]:
+    return {k: _scalar(v) for k, v in fields.items() if v is not None and v != ""}
+
+
+def record_create_component_bay(
+    component: str, bay_function: str, fields: dict[str, Any]
+) -> None:
+    """Record a feeder-bay creation (Generators, Loads, …, Shunt Compensators)."""
+    _append(
+        {
+            "kind": "create_component_bay",
+            "component": component,
+            "bay_function": bay_function,
+            "fields": _clean(fields),
+        }
+    )
+
+
+def record_create_branch_bay(
+    component: str, bay_function: str, fields: dict[str, Any]
+) -> None:
+    """Record a line or 2-winding-transformer creation with bays on each side."""
+    _append(
+        {
+            "kind": "create_branch_bay",
+            "component": component,
+            "bay_function": bay_function,
+            "fields": _clean(fields),
+        }
+    )
+
+
+def record_create_container(
+    component: str, create_function: str, fields: dict[str, Any]
+) -> None:
+    """Record a substation / voltage level / busbar section creation."""
+    _append(
+        {
+            "kind": "create_container",
+            "component": component,
+            "create_function": create_function,
+            "fields": _clean(fields),
+        }
+    )
+
+
+def record_create_tap_changer(
+    kind: str,
+    create_method: str,
+    transformer_id: str,
+    main_fields: dict[str, Any],
+    step_columns: list[str],
+    step_defaults: dict[str, Any],
+    steps: list[dict[str, Any]],
+) -> None:
+    """Record a ratio / phase tap changer creation on an existing 2WT."""
+    _append(
+        {
+            "kind": "create_tap_changer",
+            "tap_changer_kind": kind,
+            "create_method": create_method,
+            "transformer_id": transformer_id,
+            "main_fields": _clean(main_fields),
+            "step_columns": list(step_columns),
+            "step_defaults": dict(step_defaults),
+            "steps": [dict(s) for s in steps],
+        }
+    )
+
+
+def record_create_coupling_device(
+    bbs1: str, bbs2: str, switch_prefix: str | None
+) -> None:
+    """Record a coupling-device creation tying two busbar sections together."""
+    _append(
+        {
+            "kind": "create_coupling_device",
+            "bbs1": bbs1,
+            "bbs2": bbs2,
+            "switch_prefix": switch_prefix or None,
+        }
+    )
+
+
+def record_create_hvdc_line(fields: dict[str, Any]) -> None:
+    """Record an HVDC line creation between two existing converter stations."""
+    _append(
+        {
+            "kind": "create_hvdc_line",
+            "fields": _clean(fields),
+        }
+    )
+
+
+def record_create_reactive_limits(
+    element_id: str, mode: str, payload: list[dict[str, Any]]
+) -> None:
+    """Record reactive limits — ``mode`` is ``"minmax"`` or ``"curve"``."""
+    _append(
+        {
+            "kind": "create_reactive_limits",
+            "element_id": element_id,
+            "mode": mode,
+            "payload": [dict(p) for p in payload],
+        }
+    )
+
+
+def record_create_operational_limits(
+    element_id: str,
+    side: str,
+    limit_type: str,
+    limits: list[dict[str, Any]],
+    group_name: str = "DEFAULT",
+) -> None:
+    """Record a group of operational limits on one side of an element."""
+    _append(
+        {
+            "kind": "create_operational_limits",
+            "element_id": element_id,
+            "side": side,
+            "limit_type": limit_type,
+            "limits": [dict(l) for l in limits],
+            "group_name": group_name,
+        }
+    )
+
+
+def record_create_extension(
+    extension_name: str,
+    target_id: str,
+    row: dict[str, Any],
+    index_col: str,
+) -> None:
+    """Record a single-element extension creation."""
+    _append(
+        {
+            "kind": "create_extension",
+            "extension_name": extension_name,
+            "target_id": target_id,
+            "row": _clean(row),
+            "index_col": index_col,
+        }
+    )
+
+
+def record_create_secondary_voltage_control(
+    zones: list[dict[str, Any]], units: list[dict[str, Any]]
+) -> None:
+    """Record a secondary-voltage-control replacement (zones + units)."""
+    _append(
+        {
+            "kind": "create_secondary_voltage_control",
+            "zones": [dict(z) for z in zones],
+            "units": [dict(u) for u in units],
+        }
+    )
