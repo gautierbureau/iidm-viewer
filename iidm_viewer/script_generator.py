@@ -433,6 +433,33 @@ def _run_security_analysis(
     return result'''
 
 
+_SHORT_CIRCUIT_HELPER = '''\
+import pypowsybl.shortcircuit as sc
+
+
+def _run_short_circuit_analysis(network, faults=None, sc_params=None):
+    """Mirror of iidm_viewer.state.run_short_circuit_analysis."""
+    faults = faults or []
+    sc_params = sc_params or {}
+    analysis = sc.create_analysis()
+    for f in faults:
+        analysis.set_bus_fault(f["id"], f["element_id"], 0.0, 0.0)
+    params = sc.Parameters(
+        study_type=sc.ShortCircuitStudyType.__members__.get(
+            sc_params.get("study_type", "SUB_TRANSIENT"),
+            sc.ShortCircuitStudyType.SUB_TRANSIENT,
+        ),
+        with_feeder_result=sc_params.get("with_feeder_result", True),
+        with_limit_violations=sc_params.get("with_limit_violations", True),
+        min_voltage_drop_proportional_threshold=float(
+            sc_params.get("min_voltage_drop_proportional_threshold", 0.0)
+        ),
+    )
+    result = analysis.run(network, parameters=params)
+    print(f"Short circuit analysis: {len(faults)} fault(s) computed.")
+    return result'''
+
+
 _HELPERS_REGISTRY: dict[str, str] = {
     "remove": _REMOVE_HELPER,
     "bay_df": _BAY_DF_HELPER,
@@ -444,12 +471,15 @@ _HELPERS_REGISTRY: dict[str, str] = {
     "extension": _EXTENSION_HELPER,
     "secondary_voltage_control": _SVC_HELPER,
     "security_analysis": _SECURITY_ANALYSIS_HELPER,
+    "short_circuit_analysis": _SHORT_CIRCUIT_HELPER,
 }
 
 
-# Helpers that need ``import pandas as pd``. ``_remove`` is the only one
-# that does not.
-_HELPERS_NEED_PANDAS = frozenset(_HELPERS_REGISTRY) - {"remove"}
+# Helpers that need ``import pandas as pd``. ``_remove`` and
+# ``short_circuit_analysis`` are the only ones that do not.
+_HELPERS_NEED_PANDAS = frozenset(_HELPERS_REGISTRY) - {
+    "remove", "short_circuit_analysis"
+}
 
 
 _KIND_HELPER_DEPS: dict[str, set[str]] = {
@@ -464,6 +494,7 @@ _KIND_HELPER_DEPS: dict[str, set[str]] = {
     "create_extension": {"extension"},
     "create_secondary_voltage_control": {"secondary_voltage_control"},
     "run_security_analysis": {"security_analysis"},
+    "run_short_circuit_analysis": {"short_circuit_analysis"},
 }
 
 
@@ -540,6 +571,9 @@ def _emit_body(ops: list[dict[str, Any]]) -> list[str]:
             i += 1
         elif kind == "run_security_analysis":
             body.extend(_emit_run_security_analysis(op))
+            i += 1
+        elif kind == "run_short_circuit_analysis":
+            body.extend(_emit_run_short_circuit_analysis(op))
             i += 1
         elif kind in _CREATE_EMITTERS:
             body.extend(_CREATE_EMITTERS[kind](op))
@@ -773,6 +807,27 @@ def _emit_run_security_analysis(op: dict[str, Any]) -> list[str]:
     return [
         "    # Run AC security analysis",
         "    _run_security_analysis(",
+        "        network,",
+        *kwargs,
+        "    )",
+    ]
+
+
+def _emit_run_short_circuit_analysis(op: dict[str, Any]) -> list[str]:
+    """Emit a single ``_run_short_circuit_analysis(...)`` call."""
+    kwargs: list[str] = []
+    for key in ("faults", "sc_params"):
+        value = op.get(key)
+        if value:
+            kwargs.append(f"        {key}={value!r},")
+    if not kwargs:
+        return [
+            "    # Run short circuit analysis",
+            "    _run_short_circuit_analysis(network)",
+        ]
+    return [
+        "    # Run short circuit analysis",
+        "    _run_short_circuit_analysis(",
         "        network,",
         *kwargs,
         "    )",

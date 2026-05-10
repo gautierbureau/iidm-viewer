@@ -479,3 +479,43 @@ def test_record_run_security_analysis_deep_copies_payload():
     contingencies[0]["id"] = "MUTATED"
     op = script_recorder.get_log()[-1]
     assert op["contingencies"][0]["id"] == "N1"
+
+
+# ----------------------------------------------------------- Phase 6 SC
+
+
+def test_record_run_short_circuit_analysis_captures_both_inputs():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_run_short_circuit_analysis(
+        faults=[
+            {"id": "SC_B1", "element_id": "B1", "fault_type": "THREE_PHASE"},
+            {"id": "SC_B2", "element_id": "B2", "fault_type": "THREE_PHASE"},
+        ],
+        sc_params={
+            "study_type": "TRANSIENT",
+            "with_feeder_result": False,
+            "with_limit_violations": True,
+            "min_voltage_drop_proportional_threshold": 0.1,
+        },
+    )
+    op = script_recorder.get_log()[-1]
+    assert op["kind"] == "run_short_circuit_analysis"
+    assert len(op["faults"]) == 2
+    assert op["sc_params"]["study_type"] == "TRANSIENT"
+
+
+def test_record_run_short_circuit_analysis_normalises_none_to_empty():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_run_short_circuit_analysis(faults=None, sc_params=None)
+    op = script_recorder.get_log()[-1]
+    assert op["faults"] == []
+    assert op["sc_params"] == {}
+
+
+def test_record_run_short_circuit_analysis_deep_copies_payload():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    faults = [{"id": "SC_B1", "element_id": "B1", "fault_type": "THREE_PHASE"}]
+    script_recorder.record_run_short_circuit_analysis(faults=faults, sc_params=None)
+    faults[0]["id"] = "MUTATED"
+    op = script_recorder.get_log()[-1]
+    assert op["faults"][0]["id"] == "SC_B1"

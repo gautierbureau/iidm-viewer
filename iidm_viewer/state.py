@@ -2632,7 +2632,9 @@ def run_short_circuit_analysis(network, faults: list[dict], sc_params: dict | No
             "faults": faults,
         }
 
-    return run(_run_sc)
+    sc_result = run(_run_sc)
+    script_recorder.record_run_short_circuit_analysis(faults, sc_params)
+    return sc_result
 
 
 def compute_target_v_q_sensitivities(network, gen_ids):
