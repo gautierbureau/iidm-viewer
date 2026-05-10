@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # iidm-viewer installer.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/gautierbureau/iidm-viewer/main/install.sh | bash
+# Usage (stable, follows the latest published release):
+#   curl -fsSL https://github.com/gautierbureau/iidm-viewer/releases/latest/download/install.sh | bash
+#
+# Usage (pinned to a specific release):
+#   curl -fsSL https://github.com/gautierbureau/iidm-viewer/releases/download/v0.9.1/install.sh | bash
 #
 # What it does:
 #   1. Verifies python3 >= 3.9 (and python3-venv) is available.

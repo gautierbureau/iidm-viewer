@@ -58,6 +58,13 @@ jobs:
         with:
           path: dist/*
 
+      - name: Attach install.sh to the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            install.sh --clobber --repo "${{ github.repository }}"
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
