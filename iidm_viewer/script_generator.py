@@ -5,21 +5,29 @@ unit-tested against fixture op-logs without bringing the JVM online.
 
 The emitted script:
 
-- Imports the bare minimum (``argparse``, ``pandas`` when any update op
-  exists, ``pypowsybl.network``, ``pypowsybl.loadflow``).
-- Optionally defines a ``_remove`` helper mirroring
-  :func:`iidm_viewer.state.remove_components` so the script stays
-  self-contained.
+- Imports the bare minimum (``argparse``, ``pandas`` when needed,
+  ``pypowsybl.network``, ``pypowsybl.loadflow``).
+- Optionally defines small helper functions (``_remove``, ``_create_*``)
+  that mirror the equivalent helpers in :mod:`iidm_viewer.state` so the
+  script does not depend on the ``iidm_viewer`` package.
 - Defines ``process(network)`` containing the recorded operations in
   chronological order.
 - Defines ``main()`` that either loads the network from a CLI-provided
   path (``argparse``) or creates an empty network — depending on the
   first op in the log — and then calls ``process``.
 
-Phase 1 supported three op kinds (load_network, create_empty,
-run_loadflow). Phase 2 adds update_components, revert_update_components,
-remove_components, update_extension, revert_update_extension, and
-remove_extension. The public API (``generate_script``) does not change.
+Phases:
+
+- Phase 1: load_network / create_empty / run_loadflow.
+- Phase 2: update_components / revert_update_components,
+  update_extension / revert_update_extension, remove_components,
+  remove_extension.
+- Phase 3: create_component_bay, create_branch_bay, create_container,
+  create_tap_changer, create_coupling_device, create_hvdc_line,
+  create_reactive_limits, create_operational_limits, create_extension,
+  create_secondary_voltage_control.
+
+The public API (``generate_script``) does not change between phases.
 """
 from __future__ import annotations
 
@@ -65,17 +73,20 @@ def generate_script(
     visible = _filter_visible(ops, include_reverted)
     ts = (timestamp or datetime.now()).isoformat(timespec="seconds")
 
-    needs_pandas = any(op["kind"] in _UPDATE_KINDS for op in visible)
-    needs_remove_helper = any(op["kind"] == "remove_components" for op in visible)
+    helpers = _collect_helpers(visible)
+    needs_pandas = (
+        any(op["kind"] in _UPDATE_KINDS for op in visible)
+        or any(name in helpers for name in _HELPERS_NEED_PANDAS)
+    )
 
     header = _emit_header(ts, source_filename, needs_pandas=needs_pandas)
-    helpers = _emit_remove_helper() if needs_remove_helper else []
+    helper_block = _emit_helpers(helpers)
     body_lines = _emit_body(visible)
     main_lines = _emit_main(visible)
 
     parts: list[str] = [header, ""]
-    if helpers:
-        parts.extend([*helpers, ""])
+    if helper_block:
+        parts.extend([*helper_block, ""])
     parts.extend([*body_lines, "", *main_lines, ""])
     return "\n".join(parts) + "\n"
 
@@ -125,10 +136,16 @@ def _emit_header(
     return "\n".join(lines)
 
 
-# -------------------------------------------------------------- remove helper
+# ------------------------------------------------------------------- helpers
+#
+# Helper functions emitted at module scope in the generated script.
+# Each ``_HELPERS_REGISTRY`` entry is a self-contained block of source
+# text. ``_KIND_HELPER_DEPS`` maps each op kind to the names it pulls
+# in; ``_collect_helpers`` walks the visible op log and unions the deps
+# so the emitted script only carries the helpers it actually uses.
 
 
-_REMOVE_HELPER_SRC = '''\
+_REMOVE_HELPER = '''\
 _FEEDER_BAY_TYPES = {"Loads", "Generators", "Batteries", "Shunt Compensators", "Static VAR Compensators"}
 _HVDC_TYPES = {"HVDC Lines", "VSC Converter Stations", "LCC Converter Stations"}
 
@@ -163,8 +180,194 @@ def _remove(network, component, ids):
     network.remove_elements(ids)'''
 
 
-def _emit_remove_helper() -> list[str]:
-    return _REMOVE_HELPER_SRC.splitlines()
+_BAY_DF_HELPER = '''\
+def _bay_df(fields):
+    """Build a one-row, id-indexed DataFrame from a flat fields dict."""
+    return pd.DataFrame([dict(fields)]).set_index("id")'''
+
+
+_SHUNT_BAY_HELPER = '''\
+_SHUNT_LINEAR_FIELDS = {"g_per_section", "b_per_section", "max_section_count"}
+
+
+def _create_shunt_bay(network, fields):
+    """Mirror of iidm_viewer.state._dispatch_shunt_bay (LINEAR model only)."""
+    linear_row = {k: fields[k] for k in _SHUNT_LINEAR_FIELDS if k in fields}
+    linear_row["id"] = fields["id"]
+    shunt_row = {k: v for k, v in fields.items() if k not in _SHUNT_LINEAR_FIELDS}
+    shunt_row["model_type"] = "LINEAR"
+    pn.create_shunt_compensator_bay(
+        network,
+        pd.DataFrame([shunt_row]).set_index("id"),
+        linear_model_df=pd.DataFrame([linear_row]).set_index("id"),
+    )'''
+
+
+_CONTAINER_HELPER = '''\
+def _create_container(network, create_function, fields):
+    """Create a substation / voltage level / busbar section."""
+    getattr(network, create_function)(pd.DataFrame([dict(fields)]).set_index("id"))'''
+
+
+_TAP_CHANGER_HELPER = '''\
+def _create_tap_changer(network, method, transformer_id, main_fields, step_columns, step_defaults, steps):
+    """Mirror of iidm_viewer.state.create_tap_changer.
+
+    Drops zero-sentinel target_v / target_deadband so pypowsybl sees
+    them as unset, then issues the create call with two DataFrames.
+    """
+    main_row = {
+        k: v for k, v in main_fields.items()
+        if v is not None and v != "" and not (k in ("target_v", "target_deadband") and v == 0.0)
+    }
+    main_row["id"] = transformer_id
+    main_df = pd.DataFrame([main_row]).set_index("id")
+    step_rows = []
+    for step in steps:
+        row = {"id": transformer_id}
+        for col in step_columns:
+            row[col] = step.get(col, step_defaults[col])
+        step_rows.append(row)
+    steps_df = pd.DataFrame(step_rows).set_index("id")
+    getattr(network, method)(main_df, steps_df)'''
+
+
+_REACTIVE_LIMITS_HELPER = '''\
+def _create_reactive_limits(network, element_id, mode, payload):
+    """Mirror of iidm_viewer.state.create_reactive_limits."""
+    if mode == "minmax":
+        row = payload[0]
+        df = pd.DataFrame(
+            [{"id": element_id, "min_q": row["min_q"], "max_q": row["max_q"]}]
+        ).set_index("id")
+        network.create_minmax_reactive_limits(df)
+        return
+    rows = [
+        {"id": element_id, "p": r["p"], "min_q": r["min_q"], "max_q": r["max_q"]}
+        for r in payload
+    ]
+    network.create_curve_reactive_limits(pd.DataFrame(rows).set_index("id"))'''
+
+
+_OPERATIONAL_LIMITS_HELPER = '''\
+def _create_operational_limits(network, element_id, side, limit_type, limits, group_name="DEFAULT"):
+    """Mirror of iidm_viewer.state.create_operational_limits.
+
+    Defaults the row ``name`` the same way the HMI does when the user
+    left it blank: ``permanent`` for the permanent limit (-1), or
+    ``TATL_<duration>`` for a temporary limit.
+    """
+    rows = []
+    for lim in limits:
+        duration = int(lim["acceptable_duration"])
+        name = lim.get("name") or ("permanent" if duration == -1 else f"TATL_{duration}")
+        rows.append({
+            "element_id": element_id,
+            "side": side,
+            "name": name,
+            "type": limit_type,
+            "value": float(lim["value"]),
+            "acceptable_duration": duration,
+            "fictitious": bool(lim.get("fictitious", False)),
+            "group_name": group_name,
+        })
+    network.create_operational_limits(pd.DataFrame(rows).set_index("element_id"))'''
+
+
+_EXTENSION_HELPER = '''\
+def _create_extension(network, extension_name, target_id, row, index_col):
+    """Attach a single extension row to an existing element."""
+    df = pd.DataFrame(
+        {k: [v] for k, v in row.items()},
+        index=pd.Index([target_id], name=index_col),
+    )
+    network.create_extensions(extension_name, df)'''
+
+
+_SVC_HELPER = '''\
+def _create_secondary_voltage_control(network, zones, units):
+    """Replace the secondaryVoltageControl extension with zones + units."""
+    zones_df = pd.DataFrame(
+        {
+            "target_v": [float(z["target_v"]) for z in zones],
+            "bus_ids": [(z.get("bus_ids") or "").strip() for z in zones],
+        },
+        index=pd.Index([z["name"].strip() for z in zones], name="name"),
+    )
+    units_df = pd.DataFrame(
+        {
+            "zone_name": [u["zone_name"].strip() for u in units],
+            "participate": [bool(u.get("participate", True)) for u in units],
+        },
+        index=pd.Index([u["unit_id"].strip() for u in units], name="unit_id"),
+    )
+    network.create_extensions("secondaryVoltageControl", [zones_df, units_df])'''
+
+
+_HELPERS_REGISTRY: dict[str, str] = {
+    "remove": _REMOVE_HELPER,
+    "bay_df": _BAY_DF_HELPER,
+    "shunt_bay": _SHUNT_BAY_HELPER,
+    "container": _CONTAINER_HELPER,
+    "tap_changer": _TAP_CHANGER_HELPER,
+    "reactive_limits": _REACTIVE_LIMITS_HELPER,
+    "operational_limits": _OPERATIONAL_LIMITS_HELPER,
+    "extension": _EXTENSION_HELPER,
+    "secondary_voltage_control": _SVC_HELPER,
+}
+
+
+# Helpers that need ``import pandas as pd``. ``_remove`` is the only one
+# that does not.
+_HELPERS_NEED_PANDAS = frozenset(_HELPERS_REGISTRY) - {"remove"}
+
+
+_KIND_HELPER_DEPS: dict[str, set[str]] = {
+    "remove_components": {"remove"},
+    "create_component_bay": {"bay_df", "shunt_bay"},
+    "create_branch_bay": {"bay_df"},
+    "create_container": {"container"},
+    "create_tap_changer": {"tap_changer"},
+    "create_hvdc_line": {"bay_df"},
+    "create_reactive_limits": {"reactive_limits"},
+    "create_operational_limits": {"operational_limits"},
+    "create_extension": {"extension"},
+    "create_secondary_voltage_control": {"secondary_voltage_control"},
+}
+
+
+def _collect_helpers(ops: list[dict[str, Any]]) -> set[str]:
+    needed: set[str] = set()
+    for op in ops:
+        needed |= _KIND_HELPER_DEPS.get(op["kind"], set())
+    # ``shunt_bay`` is only needed if a Shunt Compensators creation appears.
+    if "shunt_bay" in needed and not any(
+        op["kind"] == "create_component_bay" and op["component"] == "Shunt Compensators"
+        for op in ops
+    ):
+        needed.discard("shunt_bay")
+    # ``bay_df`` is only needed if a non-Shunt component-bay or any
+    # branch-bay or HVDC-line op exists.
+    if "bay_df" in needed and not any(
+        (op["kind"] == "create_component_bay" and op["component"] != "Shunt Compensators")
+        or op["kind"] in ("create_branch_bay", "create_hvdc_line")
+        for op in ops
+    ):
+        needed.discard("bay_df")
+    return needed
+
+
+def _emit_helpers(needed: set[str]) -> list[str]:
+    if not needed:
+        return []
+    out: list[str] = []
+    # Emit in registry order for stable output.
+    for name, src in _HELPERS_REGISTRY.items():
+        if name in needed:
+            if out:
+                out.append("")
+            out.extend(src.splitlines())
+    return out
 
 
 # ----------------------------------------------------------------------- body
@@ -203,6 +406,9 @@ def _emit_body(ops: list[dict[str, Any]]) -> list[str]:
             i += 1
         elif kind == "run_loadflow":
             body.extend(_emit_run_loadflow(op))
+            i += 1
+        elif kind in _CREATE_EMITTERS:
+            body.extend(_CREATE_EMITTERS[kind](op))
             i += 1
         else:
             # Unknown / non-body kinds (load_network, create_empty) are
@@ -299,6 +505,121 @@ def _emit_run_loadflow(op: dict[str, Any]) -> list[str]:
     lines.append("    _lf_results = lf.run_ac(network, parameters=_lf_params)")
     lines.append('    print(f"Load flow: {_lf_results[0].status.name}")')
     return lines
+
+
+# ------------------------------------------------------------------ creates
+
+
+def _emit_create_component_bay(op: dict[str, Any]) -> list[str]:
+    component = op["component"]
+    fields = op["fields"]
+    if component == "Shunt Compensators":
+        return [
+            "    # Create Shunt Compensators",
+            f"    _create_shunt_bay(network, {fields!r})",
+        ]
+    return [
+        f"    # Create {component}",
+        f"    pn.{op['bay_function']}(network, _bay_df({fields!r}))",
+    ]
+
+
+def _emit_create_branch_bay(op: dict[str, Any]) -> list[str]:
+    return [
+        f"    # Create {op['component']}",
+        f"    pn.{op['bay_function']}(network, _bay_df({op['fields']!r}))",
+    ]
+
+
+def _emit_create_container(op: dict[str, Any]) -> list[str]:
+    return [
+        f"    # Create {op['component']}",
+        f"    _create_container(network, {op['create_function']!r}, {op['fields']!r})",
+    ]
+
+
+def _emit_create_tap_changer(op: dict[str, Any]) -> list[str]:
+    return [
+        f"    # Create {op['tap_changer_kind']} tap changer on {op['transformer_id']}",
+        "    _create_tap_changer(",
+        f"        network, {op['create_method']!r}, {op['transformer_id']!r},",
+        f"        {op['main_fields']!r},",
+        f"        {op['step_columns']!r}, {op['step_defaults']!r},",
+        f"        {op['steps']!r},",
+        "    )",
+    ]
+
+
+def _emit_create_coupling_device(op: dict[str, Any]) -> list[str]:
+    bbs1, bbs2 = op["bbs1"], op["bbs2"]
+    sw = op.get("switch_prefix")
+    args = [
+        f"bus_or_busbar_section_id_1={bbs1!r}",
+        f"bus_or_busbar_section_id_2={bbs2!r}",
+    ]
+    if sw:
+        args.append(f"switch_prefix_id={sw!r}")
+    return [
+        f"    # Create coupling device between {bbs1} and {bbs2}",
+        f"    pn.create_coupling_device(network, {', '.join(args)})",
+    ]
+
+
+def _emit_create_hvdc_line(op: dict[str, Any]) -> list[str]:
+    return [
+        f"    # Create HVDC line {op['fields'].get('id', '')}",
+        f"    network.create_hvdc_lines(_bay_df({op['fields']!r}))",
+    ]
+
+
+def _emit_create_reactive_limits(op: dict[str, Any]) -> list[str]:
+    return [
+        f"    # Create {op['mode']} reactive limits on {op['element_id']}",
+        f"    _create_reactive_limits(network, {op['element_id']!r}, {op['mode']!r}, {op['payload']!r})",
+    ]
+
+
+def _emit_create_operational_limits(op: dict[str, Any]) -> list[str]:
+    return [
+        f"    # Create {op['limit_type']} operational limits on {op['element_id']} (side {op['side']})",
+        "    _create_operational_limits(",
+        f"        network, {op['element_id']!r}, {op['side']!r}, {op['limit_type']!r},",
+        f"        {op['limits']!r}, group_name={op['group_name']!r},",
+        "    )",
+    ]
+
+
+def _emit_create_extension(op: dict[str, Any]) -> list[str]:
+    return [
+        f"    # Create {op['extension_name']} extension on {op['target_id']}",
+        "    _create_extension(",
+        f"        network, {op['extension_name']!r}, {op['target_id']!r},",
+        f"        {op['row']!r}, {op['index_col']!r},",
+        "    )",
+    ]
+
+
+def _emit_create_secondary_voltage_control(op: dict[str, Any]) -> list[str]:
+    return [
+        "    # Create secondary voltage control",
+        "    _create_secondary_voltage_control(",
+        f"        network, {op['zones']!r}, {op['units']!r},",
+        "    )",
+    ]
+
+
+_CREATE_EMITTERS: dict[str, Any] = {
+    "create_component_bay": _emit_create_component_bay,
+    "create_branch_bay": _emit_create_branch_bay,
+    "create_container": _emit_create_container,
+    "create_tap_changer": _emit_create_tap_changer,
+    "create_coupling_device": _emit_create_coupling_device,
+    "create_hvdc_line": _emit_create_hvdc_line,
+    "create_reactive_limits": _emit_create_reactive_limits,
+    "create_operational_limits": _emit_create_operational_limits,
+    "create_extension": _emit_create_extension,
+    "create_secondary_voltage_control": _emit_create_secondary_voltage_control,
+}
 
 
 # ----------------------------------------------------------------------- main

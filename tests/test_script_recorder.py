@@ -264,3 +264,135 @@ def test_revert_with_no_matching_prior_op_still_appends_revert_marker():
     )
     reverts = [op for op in script_recorder.get_log() if op["kind"] == "revert_update_components"]
     assert len(reverts) == 1
+
+
+# ----------------------------------------------------------- Phase 3 creates
+
+
+def test_record_create_component_bay_drops_blanks():
+    """Empty strings and None must be filtered out before storage."""
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_create_component_bay(
+        "Generators",
+        "create_generator_bay",
+        {"id": "G1", "min_p": 0.0, "max_p": 100.0,
+         "name": "", "target_q": None, "energy_source": "OTHER"},
+    )
+    op = script_recorder.get_log()[-1]
+    assert op["kind"] == "create_component_bay"
+    assert op["component"] == "Generators"
+    assert op["bay_function"] == "create_generator_bay"
+    assert "name" not in op["fields"]  # blank dropped
+    assert "target_q" not in op["fields"]  # None dropped
+    assert op["fields"]["id"] == "G1"
+
+
+def test_record_create_branch_bay_appends_one_op():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_create_branch_bay(
+        "Lines",
+        "create_line_bays",
+        {"id": "L1", "r": 0.1, "x": 1.0},
+    )
+    op = script_recorder.get_log()[-1]
+    assert op["kind"] == "create_branch_bay"
+    assert op["bay_function"] == "create_line_bays"
+
+
+def test_record_create_container_appends_one_op():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_create_container(
+        "Substations", "create_substations", {"id": "S1", "country": "FR"}
+    )
+    op = script_recorder.get_log()[-1]
+    assert op["kind"] == "create_container"
+    assert op["create_function"] == "create_substations"
+
+
+def test_record_create_tap_changer_captures_steps_and_defaults():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_create_tap_changer(
+        "Ratio", "create_ratio_tap_changers", "T1",
+        main_fields={"tap": 1, "low_tap": 0, "regulating": False, "oltc": False},
+        step_columns=["r", "x", "g", "b", "rho"],
+        step_defaults={"r": 0.0, "x": 0.0, "g": 0.0, "b": 0.0, "rho": 1.0},
+        steps=[{"rho": 0.9}, {"rho": 1.0}, {"rho": 1.1}],
+    )
+    op = script_recorder.get_log()[-1]
+    assert op["kind"] == "create_tap_changer"
+    assert op["tap_changer_kind"] == "Ratio"
+    assert op["transformer_id"] == "T1"
+    assert len(op["steps"]) == 3
+    assert op["step_defaults"]["rho"] == 1.0
+
+
+def test_record_create_coupling_device_handles_empty_prefix():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_create_coupling_device("B1", "B2", "")
+    op = script_recorder.get_log()[-1]
+    assert op["kind"] == "create_coupling_device"
+    assert op["switch_prefix"] is None  # empty -> None
+
+
+def test_record_create_hvdc_line_appends_one_op():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_create_hvdc_line(
+        {"id": "H1", "r": 1.0, "nominal_v": 400.0, "max_p": 1000.0,
+         "target_p": 0.0, "converters_mode": "SIDE_1_RECTIFIER_SIDE_2_INVERTER",
+         "converter_station1_id": "CS1", "converter_station2_id": "CS2"}
+    )
+    op = script_recorder.get_log()[-1]
+    assert op["kind"] == "create_hvdc_line"
+    assert op["fields"]["id"] == "H1"
+
+
+def test_record_create_reactive_limits_minmax_and_curve():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_create_reactive_limits(
+        "G1", "minmax", [{"min_q": -100.0, "max_q": 100.0}]
+    )
+    script_recorder.record_create_reactive_limits(
+        "G2", "curve",
+        [{"p": 0.0, "min_q": -50.0, "max_q": 50.0},
+         {"p": 100.0, "min_q": -40.0, "max_q": 40.0}],
+    )
+    log = script_recorder.get_log()
+    assert log[-2]["mode"] == "minmax"
+    assert log[-1]["mode"] == "curve"
+    assert len(log[-1]["payload"]) == 2
+
+
+def test_record_create_operational_limits_keeps_group_name():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_create_operational_limits(
+        "L1", "ONE", "CURRENT",
+        [{"name": "permanent", "value": 1000.0, "acceptable_duration": -1}],
+        group_name="DEFAULT",
+    )
+    op = script_recorder.get_log()[-1]
+    assert op["kind"] == "create_operational_limits"
+    assert op["group_name"] == "DEFAULT"
+    assert op["element_id"] == "L1"
+
+
+def test_record_create_extension_keeps_index_col():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_create_extension(
+        "slackTerminal", "VL1", {"bus_id": "B1"}, "voltage_level_id"
+    )
+    op = script_recorder.get_log()[-1]
+    assert op["kind"] == "create_extension"
+    assert op["index_col"] == "voltage_level_id"
+    assert op["target_id"] == "VL1"
+
+
+def test_record_create_secondary_voltage_control_captures_both_lists():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.record_create_secondary_voltage_control(
+        [{"name": "Z1", "target_v": 400.0, "bus_ids": "B1 B2"}],
+        [{"unit_id": "G1", "zone_name": "Z1", "participate": True}],
+    )
+    op = script_recorder.get_log()[-1]
+    assert op["kind"] == "create_secondary_voltage_control"
+    assert len(op["zones"]) == 1
+    assert len(op["units"]) == 1

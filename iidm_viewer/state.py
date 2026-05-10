@@ -869,15 +869,17 @@ def create_component_bay(network, component: str, fields: dict):
     if errors:
         raise ValueError("; ".join(errors))
 
+    bay_fn = (
+        "create_shunt_compensator_bay"
+        if component == "Shunt Compensators"
+        else CREATABLE_COMPONENTS[component]["bay_function"]
+    )
+
     if component == "Shunt Compensators":
         _dispatch_shunt_bay(network, fields)
-        return
-
-    _dispatch_bay_create(
-        network,
-        CREATABLE_COMPONENTS[component]["bay_function"],
-        fields,
-    )
+    else:
+        _dispatch_bay_create(network, bay_fn, fields)
+    script_recorder.record_create_component_bay(component, bay_fn, fields)
 
 
 # --- Branches (two-end connectables: lines + 2-winding transformers) ---
@@ -1000,11 +1002,9 @@ def create_branch_bay(network, component: str, fields: dict):
     if errors:
         raise ValueError("; ".join(errors))
 
-    _dispatch_bay_create(
-        network,
-        CREATABLE_BRANCHES[component]["bay_function"],
-        fields,
-    )
+    bay_fn = CREATABLE_BRANCHES[component]["bay_function"]
+    _dispatch_bay_create(network, bay_fn, fields)
+    script_recorder.record_create_branch_bay(component, bay_fn, fields)
 
 
 # --- Containers (substations, voltage levels, busbar sections) ---
@@ -1154,6 +1154,9 @@ def create_container(network, component: str, fields: dict):
 
     run(_do_create)
     invalidate_on_topology_change(affects_geography=True)
+    script_recorder.record_create_container(
+        component, spec["create_function"], clean
+    )
 
 
 def get_voltage_levels_df(network):
@@ -1326,6 +1329,15 @@ def create_tap_changer(
 
     run(_do_create)
     invalidate_on_topology_change(affects_geography=True)
+    script_recorder.record_create_tap_changer(
+        kind,
+        method_name,
+        transformer_id,
+        main_fields,
+        spec["step_columns"],
+        spec["step_defaults"],
+        steps,
+    )
 
 
 # --- Coupling device (switches tying two busbar sections together) ---
@@ -1371,6 +1383,7 @@ def create_coupling_device(
 
     run(_do_create)
     invalidate_on_topology_change(affects_geography=True)
+    script_recorder.record_create_coupling_device(bbs1, bbs2, switch_prefix)
 
 
 # --- HVDC lines (attach to two existing converter stations) ---
@@ -1464,6 +1477,7 @@ def create_hvdc_line(network, fields: dict):
 
     run(_do_create)
     invalidate_on_topology_change(affects_geography=True)
+    script_recorder.record_create_hvdc_line(fields)
 
 
 # --- Reactive limits (min/max or per-P curve) on generators / VSC / batteries ---
@@ -1540,6 +1554,7 @@ def create_reactive_limits(
 
     run(_do_create)
     invalidate_on_topology_change()
+    script_recorder.record_create_reactive_limits(element_id, mode, payload)
 
 
 # --- Operational limits (CURRENT / APPARENT_POWER / ACTIVE_POWER) ---
@@ -1635,6 +1650,9 @@ def create_operational_limits(
 
     run(_do_create)
     invalidate_on_topology_change()
+    script_recorder.record_create_operational_limits(
+        element_id, side, limit_type, limits, group_name=group_name
+    )
 
 
 # --- Extensions (first-phase: attach extension rows to existing elements) ---
@@ -1945,6 +1963,7 @@ def create_extension(
 
     run(_do_create)
     invalidate_on_topology_change()
+    script_recorder.record_create_extension(extension_name, target_id, row, index_col)
 
 
 # --- Secondary voltage control (network-level, two dataframes) ---
@@ -2062,6 +2081,7 @@ def create_secondary_voltage_control(
 
     run(_do_create)
     invalidate_on_topology_change()
+    script_recorder.record_create_secondary_voltage_control(zones, units)
 
 
 # --- Security Analysis ---
