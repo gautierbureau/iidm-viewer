@@ -624,6 +624,53 @@ def test_run_security_analysis_with_actions_and_strategies():
     assert "'OS1'" in script
 
 
+# -------------------------------------------------------- Phase 6: SC
+
+
+def test_run_short_circuit_analysis_emits_helper_and_call():
+    ops = _with_load(
+        {
+            "kind": "run_short_circuit_analysis",
+            "faults": [
+                {"id": "SC_B1", "element_id": "B1", "fault_type": "THREE_PHASE"},
+                {"id": "SC_B2", "element_id": "B2", "fault_type": "THREE_PHASE"},
+            ],
+            "sc_params": {"study_type": "SUB_TRANSIENT", "with_feeder_result": True,
+                          "with_limit_violations": True,
+                          "min_voltage_drop_proportional_threshold": 0.0},
+        }
+    )
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "def _run_short_circuit_analysis(" in script
+    assert "import pypowsybl.shortcircuit as sc" in script
+    assert "_run_short_circuit_analysis(" in script
+    assert "'SC_B1'" in script and "'SC_B2'" in script
+    assert "'study_type': 'SUB_TRANSIENT'" in script
+
+
+def test_run_short_circuit_analysis_minimal_call_when_empty():
+    ops = _with_load(
+        {"kind": "run_short_circuit_analysis", "faults": [], "sc_params": {}}
+    )
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "_run_short_circuit_analysis(network)" in script
+
+
+def test_short_circuit_helper_does_not_pull_in_pandas():
+    """SC has no DataFrame inputs, so a pure-SC session should not
+    import pandas."""
+    ops = _with_load(
+        {"kind": "run_short_circuit_analysis",
+         "faults": [{"id": "SC_B1", "element_id": "B1", "fault_type": "THREE_PHASE"}],
+         "sc_params": {}}
+    )
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "import pandas as pd" not in script
+
+
 def test_helpers_only_emitted_when_needed():
     """A log with no creations or removals must not pull in any helper."""
     ops = _with_load(
@@ -638,8 +685,10 @@ def test_helpers_only_emitted_when_needed():
         "_create_operational_limits", "_create_extension",
         "_create_secondary_voltage_control",
         "_run_security_analysis", "_apply_action",
+        "_run_short_circuit_analysis",
     ):
         assert f"def {helper}" not in script, f"unexpected helper {helper}"
     assert "import pypowsybl.security" not in script
+    assert "import pypowsybl.shortcircuit" not in script
 
 

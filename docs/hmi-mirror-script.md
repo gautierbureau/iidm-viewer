@@ -47,6 +47,7 @@ Op kinds (all phases):
 | `create_extension` | `state.create_extension` | `_create_extension(network, name, target, row, index_col)` |
 | `create_secondary_voltage_control` | `state.create_secondary_voltage_control` | `_create_secondary_voltage_control(network, zones, units)` |
 | `run_security_analysis` | `state.run_security_analysis` | `_run_security_analysis(network, …)` |
+| `run_short_circuit_analysis` | `state.run_short_circuit_analysis` | `_run_short_circuit_analysis(network, faults=…, sc_params=…)` |
 
 ## Revert semantics
 
@@ -118,10 +119,13 @@ The first `load_network` / `create_empty` op drives `main()`:
 - **Shunt compensators**: the helper only handles the LINEAR model,
   matching `state._dispatch_shunt_bay`.  Non-linear shunts are not
   yet exposed by the HMI.
-- **Out-of-scope tabs**: Network Map, NAD, SLD, Voltage Analysis,
-  Injection Map, Pmax, Reactive Curves, Operational Limits chart, and
-  Short Circuit Analysis are read-only views — they do not mutate the
-  network and are intentionally not recorded.
+- **Out-of-scope tabs**: Network Map, NAD, SLD (except the breaker
+  switch toggle, which goes through `update_components`), Voltage
+  Analysis, Injection Map, Pmax, Reactive Curves, and the read-only
+  Operational Limits chart are pure views — they do not mutate the
+  network and are intentionally not recorded.  The analytical-run
+  tabs (Security Analysis, Short Circuit Analysis) and every
+  network-mutating tab are fully recorded.
 
 ## Testing
 

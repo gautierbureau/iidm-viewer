@@ -511,3 +511,28 @@ def record_run_security_analysis(
             "lf_provider": dict(lf_provider or {}),
         }
     )
+
+
+# ------------------------------------------------------- short circuit analysis
+
+
+def record_run_short_circuit_analysis(
+    faults: list[dict[str, Any]] | None,
+    sc_params: dict[str, Any] | None,
+) -> None:
+    """Record a short circuit analysis run.
+
+    ``faults`` is the list passed to :func:`state.run_short_circuit_analysis`
+    (one dict per fault: ``id``, ``element_id``, ``fault_type``).
+    ``sc_params`` is the parameter dict (``study_type``,
+    ``with_feeder_result``, ``with_limit_violations``,
+    ``min_voltage_drop_proportional_threshold``). Both are deep-copied
+    so subsequent session-state edits cannot mutate the recorded op.
+    """
+    _append(
+        {
+            "kind": "run_short_circuit_analysis",
+            "faults": [dict(f) for f in (faults or [])],
+            "sc_params": dict(sc_params or {}),
+        }
+    )
