@@ -16,6 +16,20 @@ cd iidm-viewer
 pip install -e .
 ```
 
+### One-line install (Linux)
+
+For Ubuntu / other Linux desktops, the installer below sets up an
+isolated virtualenv in `~/.iidm_viewer/`, adds an `iidm-viewer` shell
+alias, and registers a desktop entry with an icon:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gautierbureau/iidm-viewer/main/install.sh | bash
+```
+
+Requires `python3 >= 3.9` and `python3-venv`. The launcher reuses an
+already-running server on `localhost:8501`, so reopening the app from
+the desktop icon won't spawn duplicate processes.
+
 ## Building the JavaScript components
 
 The Network Area Diagram, Single Line Diagram, and Network Map tabs are
