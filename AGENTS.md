@@ -150,6 +150,9 @@ pypowsybl → result wrapped and handed back.
 | `injection_map.py` | Leaflet net-injection map (P/Q per substation) — Injection Map tab | [docs/injection-map.md](docs/injection-map.md) |
 | `leaflet_scalar_map.py` | Shared Leaflet scalar-on-substation renderer (`DivergingColorScale`, `get_substation_positions`, `render_scalar_map`) used by `voltage_map` and `injection_map` | [docs/voltage-analysis.md § Shared scalar-on-substation renderer](docs/voltage-analysis.md#shared-scalar-on-substation-renderer---leaflet_scalar_mappy) |
 | `cli.py` | `iidm-viewer` entry-point shim | — |
+| `script_recorder.py` | Session-state op log appended by `state.py` mutators | — |
+| `script_generator.py` | Pure-Python op-log → runnable script | — |
+| `session_script.py` | "Session Script" tab: preview, toggle, download, clear | — |
 
 ### Quick-start by task
 

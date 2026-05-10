@@ -32,12 +32,13 @@ from iidm_viewer.voltage_analysis import render_voltage_analysis
 from iidm_viewer.injection_map import render_injection_map
 from iidm_viewer.security_analysis import render_security_analysis
 from iidm_viewer.short_circuit_analysis import render_short_circuit_analysis
+from iidm_viewer.session_script import render_session_script_tab
 
 
 st.set_page_config(page_title="IIDM Viewer", layout="wide", page_icon="⚡")
 init_state()
 
-# With 13 top-level tabs the tab bar overflows any normal viewport. Streamlit's
+# With 14 top-level tabs the tab bar overflows any normal viewport. Streamlit's
 # BaseWeb tab list hides overflow by default, leaving off-screen tabs
 # unreachable. Inject small arrow buttons (< >) on the sides of the tab bar
 # that scroll the list when clicked — no scrollbar, just arrows.
@@ -343,6 +344,7 @@ if network is None:
     tab_injection,
     tab_sa,
     tab_sc,
+    tab_session_script,
 ) = st.tabs(
     [
         "Overview",
@@ -358,6 +360,7 @@ if network is None:
         "Injection Map",
         "Security Analysis",
         "Short Circuit Analysis",
+        "Session Script",
     ]
 )
 
@@ -446,3 +449,6 @@ with tab_sa:
 
 with tab_sc:
     render_short_circuit_analysis(network)
+
+with tab_session_script:
+    render_session_script_tab()
