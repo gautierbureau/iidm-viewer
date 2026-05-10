@@ -2596,3 +2596,57 @@ def run_short_circuit_analysis(network, faults: list[dict], sc_params: dict | No
         }
 
     return run(_run_sc)
+
+
+def compute_target_v_q_sensitivity(network, gen_id):
+    """Return ``(dQ_bus/dV_target [MVar/kV], q_ref [MVar])`` for ``gen_id``.
+
+    Runs an AC sensitivity analysis on the powsybl worker thread with one
+    factor: variable ``BUS_TARGET_VOLTAGE`` keyed by ``gen_id`` (the
+    regulating generator), function ``BUS_REACTIVE_POWER`` at the same
+    gen's terminal bus. The slope tracks ``dQ_gen/dV`` for buses where the
+    generator is the dominant Q source; on shared buses, interpret as the
+    bus-level Q-V coupling.
+
+    Cached in ``st.session_state["_dq_dv_cache"]`` keyed by
+    ``(net_key, lf_gen, gen_id)``; ``invalidate_on_load_flow`` pops the
+    whole cache so the linearization tracks the current operating point.
+
+    Returns ``None`` when the analysis fails (e.g., gen not regulating,
+    LF non-convergence). Only native Python floats cross the worker
+    boundary, so no pypowsybl handle escapes the worker thread.
+    """
+    cache = st.session_state.setdefault("_dq_dv_cache", {})
+    raw = object.__getattribute__(network, "_obj")
+    key = (id(raw), st.session_state.get("_lf_gen", 0), gen_id)
+    if key in cache:
+        return cache[key]
+
+    def _run_sensitivity():
+        try:
+            import pypowsybl.sensitivity as sens
+            from pypowsybl.sensitivity import (
+                ContingencyContextType,
+                SensitivityFunctionType,
+                SensitivityVariableType,
+            )
+            analysis = sens.create_ac_analysis()
+            analysis.add_factor_matrix(
+                [gen_id], [gen_id], [],
+                ContingencyContextType.NONE,
+                SensitivityFunctionType.BUS_REACTIVE_POWER,
+                SensitivityVariableType.BUS_TARGET_VOLTAGE,
+            )
+            result = analysis.run(raw)
+            sens_matrix = result.get_sensitivity_matrix()
+            ref_matrix = result.get_reference_matrix()
+            return (
+                float(sens_matrix.loc[gen_id, gen_id]),
+                float(ref_matrix.loc["reference_values", gen_id]),
+            )
+        except Exception:
+            return None
+
+    val = run(_run_sensitivity)
+    cache[key] = val
+    return val

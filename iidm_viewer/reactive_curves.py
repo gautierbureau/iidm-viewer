@@ -2,18 +2,14 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-from iidm_viewer.caches import (
-    _net_key,
-    get_generators_all,
-    get_reactive_curve_points,
-)
+from iidm_viewer.caches import get_generators_all, get_reactive_curve_points
 from iidm_viewer.filters import (
     FILTERS,
     build_vl_lookup,
     enrich_with_joins,
     render_filters,
 )
-from iidm_viewer.powsybl_worker import run as worker_run
+from iidm_viewer.state import compute_target_v_q_sensitivity
 
 
 _TARGET_TOLERANCE = 0.1
@@ -24,56 +20,6 @@ _STATUS_DIAMOND_COLOR = {
     "outside": "red",
     "n/a": "gray",
 }
-
-
-def compute_target_v_q_sensitivity(network, gen_id):
-    """Return ``(dq_dv_MVar_per_kV, q_ref_MVar)`` from an AC sensitivity run.
-
-    Variable: ``BUS_TARGET_VOLTAGE`` keyed by ``gen_id`` (the regulating
-    generator). Function: ``BUS_REACTIVE_POWER`` at the same gen's terminal
-    bus. The slope is ``dQ_bus / dV_target`` in MVar per kV. For a bus whose
-    only reactive source is this generator the slope tracks ``dQ_gen / dV``
-    in load convention; on shared buses interpret it as the bus-level
-    Q-V coupling.
-
-    Cached per ``(net_key, lf_gen, gen_id)``. Returns ``None`` when the
-    analysis fails (gen not regulating, LF non-convergence, etc.).
-    """
-    cache = st.session_state.setdefault("_dq_dv_cache", {})
-    key = (_net_key(network), st.session_state.get("_lf_gen", 0), gen_id)
-    if key in cache:
-        return cache[key]
-
-    raw = object.__getattribute__(network, "_obj")
-
-    def _do():
-        try:
-            import pypowsybl.sensitivity as sens
-            from pypowsybl.sensitivity import (
-                ContingencyContextType,
-                SensitivityFunctionType,
-                SensitivityVariableType,
-            )
-            analysis = sens.create_ac_analysis()
-            analysis.add_factor_matrix(
-                [gen_id], [gen_id], [],
-                ContingencyContextType.NONE,
-                SensitivityFunctionType.BUS_REACTIVE_POWER,
-                SensitivityVariableType.BUS_TARGET_VOLTAGE,
-            )
-            result = analysis.run(raw)
-            sens_matrix = result.get_sensitivity_matrix()
-            ref_matrix = result.get_reference_matrix()
-            return (
-                float(sens_matrix.loc[gen_id, gen_id]),
-                float(ref_matrix.loc["reference_values", gen_id]),
-            )
-        except Exception:
-            return None
-
-    val = worker_run(_do)
-    cache[key] = val
-    return val
 
 
 def _render_target_v_sensitivity(gen_row, classified_row, gen_id, network):
