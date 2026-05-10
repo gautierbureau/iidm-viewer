@@ -53,17 +53,12 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build
 
-      - name: Upload to GitHub Release
-        uses: actions/upload-artifact@v4
-        with:
-          path: dist/*
-
-      - name: Attach install.sh to the GitHub Release
+      - name: Attach wheel, sdist and install.sh to the GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${{ github.event.release.tag_name }}" \
-            install.sh --clobber --repo "${{ github.repository }}"
+            dist/* install.sh --clobber --repo "${{ github.repository }}"
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
