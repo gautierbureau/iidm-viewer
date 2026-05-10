@@ -186,6 +186,21 @@ def _show_load_options_dialog():
             st.success("Saved — options will be applied on the next upload.")
 
 
+@st.dialog("Stop iidm-viewer?")
+def _show_stop_server_dialog():
+    st.write(
+        "This will stop the server process. The current browser tab will "
+        "disconnect; relaunch via the `iidm-viewer` shell alias or the "
+        "applications-menu shortcut."
+    )
+    if st.button("Stop server", type="primary", key="stop_server_confirm_btn"):
+        import os
+        import signal
+        # SIGTERM kills the streamlit process; if the launcher started us
+        # via setsid, the wrapper exits cleanly when its child dies.
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
 @st.dialog("Save network")
 def _show_save_network_dialog():
     network = get_network()
@@ -300,6 +315,10 @@ with st.sidebar:
         if st.session_state.get("_lf_report_json"):
             if st.button("View Logs", key="lf_logs_btn", help="Load Flow Logs"):
                 show_lf_report_dialog()
+
+    st.divider()
+    if st.button("Quit", key="stop_server_btn", help="Stop the iidm-viewer server", use_container_width=True):
+        _show_stop_server_dialog()
 
 # -- Main area --
 if network is None:
