@@ -528,6 +528,102 @@ def test_create_secondary_voltage_control_emits_helper():
     assert "'G1'" in script
 
 
+# -------------------------------------------------------- Phase 4: security
+
+
+def test_run_security_analysis_emits_helper_and_call():
+    ops = _with_load(
+        {
+            "kind": "run_security_analysis",
+            "contingencies": [{"id": "N1_L1", "element_id": "L1"}],
+            "monitored_elements": [],
+            "limit_reductions": [],
+            "actions": [],
+            "operator_strategies": [],
+            "contingencies_json_paths": [],
+            "actions_json_paths": [],
+            "operator_strategies_json_paths": [],
+            "lf_generic": {"distributed_slack": True},
+            "lf_provider": {},
+        }
+    )
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    # Helper is in scope.
+    assert "def _run_security_analysis(" in script
+    assert "def _apply_action(analysis, action):" in script
+    assert "import pypowsybl.security as sa" in script
+    # Body call uses kwargs and skips the empty ones.
+    assert "_run_security_analysis(" in script
+    assert "contingencies=[{'id': 'N1_L1', 'element_id': 'L1'}]" in script
+    assert "lf_generic={'distributed_slack': True}" in script
+    assert "monitored_elements=" not in script.split("def process")[1]
+    assert "actions=" not in script.split("def process")[1]
+
+
+def test_run_security_analysis_minimal_call_when_all_kwargs_empty():
+    """A user who clicks Run with no contingencies and default LF params
+    should still produce a one-liner that exercises the SA helper."""
+    ops = _with_load(
+        {
+            "kind": "run_security_analysis",
+            "contingencies": [],
+            "monitored_elements": [],
+            "limit_reductions": [],
+            "actions": [],
+            "operator_strategies": [],
+            "contingencies_json_paths": [],
+            "actions_json_paths": [],
+            "operator_strategies_json_paths": [],
+            "lf_generic": {},
+            "lf_provider": {},
+        }
+    )
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "_run_security_analysis(network)" in script
+
+
+def test_run_security_analysis_with_actions_and_strategies():
+    ops = _with_load(
+        {
+            "kind": "run_security_analysis",
+            "contingencies": [{"id": "N1_L1", "element_id": "L1"}],
+            "monitored_elements": [
+                {
+                    "contingency_context_type": "ALL",
+                    "branch_ids": ["L2", "L3"],
+                }
+            ],
+            "limit_reductions": [],
+            "actions": [
+                {"action_id": "A1", "type": "SWITCH",
+                 "switch_id": "BR1", "open": True},
+            ],
+            "operator_strategies": [
+                {
+                    "operator_strategy_id": "OS1",
+                    "contingency_id": "N1_L1",
+                    "action_ids": ["A1"],
+                    "condition_type": "TRUE_CONDITION",
+                }
+            ],
+            "contingencies_json_paths": [],
+            "actions_json_paths": [],
+            "operator_strategies_json_paths": [],
+            "lf_generic": {},
+            "lf_provider": {},
+        }
+    )
+    script = generate_script(ops, source_filename="g.xiidm", timestamp=FIXED_TS)
+    _compile(script)
+    assert "monitored_elements=" in script
+    assert "actions=" in script
+    assert "operator_strategies=" in script
+    assert "'A1'" in script
+    assert "'OS1'" in script
+
+
 def test_helpers_only_emitted_when_needed():
     """A log with no creations or removals must not pull in any helper."""
     ops = _with_load(
@@ -541,7 +637,9 @@ def test_helpers_only_emitted_when_needed():
         "_create_tap_changer", "_create_reactive_limits",
         "_create_operational_limits", "_create_extension",
         "_create_secondary_voltage_control",
+        "_run_security_analysis", "_apply_action",
     ):
         assert f"def {helper}" not in script, f"unexpected helper {helper}"
+    assert "import pypowsybl.security" not in script
 
 
