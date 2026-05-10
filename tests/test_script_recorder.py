@@ -519,3 +519,97 @@ def test_record_run_short_circuit_analysis_deep_copies_payload():
     faults[0]["id"] = "MUTATED"
     op = script_recorder.get_log()[-1]
     assert op["faults"][0]["id"] == "SC_B1"
+
+
+# --------------------------------------------------------------- pause / resume
+
+
+def test_is_paused_defaults_to_false():
+    assert script_recorder.is_paused() is False
+
+
+def test_set_paused_toggles_state():
+    script_recorder.set_paused(True)
+    assert script_recorder.is_paused() is True
+    script_recorder.set_paused(False)
+    assert script_recorder.is_paused() is False
+
+
+def test_record_helpers_are_no_ops_while_paused():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.set_paused(True)
+    # Every state-mutating record_* must be a silent no-op while paused.
+    script_recorder.record_run_loadflow({}, {})
+    script_recorder.record_update_components(
+        "Loads", "update_loads",
+        _changes({"L1": {"p0": 30.0}}),
+        _changes({"L1": {"p0": 21.7}}),
+    )
+    script_recorder.record_remove_components("Loads", ["L1"])
+    script_recorder.record_update_extension(
+        "activePowerControl",
+        _changes({"G1": {"droop": 5.0}}),
+        _changes({"G1": {"droop": 4.0}}),
+    )
+    script_recorder.record_remove_extension("activePowerControl", ["G1"])
+    script_recorder.record_create_component_bay(
+        "Generators", "create_generator_bay", {"id": "G_NEW"}
+    )
+    script_recorder.record_run_security_analysis(
+        contingencies=[{"id": "N1", "element_id": "L1"}],
+        monitored_elements=None, limit_reductions=None, actions=None,
+        operator_strategies=None,
+        contingencies_json_paths=None, actions_json_paths=None,
+        operator_strategies_json_paths=None,
+        lf_generic=None, lf_provider=None,
+    )
+    script_recorder.record_run_short_circuit_analysis(faults=None, sc_params=None)
+    # Only the original load_network op survives.
+    log = script_recorder.get_log()
+    assert len(log) == 1
+    assert log[0]["kind"] == "load_network"
+
+
+def test_resume_recording_resumes_appending():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.set_paused(True)
+    script_recorder.record_run_loadflow({}, {})  # dropped
+    script_recorder.set_paused(False)
+    script_recorder.record_run_loadflow({}, {})  # captured
+    log = script_recorder.get_log()
+    assert [op["kind"] for op in log] == ["load_network", "run_loadflow"]
+
+
+def test_load_network_auto_resumes_recording():
+    """A new network load is the start of a new session — pause flag must reset."""
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.set_paused(True)
+    assert script_recorder.is_paused() is True
+
+    script_recorder.record_load_network("b.xiidm", None, None)
+    assert script_recorder.is_paused() is False
+    log = script_recorder.get_log()
+    assert len(log) == 1  # log was reset
+
+
+def test_load_network_pops_recording_widget_key():
+    """The toggle widget's session-state key must be popped on reset
+    so the widget re-initialises to ON the next time the tab renders."""
+    script_recorder.set_paused(True)
+    st.session_state[script_recorder.RECORDING_WIDGET_KEY] = False  # widget OFF
+    script_recorder.record_load_network("b.xiidm", None, None)
+    assert script_recorder.RECORDING_WIDGET_KEY not in st.session_state
+
+
+def test_create_empty_auto_resumes_recording():
+    script_recorder.set_paused(True)
+    script_recorder.record_create_empty("blank")
+    assert script_recorder.is_paused() is False
+
+
+def test_clear_log_auto_resumes_recording():
+    script_recorder.record_load_network("a.xiidm", None, None)
+    script_recorder.set_paused(True)
+    script_recorder.clear_log()
+    assert script_recorder.is_paused() is False
+    assert script_recorder.get_log() == []

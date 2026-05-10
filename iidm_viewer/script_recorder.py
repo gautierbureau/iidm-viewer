@@ -28,6 +28,13 @@ import streamlit as st
 
 _OP_LOG_KEY = "_op_log"
 _SOURCE_FILENAME_KEY = "_op_log_source_filename"
+_PAUSED_KEY = "_op_log_paused"
+
+# Owned by ``session_script.py``: the Recording toggle widget binds to
+# this session-state key. The recorder pops it on session reset so the
+# next render of the Session Script tab re-initialises the widget from
+# its ``value=`` argument (defaulting to recording = ON).
+RECORDING_WIDGET_KEY = "_session_script_recording_toggle"
 
 
 def get_log() -> list[dict[str, Any]]:
@@ -40,11 +47,44 @@ def get_source_filename() -> str | None:
     return st.session_state.get(_SOURCE_FILENAME_KEY)
 
 
+def is_paused() -> bool:
+    """Return True when recording is currently paused.
+
+    Defaults to False (recording) — every new session starts recording,
+    and the user must explicitly pause via the Session Script tab.
+    """
+    return bool(st.session_state.get(_PAUSED_KEY, False))
+
+
+def set_paused(value: bool) -> None:
+    """Pause or resume recording.
+
+    Pausing makes every ``record_*`` call after this point a silent
+    no-op. The op log itself is preserved; resuming continues
+    appending. Loading a new network always re-enables recording.
+    """
+    st.session_state[_PAUSED_KEY] = bool(value)
+
+
+def _reset_recording_state() -> None:
+    """Clear the pause flag and the bound toggle widget.
+
+    Called on every new-session boundary (load_network, create_empty,
+    clear_log). Popping the widget key forces ``st.toggle`` to
+    re-initialise from its ``value=`` argument the next time the
+    Session Script tab renders, so the toggle visibly snaps back to
+    Recording = ON.
+    """
+    st.session_state[_PAUSED_KEY] = False
+    st.session_state.pop(RECORDING_WIDGET_KEY, None)
+
+
 def clear_log() -> None:
     """Drop every recorded op. The next ``record_load_network`` /
     ``record_create_empty`` reseeds the log."""
     st.session_state[_OP_LOG_KEY] = []
     st.session_state.pop(_SOURCE_FILENAME_KEY, None)
+    _reset_recording_state()
 
 
 def _reset_with(op: dict[str, Any], source_filename: str | None) -> None:
@@ -53,9 +93,12 @@ def _reset_with(op: dict[str, Any], source_filename: str | None) -> None:
         st.session_state.pop(_SOURCE_FILENAME_KEY, None)
     else:
         st.session_state[_SOURCE_FILENAME_KEY] = source_filename
+    _reset_recording_state()
 
 
 def _append(op: dict[str, Any]) -> None:
+    if is_paused():
+        return
     log = list(st.session_state.get(_OP_LOG_KEY, []))
     log.append(op)
     st.session_state[_OP_LOG_KEY] = log
@@ -176,6 +219,8 @@ def record_update_components(
     and a ``revert_update_components`` op is appended so the full
     transcript still shows the revert as a distinct step.
     """
+    if is_paused():
+        return
     if changes_df.empty:
         return
     log = list(st.session_state.get(_OP_LOG_KEY, []))
@@ -250,6 +295,8 @@ def record_update_extension(
 
     Same revert semantics as :func:`record_update_components`.
     """
+    if is_paused():
+        return
     if changes_df.empty:
         return
     log = list(st.session_state.get(_OP_LOG_KEY, []))
