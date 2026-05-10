@@ -10,7 +10,8 @@
 #   3. pip-installs iidm-viewer from PyPI into that venv.
 #   4. Writes ~/.iidm_viewer/launch.sh, a wrapper that reuses an
 #      already-running server instead of spawning duplicates.
-#   5. Adds an `iidm-viewer` alias to ~/.bashrc.
+#   5. Adds an `iidm-viewer` alias and an `iidm-viewer-stop` shell
+#      function to ~/.bashrc.
 #   6. Installs an Ubuntu .desktop entry + icon so the app shows up
 #      in the applications menu.
 
@@ -138,20 +139,46 @@ EOF
 chmod +x "$LAUNCHER"
 
 # -----------------------------------------------------------------------------
-# 4. Bash alias (idempotent)
+# 4. Bash alias + iidm-viewer-stop function (idempotent via begin/end markers)
 # -----------------------------------------------------------------------------
 RC_FILE="$HOME/.bashrc"
-ALIAS_LINE="alias iidm-viewer='$LAUNCHER'"
-MARKER="# iidm-viewer installer alias"
-if [[ -f "$RC_FILE" ]] && grep -Fq "$MARKER" "$RC_FILE"; then
-    log "Alias already present in $RC_FILE"
-else
-    {
-        printf '\n%s\n' "$MARKER"
-        printf '%s\n' "$ALIAS_LINE"
-    } >> "$RC_FILE"
-    log "Added 'iidm-viewer' alias to $RC_FILE"
+BEGIN_MARKER="# >>> iidm-viewer installer >>>"
+END_MARKER="# <<< iidm-viewer installer <<<"
+
+# Strip any previous block so reinstalls overwrite cleanly.
+if [[ -f "$RC_FILE" ]] && grep -Fq "$BEGIN_MARKER" "$RC_FILE"; then
+    sed -i.iidm-viewer.bak "/^${BEGIN_MARKER}\$/,/^${END_MARKER}\$/d" "$RC_FILE"
+    rm -f "${RC_FILE}.iidm-viewer.bak"
 fi
+
+cat >> "$RC_FILE" <<EOF
+
+$BEGIN_MARKER
+alias iidm-viewer='$LAUNCHER'
+iidm-viewer-stop() {
+    local pidfile="$INSTALL_DIR/server.pid"
+    if [[ ! -f "\$pidfile" ]]; then
+        echo "iidm-viewer-stop: no pidfile at \$pidfile (server not running?)" >&2
+        return 1
+    fi
+    local pid
+    pid=\$(cat "\$pidfile")
+    if ! kill -0 "\$pid" 2>/dev/null; then
+        echo "iidm-viewer-stop: pid \$pid is not running; clearing stale pidfile"
+        rm -f "\$pidfile"
+        return 0
+    fi
+    if kill -- "-\$pid" 2>/dev/null; then
+        echo "iidm-viewer-stop: stopped process group \$pid"
+        rm -f "\$pidfile"
+    else
+        echo "iidm-viewer-stop: failed to signal process group \$pid" >&2
+        return 1
+    fi
+}
+$END_MARKER
+EOF
+log "Wrote 'iidm-viewer' alias and 'iidm-viewer-stop' function to $RC_FILE"
 
 # -----------------------------------------------------------------------------
 # 5. Icon (simple SVG, no external dependency)
@@ -220,8 +247,10 @@ iidm-viewer installation complete.
   browser tab and clicking the icon again will reopen the same session
   instead of spawning a duplicate process.
 
-  To stop the running server (kills the whole process group):
-      kill -- -\$(cat $INSTALL_DIR/server.pid)
+  To stop the running server, any of these work:
+    - In the app:    click the "Quit" button at the bottom of the sidebar
+    - In a shell:    iidm-viewer-stop
+    - Manual:        kill -- -\$(cat $INSTALL_DIR/server.pid)
 
   To uninstall:
       rm -rf $INSTALL_DIR $DESKTOP_FILE
