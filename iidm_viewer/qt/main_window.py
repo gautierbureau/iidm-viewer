@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from iidm_viewer.qt.map_tab import MapTab
+from iidm_viewer.qt.nad_tab import NadTab
 from iidm_viewer.qt.sld_tab import SldTab
 from iidm_viewer.qt.state import AppState
 
@@ -71,10 +72,12 @@ class MainWindow(QMainWindow):
 
         self.state = AppState(self)
         self.map_tab = MapTab()
+        self.nad_tab = NadTab()
         self.sld_tab = SldTab()
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.map_tab, "Network Map")
+        self.tabs.addTab(self.nad_tab, "Network Area Diagram")
         self.tabs.addTab(self.sld_tab, "Single Line Diagram")
 
         self.sidebar = _Sidebar(self._on_load_clicked)
@@ -94,6 +97,7 @@ class MainWindow(QMainWindow):
         self.state.network_changed.connect(self._on_network_changed)
         self.state.selected_vl_changed.connect(self._on_selected_vl_changed)
         self.map_tab.substation_clicked.connect(self._on_map_substation_clicked)
+        self.nad_tab.node_clicked.connect(self._on_nad_node_clicked)
 
     # ------------------------------------------------------------------
     # User actions
@@ -129,26 +133,44 @@ class MainWindow(QMainWindow):
     def _on_network_changed(self, network) -> None:
         self.sidebar.set_vl(None)
         self.map_tab.set_network(network)
+        self.nad_tab.set_network(network)
         self.sld_tab.set_network(network)
         self.tabs.setCurrentWidget(self.map_tab)
 
     def _on_selected_vl_changed(self, vl_id: str) -> None:
         self.sidebar.set_vl(vl_id or None)
         if vl_id:
+            # Both diagram tabs follow the selection; they cache by VL
+            # so re-centering on tab focus is essentially free.
+            self.nad_tab.show_voltage_level(vl_id)
             self.sld_tab.show_voltage_level(vl_id)
 
     def _on_map_substation_clicked(self, vl_ids) -> None:
-        """The killer interaction — one click, two side-effects.
+        """Killer interaction #1 — Map → SLD.
 
         Picks the highest-V voltage level of the clicked substation
         (the map JS already ordered them that way), sets it as the
-        selected VL — which triggers SLD generation — and pulls the
-        SLD tab to the front. No script rerun, no websocket round-trip,
-        no rebuild of unrelated widgets.
+        selected VL — which triggers SLD + NAD generation — and pulls
+        the SLD tab to the front. No script rerun, no websocket
+        round-trip, no rebuild of unrelated widgets.
         """
         if not vl_ids:
             return
         vl_id = vl_ids[0]
+        self.tabs.setCurrentWidget(self.sld_tab)
+        self.state.set_selected_vl(vl_id)
+
+    def _on_nad_node_clicked(self, vl_id: str) -> None:
+        """Killer interaction #2 — NAD → SLD.
+
+        The user picks a node on the Network Area Diagram and lands on
+        its Single Line Diagram immediately. Same signal-driven path
+        as the map → SLD jump; the NAD itself also re-centers on the
+        new VL (handled by ``_on_selected_vl_changed``) so returning
+        to the NAD tab shows the relevant area.
+        """
+        if not vl_id:
+            return
         self.tabs.setCurrentWidget(self.sld_tab)
         self.state.set_selected_vl(vl_id)
 

@@ -1,10 +1,15 @@
 # `iidm_viewer.qt` — PySide6 desktop preview
 
 A second front-end that explores moving away from Streamlit's
-rerun-the-whole-script model. Ships two tabs only — **Network Map**
-and **Single Line Diagram** — to demonstrate the killer interaction:
-clicking a substation on the map navigates to its SLD instantly, with
-no script rerun and no websocket round-trip.
+rerun-the-whole-script model. Ships three tabs — **Network Map**,
+**Network Area Diagram** and **Single Line Diagram** — to demonstrate
+two killer interactions:
+
+* clicking a substation on the map navigates to its SLD;
+* clicking a node on the NAD navigates to its SLD.
+
+Both jumps activate the SLD tab and render the target VL instantly,
+with no script rerun and no websocket round-trip.
 
 ## Run it
 
@@ -27,6 +32,11 @@ same wheel; the PySide6 path is opt-in via the `pyside` extra.
    │ • file lbl  │  │ PowsyblWebView → frontend/map_component/dist   │ │
    │ • VL lbl    │  │   ▲ render_component(substations=…)            │ │
    │             │  │   ▼ value_received: {type:'map-substation-click'}│
+   │             │  └────────────────────────────────────────────────┘ │
+   │             │  ┌─ Network Area Diagram ─────────────────────────┐ │
+   │             │  │ PowsyblWebView → frontend/nad_component/dist   │ │
+   │             │  │   ▲ render_component(svg=…, metadata=…)        │ │
+   │             │  │   ▼ value_received: {type:'nad-vl-click'}       │ │
    │             │  └────────────────────────────────────────────────┘ │
    │             │  ┌─ Single Line Diagram ──────────────────────────┐ │
    │             │  │ PowsyblWebView → frontend/sld_component/dist   │ │
@@ -63,32 +73,39 @@ land back in the bundle's own window. `bridge.js` (injected at
 This means the bundles are **byte-for-byte identical** to what the
 Streamlit app ships. No fork, no second build.
 
-### Map → SLD wiring
+### Map → SLD and NAD → SLD wiring
 
 ```
-       deck.gl onClick on a substation
-                 │
-                 ▼
-   setComponentValue({type:'map-substation-click',
-                      substationId, vlIds, ts})        (map main.ts)
-                 │
-                 ▼     bridge.js → QWebChannel
-   MapTab._on_value({…})
-                 │
-                 ▼  emits substation_clicked(vlIds)
+   Map: deck.gl onClick on a substation
+       │
+       ▼
+   setComponentValue({type:'map-substation-click', vlIds, …})    (map main.ts)
+       │
+       ▼   bridge.js → QWebChannel
+   MapTab.substation_clicked(vlIds)
+       │
+       ▼
    MainWindow._on_map_substation_clicked
-                 │
-        ┌────────┴──────────┐
-        ▼                   ▼
-  tabs.setCurrentWidget   AppState.set_selected_vl(vlIds[0])
-        (SldTab)                │
-                                ▼
-                        SldTab.show_voltage_level(vl)
-                                │
-              cached?  ──no──▶  run(get_single_line_diagram)
-                 │                       │
-                 ▼                       ▼
-              PowsyblWebView.render_component(svg, metadata, …)
+       │   tabs.setCurrentWidget(sld_tab)
+       │   AppState.set_selected_vl(vlIds[0])
+       │
+       ▼            (signal: selected_vl_changed)
+   SldTab.show_voltage_level(vl)
+       │
+       ▼   cached? no → run(get_single_line_diagram)  (worker thread)
+   PowsyblWebView.render_component(svg, metadata, …)
+
+
+   NAD: NetworkAreaDiagramViewer.onSelectNodeCallback
+       │
+       ▼
+   setComponentValue({type:'nad-vl-click', vl, ts})              (nad main.ts)
+       │
+       ▼   bridge.js → QWebChannel
+   NadTab.node_clicked(vl)
+       │
+       ▼
+   MainWindow._on_nad_node_clicked  →  same path as map → SLD
 ```
 
 No `st.rerun()`, no full-script execution, no recomputation of the
