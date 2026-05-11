@@ -53,6 +53,7 @@ app.add_static_files(_SLD_URL, _SLD_DIST)
 from iidm_viewer.component_registry import (
     COMPONENT_TYPES as COMPONENT_GETTERS,
     TOPOLOGY_AFFECTING_ATTRIBUTES,
+    apply_bulk_edit,
     apply_cell_edit,
     editable_attributes,
     get_dataframe,
@@ -291,6 +292,11 @@ def _dataframe_to_aggrid_options(df, editable_cols: Optional[list] = None) -> di
         defn: dict = {"headerName": c, "field": c}
         if c == "id":
             defn["pinned"] = "left"
+            # Surface ag-Grid Community's row-selection checkbox on the
+            # id column — gives a discoverable affordance for bulk edit
+            # without committing to ag-Grid Enterprise's checkbox column.
+            defn["checkboxSelection"] = True
+            defn["headerCheckboxSelection"] = True
         if is_numeric:
             defn["type"] = "numericColumn"
             defn["filter"] = "agNumberColumnFilter"
@@ -312,6 +318,11 @@ def _dataframe_to_aggrid_options(df, editable_cols: Optional[list] = None) -> di
         "columnDefs": column_defs,
         "rowData": row_data,
         "defaultColDef": _DEFAULT_COL_DEF,
+        # ``multiple`` plus the ``id`` checkbox column gives ag-Grid
+        # Community Ctrl/Shift multi-row picking; the bulk-edit panel
+        # reads ``get_selected_rows`` to map back to element ids.
+        "rowSelection": "multiple",
+        "suppressRowClickSelection": False,
     }
 
 
@@ -346,7 +357,21 @@ def _build_data_explorer():
     grid = ui.aggrid({
         "columnDefs": [], "rowData": [],
         "defaultColDef": _DEFAULT_COL_DEF,
+        "rowSelection": "multiple",
     }).classes("w-full").style("height: 600px")
+
+    # --- Bulk-edit panel --------------------------------------------------
+    # ag-Grid keeps the selection on the client; we resolve it on demand
+    # via ``grid.get_selected_rows()`` rather than mirroring it in Python.
+    with ui.row().classes("q-pa-sm items-center w-full") as bulk_row:
+        bulk_label = ui.label("Apply to selection:")
+        bulk_attr = ui.select(options=[], value=None) \
+            .props("dense outlined").classes("w-48")
+        ui.label("=")
+        bulk_value = ui.input(placeholder="New value") \
+            .props("dense outlined").classes("flex-grow")
+        bulk_button = ui.button("Apply")
+    bulk_row.set_visibility(False)
 
     def refresh() -> None:
         label = select.value
@@ -354,9 +379,11 @@ def _build_data_explorer():
             grid.options = {
                 "columnDefs": [], "rowData": [],
                 "defaultColDef": _DEFAULT_COL_DEF,
+                "rowSelection": "multiple",
             }
             grid.update()
             summary.set_text("No network loaded.")
+            bulk_row.set_visibility(False)
             return
         try:
             df = get_dataframe(_state.network, label)
@@ -364,9 +391,11 @@ def _build_data_explorer():
             grid.options = {
                 "columnDefs": [], "rowData": [],
                 "defaultColDef": _DEFAULT_COL_DEF,
+                "rowSelection": "multiple",
             }
             grid.update()
             summary.set_text(f"{label}: failed — {exc}")
+            bulk_row.set_visibility(False)
             return
         cols = [c for c in editable_attributes(label) if c in df.columns]
         grid.options = _dataframe_to_aggrid_options(df, editable_cols=cols)
@@ -378,6 +407,14 @@ def _build_data_explorer():
             summary.set_text(
                 f"{label}: {df.shape[0]} rows · {df.shape[1]} columns{editable_msg}"
             )
+        # Refresh the bulk-edit attribute combo so it offers only the
+        # editable columns for *this* component. Hide the whole panel
+        # when the component isn't editable at all.
+        bulk_attr.options = cols
+        bulk_attr.value = cols[0] if cols else None
+        bulk_attr.update()
+        bulk_row.set_visibility(bool(cols))
+        bulk_label.set_text("Apply to selection:")
 
     def on_cell_changed(e) -> None:
         """ag-Grid emits ``cellValueChanged`` with ``data, colId, oldValue, newValue``."""
@@ -417,6 +454,46 @@ def _build_data_explorer():
                 _push_sld(_state.selected_vl)
                 _push_nad(_state.selected_vl, _nad_depth)
 
+    async def on_bulk_apply() -> None:
+        component = select.value
+        attribute = bulk_attr.value
+        new_value = bulk_value.value
+        if _state.network is None or not component or not attribute:
+            return
+        selected = await grid.get_selected_rows()
+        ids = [str(r["id"]) for r in (selected or []) if r.get("id") is not None]
+        if not ids:
+            ui.notify("Select one or more rows first.", type="warning")
+            return
+        try:
+            prev_map = apply_bulk_edit(
+                _state.network, component, ids, attribute, new_value,
+            )
+        except Exception as exc:
+            ui.notify(
+                f"Bulk edit rejected — {component}/{len(ids)} rows/{attribute}: {exc}",
+                type="negative",
+            )
+            return
+        ui.notify(
+            f"{component}: {attribute} = {new_value} applied to {len(ids)} rows",
+            type="positive",
+            timeout=1500,
+        )
+        bulk_value.value = ""
+        bulk_value.update()
+        # Topology-affecting bulk changes flush the diagram caches so
+        # a subsequent tab switch shows the updated picture.
+        if attribute in TOPOLOGY_AFFECTING_ATTRIBUTES:
+            _nad_cache.clear()
+            _sld_cache.clear()
+            if _state.selected_vl:
+                _push_sld(_state.selected_vl)
+                _push_nad(_state.selected_vl, _nad_depth)
+        # Refresh the grid so the new (possibly coerced) values appear.
+        refresh()
+
+    bulk_button.on_click(on_bulk_apply)
     grid.on("cellValueChanged", on_cell_changed)
     select.on_value_change(lambda _e: refresh())
     return refresh

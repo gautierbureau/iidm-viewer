@@ -16,6 +16,7 @@ from iidm_viewer.component_registry import (
     EDITABLE_COMPONENTS,
     TOPOLOGY_AFFECTING_ATTRIBUTES,
     _coerce,
+    apply_bulk_edit,
     apply_cell_edit,
     editable_attributes,
     get_dataframe,
@@ -139,3 +140,74 @@ def test_apply_cell_edit_rejects_non_editable_attribute(ieee14_network):
     gen_id = str(df["id"].iloc[0])
     with pytest.raises(ValueError, match="not editable for"):
         apply_cell_edit(ieee14_network, "Generators", gen_id, "name", "renamed")
+
+
+# ---------------------------------------------------------------------------
+# apply_bulk_edit
+# ---------------------------------------------------------------------------
+def test_apply_bulk_edit_updates_all_rows_and_returns_previous_map(ieee14_network):
+    df_before = get_dataframe(ieee14_network, "Generators")
+    assert df_before.shape[0] >= 3
+    ids = [str(x) for x in df_before["id"].iloc[:3]]
+    prev_values = {i: df_before[df_before["id"].astype(str) == i]["target_p"].iloc[0]
+                   for i in ids}
+
+    new_value = 42.5
+    returned = apply_bulk_edit(
+        ieee14_network, "Generators", ids, "target_p", new_value,
+    )
+    assert set(returned.keys()) == set(ids)
+    for i in ids:
+        assert returned[i] == pytest.approx(prev_values[i])
+
+    df_after = get_dataframe(ieee14_network, "Generators")
+    for i in ids:
+        after = df_after[df_after["id"].astype(str) == i]["target_p"].iloc[0]
+        assert after == pytest.approx(new_value)
+
+    # Revert so other tests aren't affected.
+    for i in ids:
+        apply_cell_edit(ieee14_network, "Generators", i, "target_p", prev_values[i])
+
+
+def test_apply_bulk_edit_coerces_once_against_column_dtype(ieee14_network):
+    """Boolean attribute via a string input — all rows must end up bool."""
+    df_before = get_dataframe(ieee14_network, "Loads")
+    assert df_before.shape[0] >= 2
+    ids = [str(x) for x in df_before["id"].iloc[:2]]
+    prev = [df_before[df_before["id"].astype(str) == i]["connected"].iloc[0] for i in ids]
+
+    apply_bulk_edit(ieee14_network, "Loads", ids, "connected", "false")
+    df_after = get_dataframe(ieee14_network, "Loads")
+    for i in ids:
+        v = df_after[df_after["id"].astype(str) == i]["connected"].iloc[0]
+        assert v is False or v is bool(False) or v == False  # noqa: E712
+
+    # Revert.
+    for i, p in zip(ids, prev):
+        apply_cell_edit(ieee14_network, "Loads", i, "connected", bool(p))
+
+
+def test_apply_bulk_edit_with_empty_ids_is_noop(ieee14_network):
+    """Empty ``element_ids`` must short-circuit before touching pypowsybl
+    so callers can pass through a no-selection state without special-casing.
+    """
+    assert apply_bulk_edit(
+        ieee14_network, "Generators", [], "target_p", 10.0,
+    ) == {}
+
+
+def test_apply_bulk_edit_rejects_non_editable_component(ieee14_network):
+    with pytest.raises(ValueError, match="not editable"):
+        apply_bulk_edit(
+            ieee14_network, "Voltage Levels", ["VL1"], "nominal_v", 999.0,
+        )
+
+
+def test_apply_bulk_edit_rejects_non_editable_attribute(ieee14_network):
+    df = get_dataframe(ieee14_network, "Generators")
+    gen_id = str(df["id"].iloc[0])
+    with pytest.raises(ValueError, match="not editable for"):
+        apply_bulk_edit(
+            ieee14_network, "Generators", [gen_id], "name", "renamed",
+        )

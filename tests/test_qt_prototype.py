@@ -323,6 +323,79 @@ def test_sld_bundle_carries_preserve_viewport_path():
     assert "setViewBox" in contents
 
 
+def test_data_explorer_bulk_edit_applies_to_selected_rows(qapp, loaded_window):
+    """End-to-end bulk edit through the PySide6 UI:
+    select 3 generator rows, apply ``target_p``, confirm pypowsybl
+    and the in-memory model both reflect the new value.
+
+    The proxy's row order doesn't necessarily match the source
+    DataFrame (sortingEnabled triggers an initial sort on Qt 6.11),
+    so the test reads the actual ids back via
+    :meth:`DataExplorerTab._selected_element_ids` — the same path
+    the bulk-apply handler uses in production.
+    """
+    explorer = loaded_window.data_tab
+    explorer._combo.setCurrentText("Generators")
+    qapp.processEvents()
+
+    # Select the first 3 proxy rows.
+    sel = explorer._table.selectionModel()
+    sel.clearSelection()
+    from PySide6.QtCore import QItemSelection, QItemSelectionModel
+    for r in range(3):
+        idx_top = explorer._proxy.index(r, 0)
+        idx_right = explorer._proxy.index(r, explorer._proxy.columnCount() - 1)
+        sel.select(
+            QItemSelection(idx_top, idx_right),
+            QItemSelectionModel.Select | QItemSelectionModel.Rows,
+        )
+    qapp.processEvents()
+    ids = explorer._selected_element_ids()
+    assert len(ids) == 3
+
+    df_before = explorer._model.dataframe()
+    prev_values = {
+        i: df_before[df_before["id"].astype(str) == i]["target_p"].iloc[0]
+        for i in ids
+    }
+    new_value = 55.5
+
+    # Drive the bulk panel.
+    explorer._bulk_attr.setCurrentText("target_p")
+    explorer._bulk_value.setText(str(new_value))
+    explorer._on_bulk_apply()
+    qapp.processEvents()
+
+    df_after = explorer._model.dataframe()
+    for i in ids:
+        v = df_after[df_after["id"].astype(str) == i]["target_p"].iloc[0]
+        assert v == pytest.approx(new_value)
+
+    # Revert (so other tests aren't affected — the worker thread is shared).
+    from iidm_viewer.component_registry import apply_cell_edit
+    for i in ids:
+        apply_cell_edit(loaded_window.state.network, "Generators", i, "target_p", prev_values[i])
+
+
+def test_bulk_panel_visibility_follows_editable_component(qapp, loaded_window):
+    explorer = loaded_window.data_tab
+
+    # Voltage Levels is not editable -> the bulk attr combo is empty.
+    explorer._combo.setCurrentText("Voltage Levels")
+    qapp.processEvents()
+    assert explorer._bulk_attr.count() == 0
+    assert not explorer._bulk_apply.isEnabled()
+
+    explorer._combo.setCurrentText("Generators")
+    qapp.processEvents()
+    assert explorer._bulk_attr.count() > 0
+    # No selection yet -> still disabled.
+    explorer._table.selectionModel().clearSelection()
+    qapp.processEvents()
+    explorer._update_bulk_state()
+    assert not explorer._bulk_apply.isEnabled()
+
+
 def test_data_explorer_rejects_non_editable_attribute(qapp, loaded_window):
     """setData on a non-editable column must return False and not
     issue an edit_requested signal."""

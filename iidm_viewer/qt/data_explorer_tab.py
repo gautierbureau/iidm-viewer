@@ -28,11 +28,13 @@ from PySide6.QtCore import (
 )
 from PySide6.QtWidgets import (
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -41,6 +43,7 @@ from PySide6.QtWidgets import (
 from iidm_viewer.component_registry import (
     COMPONENT_TYPES,
     TOPOLOGY_AFFECTING_ATTRIBUTES,
+    apply_bulk_edit,
     apply_cell_edit,
     editable_attributes,
     get_dataframe,
@@ -206,9 +209,10 @@ class _MultiColumnFilterProxy(QSortFilterProxyModel):
 
 
 class DataExplorerTab(QWidget):
-    """Pick a component, filter, sort, edit."""
+    """Pick a component, filter, sort, edit (single cell or in bulk)."""
 
     edit_applied = Signal(str, str, str, object, object)  # component, element_id, attribute, new, prev
+    bulk_edit_applied = Signal(str, list, str, object, dict)  # component, ids, attribute, new, prev_map
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -236,13 +240,17 @@ class DataExplorerTab(QWidget):
         self._table.setModel(self._proxy)
         self._table.setAlternatingRowColors(True)
         self._table.setSortingEnabled(True)  # uses _proxy's sort
+        # ``ExtendedSelection`` adds Ctrl/Shift multi-row picking on top of
+        # the row-level selection behaviour. Required for bulk edit.
         self._table.setSelectionBehavior(QTableView.SelectRows)
+        self._table.setSelectionMode(QTableView.ExtendedSelection)
         self._table.setEditTriggers(
             QTableView.DoubleClicked | QTableView.EditKeyPressed | QTableView.AnyKeyPressed
         )
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setDefaultSectionSize(22)
+        self._table.selectionModel().selectionChanged.connect(self._on_selection_changed)
 
         controls = QHBoxLayout()
         controls.setContentsMargins(10, 6, 10, 0)
@@ -251,12 +259,35 @@ class DataExplorerTab(QWidget):
         controls.addSpacing(12)
         controls.addWidget(self._filter, 1)
 
+        # --- Bulk-edit panel ---------------------------------------------------
+        # Disabled until N>=1 rows are selected and the current component
+        # has at least one editable attribute.
+        self._bulk_label = QLabel("Apply to 0 selected:")
+        self._bulk_attr = QComboBox()
+        self._bulk_attr.setMinimumWidth(140)
+        self._bulk_value = QLineEdit()
+        self._bulk_value.setPlaceholderText("New value")
+        self._bulk_value.setMinimumWidth(120)
+        self._bulk_apply = QPushButton("Apply")
+        self._bulk_apply.clicked.connect(self._on_bulk_apply)
+        self._bulk_panel = QFrame()
+        self._bulk_panel.setFrameShape(QFrame.NoFrame)
+        bulk_layout = QHBoxLayout(self._bulk_panel)
+        bulk_layout.setContentsMargins(10, 2, 10, 4)
+        bulk_layout.addWidget(self._bulk_label)
+        bulk_layout.addWidget(self._bulk_attr)
+        bulk_layout.addWidget(QLabel("="))
+        bulk_layout.addWidget(self._bulk_value, 1)
+        bulk_layout.addWidget(self._bulk_apply)
+        self._set_bulk_enabled(False)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         layout.addLayout(controls)
         layout.addWidget(self._summary)
         layout.addWidget(self._table, 1)
+        layout.addWidget(self._bulk_panel)
 
     # ------------------------------------------------------------------
     # Public API
@@ -323,6 +354,94 @@ class DataExplorerTab(QWidget):
             )
         if not df.empty:
             self._table.resizeColumnsToContents()
+        # The set of editable attributes is component-specific; refresh
+        # the bulk panel so its dropdown reflects the current frame.
+        self._refresh_bulk_attrs()
+
+    def _set_bulk_enabled(self, enabled: bool) -> None:
+        for w in (self._bulk_attr, self._bulk_value, self._bulk_apply):
+            w.setEnabled(enabled)
+
+    def _refresh_bulk_attrs(self) -> None:
+        """Re-fill the bulk-attr combo with the current component's
+        editable columns, keeping the previous selection when possible.
+        """
+        component = self._combo.currentText()
+        cols = [c for c in editable_attributes(component) if c in self._model.dataframe().columns]
+        previous = self._bulk_attr.currentText()
+        self._bulk_attr.blockSignals(True)
+        self._bulk_attr.clear()
+        for c in cols:
+            self._bulk_attr.addItem(c)
+        if previous in cols:
+            self._bulk_attr.setCurrentText(previous)
+        self._bulk_attr.blockSignals(False)
+        self._update_bulk_state()
+
+    def _selected_element_ids(self) -> list[str]:
+        """Map the table's selected proxy rows back to element ids."""
+        sel = self._table.selectionModel()
+        if sel is None or self._model._id_col is None:
+            return []
+        rows = sel.selectedRows()  # one QModelIndex per selected row, in the first column
+        ids: list[str] = []
+        id_col_pos = self._model.dataframe().columns.get_loc(self._model._id_col)
+        for proxy_idx in rows:
+            source_idx = self._proxy.mapToSource(proxy_idx)
+            try:
+                ids.append(str(self._model.dataframe().iat[source_idx.row(), id_col_pos]))
+            except (IndexError, KeyError):
+                continue
+        return ids
+
+    def _update_bulk_state(self) -> None:
+        n = len(self._selected_element_ids())
+        component = self._combo.currentText()
+        has_editable = self._bulk_attr.count() > 0
+        self._bulk_label.setText(f"Apply to {n} selected:")
+        self._set_bulk_enabled(n > 0 and has_editable and is_editable(component))
+
+    def _on_selection_changed(self, *_args) -> None:
+        self._update_bulk_state()
+
+    def _on_bulk_apply(self) -> None:
+        component = self._combo.currentText()
+        attribute = self._bulk_attr.currentText()
+        new_value = self._bulk_value.text()
+        ids = self._selected_element_ids()
+        if not ids or not attribute or self._network is None:
+            return
+        try:
+            prev_map = apply_bulk_edit(
+                self._network, component, ids, attribute, new_value,
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Bulk edit rejected",
+                f"{component}/{len(ids)} rows/{attribute}\n\n{exc}",
+            )
+            return
+        # Re-fetch the live frame once so the model reflects the
+        # coerced/normalised values pypowsybl just accepted. Cheaper
+        # than N individual cell writes and keeps the row index aligned
+        # with the network after potential dtype normalisation.
+        try:
+            df = get_dataframe(self._network, component)
+        except Exception:
+            df = self._model.dataframe()
+        cols = [c for c in editable_attributes(component) if c in df.columns]
+        self._model.set_dataframe(df, editable_cols=cols)
+        # apply_bulk_edit already coerced new_value once against the
+        # column dtype; report that to listeners.
+        try:
+            from iidm_viewer.component_registry import _coerce
+            display_value = _coerce(new_value, df[attribute].dtype) if attribute in df.columns else new_value
+        except Exception:
+            display_value = new_value
+        self._bulk_value.clear()
+        self.bulk_edit_applied.emit(component, ids, attribute, display_value, prev_map)
+        self._update_bulk_state()
 
     def _on_edit_requested(self, element_id: str, attribute: str, new_value, previous) -> None:
         component = self._combo.currentText()
