@@ -288,8 +288,8 @@ def _render_target_containment_summary(classified, gens_df):
         if n_outside_pv or n_outside_pq:
             st.caption(
                 f"Of the {n_outside} outside: {n_outside_pv} PV "
-                f"(will switch to PQ in load flow — see the **lf_action** "
-                f"column below), {n_outside_pq} PQ, "
+                f"(will switch to PQ in load flow — see the **PV outside** "
+                f"table below), {n_outside_pq} PQ, "
                 f"{n_outside - n_outside_pv - n_outside_pq} other."
             )
 
@@ -297,21 +297,6 @@ def _render_target_containment_summary(classified, gens_df):
         if issues.empty:
             st.success("All targets are inside their capability curves.")
             return
-
-        # Sort priority: outside-PV (will switch) > outside-PQ/other > edge,
-        # then within each group by signed distance descending (farthest from
-        # the diagram first).
-        is_switcher = (
-            (issues["status"] == "outside") & (issues["lf_action"] == "PV→PQ")
-        )
-        sort_key = pd.Series(2, index=issues.index)
-        sort_key[issues["status"] == "outside"] = 1
-        sort_key[is_switcher] = 0
-        issues = (
-            issues.assign(_order=sort_key)
-            .sort_values(["_order", "distance"], ascending=[True, False])
-            .drop(columns="_order")
-        )
 
         extra = [c for c in ("voltage_level_id", "nominal_v", "country")
                  if c in gens_df.columns]
@@ -327,7 +312,39 @@ def _render_target_containment_summary(classified, gens_df):
             "target_p", "target_q",
             "p_lo", "p_hi", "min_q_at_target_p", "max_q_at_target_p",
         ]
-        st.dataframe(issues[cols], use_container_width=True)
+
+        def _subset(status_val, regulation_val):
+            sub = issues[
+                (issues["status"] == status_val)
+                & (issues["regulation"] == regulation_val)
+            ]
+            if sub.empty:
+                return sub
+            return sub.sort_values("distance", ascending=False)
+
+        pv_out = _subset("outside", "PV")
+        pq_out = _subset("outside", "PQ")
+        pv_edge = _subset("edge", "PV")
+        pq_edge = _subset("edge", "PQ")
+
+        # Outside subsets first — actionable, render expanded.
+        if not pv_out.empty:
+            st.markdown(
+                f"**PV outside — {len(pv_out)}** "
+                "(load flow will switch these to PQ)"
+            )
+            st.dataframe(pv_out[cols], use_container_width=True)
+        if not pq_out.empty:
+            st.markdown(f"**PQ outside — {len(pq_out)}**")
+            st.dataframe(pq_out[cols], use_container_width=True)
+
+        # Edge subsets — secondary, collapsed by default.
+        if not pv_edge.empty:
+            with st.expander(f"PV on edge — {len(pv_edge)}", expanded=False):
+                st.dataframe(pv_edge[cols], use_container_width=True)
+        if not pq_edge.empty:
+            with st.expander(f"PQ on edge — {len(pq_edge)}", expanded=False):
+                st.dataframe(pq_edge[cols], use_container_width=True)
 
 
 def render_reactive_curves(network, selected_vl):
