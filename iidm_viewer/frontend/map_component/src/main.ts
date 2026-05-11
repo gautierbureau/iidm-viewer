@@ -19,8 +19,14 @@
  *     height: number,
  *   }
  *
- * JS -> Python: nothing for now (tooltips handled entirely in the
- * browser, matching parity with the previous Leaflet implementation).
+ * JS -> Python (setComponentValue):
+ *   { type: 'map-substation-click', substationId, vlIds: string[], ts }
+ *     when the user clicks a substation. ``vlIds`` is ordered by
+ *     descending nominal voltage so the host can default to the
+ *     highest-V VL when navigating to the SLD.
+ *
+ * Tooltips remain handled entirely in the browser (parity with the
+ * previous Leaflet implementation).
  *
  * Uses MapboxOverlay (interleaved: false) from @deck.gl/mapbox on top
  * of MapLibre GL JS v4, matching the integration used by
@@ -158,6 +164,21 @@ function formatLineTooltip(line: MapLine): string {
   return `<b>${header}</b><br>P1: ${p1} MW, I1: ${i1} A`;
 }
 
+function emitSubstationClick(sub: MapSubstation): void {
+  // Order voltage levels by descending nominal voltage so hosts that
+  // default to "first" land on the most meaningful VL (e.g. 400 kV
+  // before 90 kV).
+  const vlIds = [...sub.voltageLevels]
+    .sort((a, b) => (b.nominalV ?? 0) - (a.nominalV ?? 0))
+    .map((v) => v.id);
+  setComponentValue({
+    type: 'map-substation-click',
+    substationId: sub.id,
+    vlIds,
+    ts: Date.now(),
+  });
+}
+
 function buildLayers(
   typedLines: MapLineWithType[],
   network: MapEquipments,
@@ -195,6 +216,12 @@ function buildLayers(
       labelSize: 12,
       getNameOrId: (s: MapSubstation) => s.name || s.id,
       pickable: true,
+      onClick: (info: { object?: unknown }) => {
+        const obj = info?.object;
+        if (obj && typeof obj === 'object' && 'voltageLevels' in obj) {
+          emitSubstationClick(obj as MapSubstation);
+        }
+      },
     }),
   ];
 }
