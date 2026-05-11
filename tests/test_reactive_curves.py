@@ -84,12 +84,17 @@ def test_classify_minmax_inside_outside_edge():
     out = classify_targets(gens, pd.DataFrame())
 
     assert out.loc["G_in", "status"] == "inside"
-    assert out.loc["G_in", "violation"] == 0.0
+    # G_in sits at the center of [0,100]×[-50,50]: closest edge is 50 away.
+    assert out.loc["G_in", "distance"] == -50.0
     assert out.loc["G_out_q", "status"] == "outside"
-    assert out.loc["G_out_q", "violation"] == 10.0
+    # G_out_q is 10 MVar above the top edge.
+    assert out.loc["G_out_q", "distance"] == 10.0
     assert out.loc["G_out_p", "status"] == "outside"
-    assert out.loc["G_out_p", "violation"] == 50.0
+    # G_out_p sits 50 MW past the right edge (which spans the full Q range
+    # at that P, so the closest point is the perpendicular foot at (100, 0)).
+    assert out.loc["G_out_p", "distance"] == 50.0
     assert out.loc["G_edge", "status"] == "edge"
+    assert abs(out.loc["G_edge", "distance"]) < 1e-9
 
     assert out.loc["G_in", "regulation"] == "PV"
     assert out.loc["G_out_q", "regulation"] == "PV"
@@ -132,7 +137,9 @@ def test_classify_uses_curve_p_range_when_present():
     ])
     out = classify_targets(gens, curves)
     assert out.loc["G", "status"] == "outside"
-    assert out.loc["G", "violation"] == 5.0
+    # Target is 5 MW past the right edge of the rectangle [10,90]×[-50,50]
+    # at q=0, so the perpendicular foot lies inside the edge → distance = 5.
+    assert out.loc["G", "distance"] == 5.0
     assert out.loc["G", "p_lo"] == 10.0
     assert out.loc["G", "p_hi"] == 90.0
 
@@ -154,5 +161,24 @@ def test_classify_real_network(xiidm_upload):
     gens = network.get_generators(all_attributes=True)
     out = classify_targets(gens, curves)
     assert set(out["status"].unique()).issubset({"inside", "edge", "outside", "n/a"})
-    # Every classified generator carries a violation column with non-negative values
-    assert (out["violation"] >= 0).all()
+    # Sign of distance must agree with the status classification.
+    inside = out["status"] == "inside"
+    outside = out["status"] == "outside"
+    assert (out.loc[inside, "distance"] <= 0).all()
+    assert (out.loc[outside, "distance"] > 0).all()
+
+
+def test_classify_distance_diagonal_corner():
+    # Target sits at (110, 60) outside the rectangle [0,100]×[-50,50] in both
+    # axes; the closest point is the corner (100, 50) → distance √(10²+10²).
+    gens = _make_gens_df([
+        {"id": "G", "target_p": 110.0, "target_q": 60.0,
+         "min_p": 0.0, "max_p": 100.0,
+         "min_q": -50.0, "max_q": 50.0,
+         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0,
+         "voltage_regulator_on": False},
+    ])
+    out = classify_targets(gens, pd.DataFrame())
+    assert out.loc["G", "status"] == "outside"
+    expected = (10.0 ** 2 + 10.0 ** 2) ** 0.5
+    assert abs(out.loc["G", "distance"] - expected) < 1e-9
