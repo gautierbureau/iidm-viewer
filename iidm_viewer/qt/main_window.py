@@ -107,6 +107,8 @@ class MainWindow(QMainWindow):
         self.map_tab.substation_clicked.connect(self._on_map_substation_clicked)
         self.nad_tab.node_clicked.connect(self._on_nad_node_clicked)
         self.sld_tab.feeder_clicked.connect(self._on_sld_feeder_clicked)
+        self.sld_tab.vl_navigation_requested.connect(self._on_sld_vl_navigation)
+        self.sld_tab.breaker_toggled.connect(self._on_sld_breaker_toggled)
         self.data_tab.edit_applied.connect(self._on_data_edit_applied)
         self.data_tab.bulk_edit_applied.connect(self._on_data_bulk_edit_applied)
         self.data_tab.bulk_removed.connect(self._on_data_bulk_removed)
@@ -215,6 +217,49 @@ class MainWindow(QMainWindow):
                 self.sld_tab.show_voltage_level(self.state.selected_vl)
         self.statusBar().showMessage(
             f"{component}/{element_id}/{attribute}: {prev} → {new_value}"
+        )
+
+    def _on_sld_vl_navigation(self, vl_id: str) -> None:
+        """User clicked an "→ next voltage level" arrow on the SLD.
+
+        Same path as Map / NAD click: update ``selected_vl`` and the
+        SLD + NAD tabs follow via their state listeners. Mirrors
+        Streamlit's ``diagrams.render_sld_tab`` handler.
+        """
+        if not vl_id:
+            return
+        self.state.set_selected_vl(vl_id)
+
+    def _on_sld_breaker_toggled(self, switch_id: str, new_open: bool) -> None:
+        """User clicked a switch/breaker symbol on the SLD.
+
+        Mirrors Streamlit's behaviour (``diagrams.render_sld_tab``):
+        toggle the switch via the shared ``toggle_switch``, record the
+        change in the ChangeLog under the canonical ``Switches`` /
+        ``open`` keys, and let the NAD/SLD caches flush via the
+        existing bulk_edit_applied path.
+        """
+        from iidm_viewer.component_registry import toggle_switch
+        if self.state.network is None or not switch_id:
+            return
+        try:
+            before, after = toggle_switch(self.state.network, switch_id, bool(new_open))
+        except Exception as exc:
+            self.statusBar().showMessage(f"Switch toggle failed: {exc}")
+            return
+        # Record in the change log so the user can revert via the panel.
+        self.state.change_log.record(
+            "Switches", switch_id, "open", before, after,
+        )
+        # Topology-affecting attribute: flush diagram caches +
+        # re-render the current VL so the new switch state is visible.
+        self.nad_tab._cache.clear()
+        self.sld_tab._cache.clear()
+        if self.state.selected_vl:
+            self.nad_tab.show_voltage_level(self.state.selected_vl)
+            self.sld_tab.show_voltage_level(self.state.selected_vl)
+        self.statusBar().showMessage(
+            f"Switch {switch_id}: open={before} → open={after}"
         )
 
     def _on_sld_feeder_clicked(self, payload: dict) -> None:

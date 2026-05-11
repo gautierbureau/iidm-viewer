@@ -442,6 +442,37 @@ def remove_elements(
     return list(ids)
 
 
+def toggle_switch(
+    network: NetworkProxy,
+    switch_id: str,
+    new_open: bool,
+) -> tuple[bool, bool]:
+    """Open or close a single switch; return ``(before_open, after_open)``.
+
+    The Streamlit SLD breaker-click handler and both prototypes' SLD
+    handlers share this entry point so the toggle behaviour stays
+    identical: one worker hop reads the previous state, one ``Switches``
+    update applies the new one, and the caller receives both values
+    so it can populate its change log.
+    """
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do() -> tuple[bool, bool]:
+        df = raw.get_switches(attributes=["open"])
+        if switch_id not in df.index:
+            raise KeyError(f"Switch {switch_id!r} not found in network")
+        before = bool(df.at[switch_id, "open"])
+        import pandas as pd
+        changes = pd.DataFrame(
+            {"open": [new_open]},
+            index=pd.Index([switch_id], name="id"),
+        )
+        raw.update_switches(changes)
+        return before, new_open
+
+    return run(_do)
+
+
 def apply_cell_edit(
     network: NetworkProxy,
     component: str,

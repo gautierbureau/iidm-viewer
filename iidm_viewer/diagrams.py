@@ -5,6 +5,7 @@ import re
 import pandas as pd
 import streamlit as st
 from iidm_viewer.nad_component import render_interactive_nad
+from iidm_viewer.navigation import decode_svg_id as _decode_svg_id
 from iidm_viewer.sld_component import render_interactive_sld
 from iidm_viewer.state import EDITABLE_COMPONENTS, add_to_change_log, toggle_switch
 from iidm_viewer import script_recorder
@@ -36,14 +37,9 @@ _SLD_COLOR_RE = re.compile(
 _SLD_BUSBAR_RE = re.compile(
     r'<g\s+class="sld-busbar-section\s+sld-(vl\d+to\d+)\s+sld-bus-(\d+)"\s+id="id([^"]+)"'
 )
-# The SLG renderer encodes non-alphanumeric characters in SVG element IDs as
-# _<decimal ASCII>_  (e.g. underscore '_' → '_95_', hyphen '-' → '_45_').
-_SVG_ID_ENCODE_RE = re.compile(r'_(\d+)_')
-
-
-def _decode_svg_id(encoded: str) -> str:
-    """Decode the SLG id encoding back to the original network element id."""
-    return _SVG_ID_ENCODE_RE.sub(lambda m: chr(int(m.group(1))), encoded)
+# ``_decode_svg_id`` lives in iidm_viewer.navigation so the prototypes
+# share it; imported above. Local re-binding kept for backwards
+# compatibility with anything that grepped for the symbol in this file.
 
 
 def _parse_sld_palette(svg: str) -> dict:

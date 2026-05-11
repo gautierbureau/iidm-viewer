@@ -249,6 +249,35 @@ def _push_map_flyto(substation_id: str, zoom: float = 11) -> None:
         _pending_map = dict(_pending_map or {}, **args)
 
 
+def _handle_sld_breaker_click(value: dict) -> None:
+    """Mirror Streamlit's ``sld-breaker-click`` handler: decode the
+    SVG id back to the pypowsybl switch id, toggle through the shared
+    ``toggle_switch`` (one worker hop for read + write), record in the
+    change log, and flush the diagram caches so the new state shows.
+    """
+    from iidm_viewer.component_registry import toggle_switch
+    from iidm_viewer.navigation import decode_svg_id
+
+    if _state.network is None:
+        return
+    encoded = str(value.get("breakerId", ""))
+    if not encoded:
+        return
+    switch_id = decode_svg_id(encoded)
+    new_open = bool(value.get("open", False))
+    try:
+        before, after = toggle_switch(_state.network, switch_id, new_open)
+    except Exception as exc:
+        ui.notify(f"Switch toggle failed: {exc}", type="negative")
+        return
+    _state.change_log.record("Switches", switch_id, "open", before, after)
+    _nad_cache.clear()
+    _sld_cache.clear()
+    if _state.selected_vl:
+        _push_sld(_state.selected_vl)
+        _push_nad(_state.selected_vl, _nad_depth)
+
+
 def _handle_sld_feeder_click(value: dict, tabs, map_tab) -> None:
     """Resolve the clicked feeder's "other side" substation and fly
     the Map tab to it. Falls back to a status notification when the
@@ -971,6 +1000,8 @@ def main_page() -> None:
             new_vl = value.get("vl")
             if new_vl:
                 _state.set_selected_vl(new_vl)
+        elif component == "sld" and value.get("type") == "sld-breaker-click":
+            _handle_sld_breaker_click(value)
         elif component == "sld" and value.get("type") == "sld-feeder-click":
             _handle_sld_feeder_click(value, tabs, map_tab)
 

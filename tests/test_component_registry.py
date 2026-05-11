@@ -26,6 +26,7 @@ from iidm_viewer.component_registry import (
     get_dataframe,
     is_editable,
     remove_elements,
+    toggle_switch,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy, run
 
@@ -317,3 +318,50 @@ def test_remove_elements_rejects_unknown_component(ieee14_network):
 
 def test_remove_elements_with_empty_ids_is_noop(ieee14_network):
     assert remove_elements(ieee14_network, "Loads", []) == []
+
+
+# ---------------------------------------------------------------------------
+# toggle_switch (used by Streamlit + both prototypes via the SLD breaker
+# click handler)
+# ---------------------------------------------------------------------------
+def test_toggle_switch_flips_open_and_returns_before_after():
+    """A node-breaker network exposes switches via ``get_switches``;
+    flip one and confirm the (before, after) pair + the pypowsybl
+    update both round-trip."""
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+
+    def _first_switch():
+        df = network.get_switches()
+        return str(df.index[0]), bool(df["open"].iloc[0])
+
+    sw_id, before = _first_switch()
+    target = not before
+
+    got_before, got_after = toggle_switch(network, sw_id, target)
+    assert got_before is before
+    assert got_after is target
+
+    # pypowsybl reflects the flip.
+    df_after = network.get_switches()
+    assert bool(df_after.at[sw_id, "open"]) is target
+
+    # Revert so the worker thread's state doesn't leak.
+    toggle_switch(network, sw_id, before)
+
+
+def test_toggle_switch_raises_for_unknown_id():
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    with pytest.raises(KeyError, match="not found"):
+        toggle_switch(network, "DEFINITELY_NOT_A_SWITCH", True)
