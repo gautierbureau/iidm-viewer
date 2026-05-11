@@ -11,7 +11,10 @@ from iidm_viewer.filters import (
     enrich_with_joins,
     render_filters,
 )
-from iidm_viewer.state import compute_target_v_q_sensitivity
+from iidm_viewer.state import (
+    compute_target_v_q_sensitivities,
+    compute_target_v_q_sensitivity,
+)
 
 
 _TARGET_TOLERANCE = 0.1
@@ -346,6 +349,15 @@ def render_reactive_curves(network, selected_vl):
     st.caption(f"{len(gen_ids)} generators with reactive limits")
 
     classified = classify_targets(gens_df, curves_df)
+
+    # Warm the sensitivity cache for every displayed PV generator in one
+    # batched AC sensitivity call. Without this, each selectbox change
+    # below pays for a fresh single-gen AC sensitivity (one LF factorization
+    # per generator). With it, the factorization is shared and subsequent
+    # selections hit the per-gen cache.
+    pv_gen_ids = classified.index[classified["regulation"] == "PV"].tolist()
+    if pv_gen_ids:
+        compute_target_v_q_sensitivities(network, pv_gen_ids)
 
     selected_gen = st.selectbox(
         "Generator",
