@@ -23,11 +23,15 @@ from iidm_viewer.state import (
 
 
 _TARGET_TOLERANCE = 0.1
+_NEAR_SATURATION_THRESHOLD = 5.0  # MVar/MW; PV gens within this distance of a Q limit are flagged "near_saturation"
 
 _STATUS_DIAMOND_COLOR = {
     "inside": "green",
     "edge": "orange",
     "outside": "red",
+    "saturated": "red",          # PV gen at limit — load flow switched to PQ
+    "near_saturation": "orange", # PV gen close to a Q limit
+    "needs_lf": "gray",
     "n/a": "gray",
 }
 
@@ -143,25 +147,33 @@ def _signed_distance_to_polygon(tp, tq, polygon_p, polygon_q):
     return -min_dist if inside else min_dist
 
 
-def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
-    """Classify (target_p, target_q) for each generator vs. its capability polygon.
+def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE,
+                     near_saturation_threshold=_NEAR_SATURATION_THRESHOLD):
+    """Classify each generator's operating point against its capability polygon.
 
-    Returns the input frame augmented with:
+    The reference point depends on regulation type:
 
-    - ``distance``: signed Euclidean distance from ``(target_p, target_q)``
-      to the polygon (positive outside, zero on edge, negative inside =
+    - **PQ** gens (regulator off, ``target_q`` set): use the setpoint
+      ``(target_p, target_q)`` — the load flow honours it. Statuses are
+      ``inside`` / ``edge`` / ``outside`` / ``n/a``.
+    - **PV** gens (regulator on): use the post-LF operating point
+      ``(target_p, -q)`` — the LF picks Q to hold ``target_v``, so the
+      Q the diagram should be checked against is the one the LF actually
+      delivered. Statuses are ``inside`` / ``near_saturation`` /
+      ``saturated`` / ``needs_lf``. ``saturated`` captures the case where
+      the LF clamped Q at a limit and (silently) demoted the gen to PQ.
+      ``needs_lf`` is set when ``q`` is NaN (no load flow has run).
+
+    Other columns on the result:
+
+    - ``distance``: signed Euclidean distance from the reference point to
+      the polygon (positive outside, zero on edge, negative inside =
       headroom). Units: MVA (P in MW, Q in MVar, mixed).
-    - ``violation``: L∞ axial overshoot — ``max(0, p_lo - target_p,
-      target_p - p_hi, min_q_at_target_p - target_q, target_q -
-      max_q_at_target_p)``. Non-negative; complements ``distance`` by
-      reporting "how far past the worst-axis bound" without the diagonal
-      coupling.
-    - ``status``: ``"inside"`` / ``"edge"`` / ``"outside"`` / ``"n/a"`` derived
-      from ``distance`` and ``tolerance``.
-    - ``regulation``: ``"PV"`` (voltage_regulator_on), ``"PQ"`` (off + target_q),
-      ``"?"`` otherwise.
-    - ``lf_action``: ``"PV→PQ"`` for PV generators outside their diagram (the
-      ones the load flow will switch); empty string otherwise.
+    - ``violation``: L∞ axial overshoot using the same reference point.
+    - ``regulation``: ``"PV"`` / ``"PQ"`` / ``"?"``.
+    - ``lf_action``: ``"PV→PQ"`` exactly when ``status == "saturated"``,
+      i.e. the LF itself converted the gen to PQ. This is the
+      ground-truth list rather than a guess from ``target_q``.
     - ``p_lo`` / ``p_hi``: diagnostic P bounds (curve extremes when present,
       else min_p / max_p).
     """
@@ -186,29 +198,34 @@ def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
     df["p_lo"] = df["p_lo"].fillna(df["min_p"])
     df["p_hi"] = df["p_hi"].fillna(df["max_p"])
 
-    # L∞ axial overshoot — non-negative; 0 when on / inside the bounding box
-    # of the polygon. Useful diagnostic: ``violation`` tells you how far the
-    # target exceeds the bounds on the worst axis, while ``distance`` (below)
-    # is the true Euclidean distance for ranking.
+    regulator_on = df["voltage_regulator_on"].fillna(False).astype(bool)
+    # Post-LF Q in load convention. NaN when no LF has run — yields
+    # status "needs_lf" for PV gens further down.
+    q_lf = gens_df.reindex(columns=["q"])["q"]
+
+    # Reference point for the polygon check, in gen convention.
+    # PQ: target_q (setpoint the LF honours).
+    # PV: -q (Q the LF actually produced to hold target_v).
+    check_q = df["target_q"].where(~regulator_on, -q_lf)
+
+    # L∞ axial overshoot using the same reference point.
     axial = pd.concat(
         [
             df["p_lo"] - df["target_p"],
             df["target_p"] - df["p_hi"],
-            df["min_q_at_target_p"] - df["target_q"],
-            df["target_q"] - df["max_q_at_target_p"],
+            df["min_q_at_target_p"] - check_q,
+            check_q - df["max_q_at_target_p"],
         ],
         axis=1,
     )
     max_axial = axial.max(axis=1)
     df["violation"] = max_axial.where(max_axial > 0, 0.0)
 
-    # Signed Euclidean distance from (target_p, target_q) to each gen's polygon.
-    # Loop in Python: ~O(N_gens * N_vertices_per_polygon); curves have ≤ ~20
-    # points so the cost stays under a few ms even for a thousand generators.
+    # Signed Euclidean distance from the reference point to the polygon.
     distances = pd.Series(float("nan"), index=df.index, dtype="float64")
     for gen_id in df.index:
         tp = df.at[gen_id, "target_p"]
-        tq = df.at[gen_id, "target_q"]
+        tq = check_q.at[gen_id]
         if pd.isna(tp) or pd.isna(tq):
             continue
         has_curve = gen_id in curve_gen_ids_set
@@ -222,21 +239,42 @@ def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
         )
     df["distance"] = distances
 
+    abs_d = distances.abs()
+    nan_mask = distances.isna()
     status = pd.Series("inside", index=df.index, dtype="object")
-    status[distances.abs() <= tolerance] = "edge"
-    status[distances > tolerance] = "outside"
-    status[distances.isna()] = "n/a"
+
+    # PQ classification: inside / edge / outside / n/a.
+    pq = ~regulator_on
+    status[pq & nan_mask] = "n/a"
+    status[pq & ~nan_mask & (distances > tolerance)] = "outside"
+    status[pq & ~nan_mask & (abs_d <= tolerance)] = "edge"
+
+    # PV classification: inside / near_saturation / saturated / needs_lf.
+    # ``saturated`` covers "at limit OR past limit" — for a converged LF the
+    # latter cannot happen, but we lump them together so PV never appears
+    # with an "outside" status.
+    pv = regulator_on
+    status[pv & nan_mask] = "needs_lf"
+    status[pv & ~nan_mask & (distances >= -tolerance)] = "saturated"
+    near_sat = (
+        pv & ~nan_mask
+        & (distances < -tolerance)
+        & (distances >= -near_saturation_threshold)
+    )
+    status[near_sat] = "near_saturation"
+
     df["status"] = status
 
-    regulator_on = df["voltage_regulator_on"].fillna(False).astype(bool)
     has_target_q = df["target_q"].notna()
     regulation = pd.Series("?", index=df.index, dtype="object")
     regulation[regulator_on] = "PV"
     regulation[~regulator_on & has_target_q] = "PQ"
     df["regulation"] = regulation
 
+    # ``saturated`` only applies to PV gens by construction → those are the
+    # ground-truth PV→PQ switches reported by the LF itself.
     lf_action = pd.Series("", index=df.index, dtype="object")
-    lf_action[(status == "outside") & (regulation == "PV")] = "PV→PQ"
+    lf_action[status == "saturated"] = "PV→PQ"
     df["lf_action"] = lf_action
 
     return df
@@ -350,36 +388,41 @@ def _classify_targets_cached(network, gens_df, curves_df):
 
 def _render_target_containment_summary(classified, gens_df):
     n_inside = int((classified["status"] == "inside").sum())
-    n_edge = int((classified["status"] == "edge").sum())
-    n_outside = int((classified["status"] == "outside").sum())
-    n_na = int((classified["status"] == "n/a").sum())
+    n_warning = int(
+        classified["status"].isin(["edge", "near_saturation"]).sum()
+    )
+    n_action = int(classified["status"].isin(["outside", "saturated"]).sum())
+    n_unknown = int(classified["status"].isin(["n/a", "needs_lf"]).sum())
+    n_saturated = int((classified["status"] == "saturated").sum())
+    n_needs_lf = int((classified["status"] == "needs_lf").sum())
 
-    outside_mask = classified["status"] == "outside"
-    n_outside_pv = int((outside_mask & (classified["regulation"] == "PV")).sum())
-    n_outside_pq = int((outside_mask & (classified["regulation"] == "PQ")).sum())
-
-    label = f"Target P/Q containment — {n_outside} outside, {n_edge} on edge"
-    with st.expander(label, expanded=(n_outside + n_edge > 0)):
+    label = (
+        f"Target P/Q containment — {n_action} action, {n_warning} warning"
+    )
+    with st.expander(label, expanded=(n_action + n_warning > 0)):
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Inside", n_inside)
-        c2.metric("On edge", n_edge)
+        c2.metric("Edge / Near", n_warning)
         c3.metric(
-            "Outside",
-            n_outside,
-            delta=f"{n_outside_pv} PV → PQ" if n_outside_pv else None,
+            "Outside / Saturated",
+            n_action,
+            delta=f"{n_saturated} PV → PQ" if n_saturated else None,
             delta_color="inverse",
         )
-        c4.metric("Unknown", n_na)
+        c4.metric("Unknown / Needs LF", n_unknown)
 
-        if n_outside_pv or n_outside_pq:
+        if n_needs_lf:
             st.caption(
-                f"Of the {n_outside} outside: {n_outside_pv} PV "
-                f"(will switch to PQ in load flow — see the **PV outside** "
-                f"table below), {n_outside_pq} PQ, "
-                f"{n_outside - n_outside_pv - n_outside_pq} other."
+                f"{n_needs_lf} PV generator(s) need a load flow to evaluate "
+                "their operating point against the diagram (the post-LF "
+                "``q`` is required to test PV gens against their Q limits)."
             )
 
-        issues = classified[classified["status"].isin(["outside", "edge"])]
+        issues = classified[
+            classified["status"].isin(
+                ["outside", "saturated", "edge", "near_saturation"]
+            )
+        ]
         if issues.empty:
             st.success("All targets are inside their capability curves.")
             return
@@ -418,29 +461,34 @@ def _render_target_containment_summary(classified, gens_df):
                 .drop(columns="_zero_p")
             )
 
-        pv_out = _subset("outside", "PV")
         pq_out = _subset("outside", "PQ")
-        pv_edge = _subset("edge", "PV")
+        pv_sat = _subset("saturated", "PV")
         pq_edge = _subset("edge", "PQ")
+        pv_near = _subset("near_saturation", "PV")
 
-        # Outside subsets first — actionable, render expanded.
-        if not pv_out.empty:
-            st.markdown(
-                f"**PV outside — {len(pv_out)}** "
-                "(load flow will switch these to PQ)"
-            )
-            st.dataframe(pv_out[cols], use_container_width=True)
+        # Action-required subsets first, rendered inline & expanded.
         if not pq_out.empty:
-            st.markdown(f"**PQ outside — {len(pq_out)}**")
+            st.markdown(
+                f"**PQ outside — {len(pq_out)}** "
+                "(target_q infeasible at this target_p)"
+            )
             st.dataframe(pq_out[cols], use_container_width=True)
+        if not pv_sat.empty:
+            st.markdown(
+                f"**PV saturated — {len(pv_sat)}** "
+                "(load flow clamped Q and switched to PQ)"
+            )
+            st.dataframe(pv_sat[cols], use_container_width=True)
 
-        # Edge subsets — secondary, collapsed by default.
-        if not pv_edge.empty:
-            with st.expander(f"PV on edge — {len(pv_edge)}", expanded=False):
-                st.dataframe(pv_edge[cols], use_container_width=True)
+        # Warning subsets — secondary, collapsed by default.
         if not pq_edge.empty:
             with st.expander(f"PQ on edge — {len(pq_edge)}", expanded=False):
                 st.dataframe(pq_edge[cols], use_container_width=True)
+        if not pv_near.empty:
+            with st.expander(
+                f"PV near saturation — {len(pv_near)}", expanded=False
+            ):
+                st.dataframe(pv_near[cols], use_container_width=True)
 
 
 def render_reactive_curves(network, selected_vl):
