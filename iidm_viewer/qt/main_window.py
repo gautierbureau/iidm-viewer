@@ -83,6 +83,11 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.sld_tab, "Single Line Diagram")
         self.tabs.addTab(self.data_tab, "Data Explorer Components")
 
+        # The Data Explorer reports cell + bulk edits to the AppState's
+        # ChangeLog so the panel below shows a unified history that
+        # survives tab switches and component changes.
+        self.data_tab.set_change_log(self.state.change_log)
+
         self.sidebar = _Sidebar(self._on_load_clicked)
 
         central = QWidget()

@@ -173,6 +173,33 @@ def test_dataframe_to_aggrid_options_marks_editable_columns():
     assert "editable" not in by_field["id"]
 
 
+def test_app_state_owns_change_log():
+    from iidm_viewer.web.state import AppState
+    from iidm_viewer.change_log import ChangeLog
+
+    state = AppState()
+    assert isinstance(state.change_log, ChangeLog)
+    state.change_log.record("Generators", "G1", "target_p", 1.0, 2.0)
+    assert len(state.change_log) == 1
+
+
+def test_change_log_cleared_on_new_network_load():
+    import os
+    from iidm_viewer.web.state import AppState
+
+    state = AppState()
+    state.change_log.record("Generators", "G1", "target_p", 1.0, 2.0)
+    assert len(state.change_log) == 1
+
+    xiidm = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir, "test_ieee14.xiidm")
+    )
+    state.load_network_from_path(xiidm)
+    # Loading a fresh network wipes the previous log so entries don't
+    # cross-contaminate.
+    assert len(state.change_log) == 0
+
+
 def test_dataframe_to_aggrid_options_enables_multi_row_selection():
     """Bulk edit needs ag-Grid ``rowSelection: 'multiple'`` and the
     ``id`` column's checkbox affordance — guard both."""

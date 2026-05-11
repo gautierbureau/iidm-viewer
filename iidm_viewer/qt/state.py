@@ -14,6 +14,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, Signal
 
 from iidm_viewer import network_loader
+from iidm_viewer.change_log import ChangeLog
 from iidm_viewer.powsybl_worker import NetworkProxy
 
 
@@ -27,6 +28,9 @@ class AppState(QObject):
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
         self._selected_vl: Optional[str] = None
+        # One ChangeLog per process. Reset on every network reload so
+        # entries don't leak between unrelated networks.
+        self.change_log = ChangeLog()
 
     @property
     def network(self) -> Optional[NetworkProxy]:
@@ -46,6 +50,7 @@ class AppState(QObject):
         default_vl = network_loader.pick_default_vl(network)
         self._network = network
         self._selected_vl = None  # cleared first so set_selected_vl emits below
+        self.change_log.clear()
         self.network_changed.emit(network)
         if default_vl:
             self.set_selected_vl(default_vl)

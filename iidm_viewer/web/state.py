@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from iidm_viewer import network_loader
+from iidm_viewer.change_log import ChangeLog
 from iidm_viewer.powsybl_worker import NetworkProxy
 
 
@@ -27,6 +28,8 @@ class AppState:
         self._selected_vl: Optional[str] = None
         self._network_listeners: list[_NetworkListener] = []
         self._vl_listeners: list[_VlListener] = []
+        # One ChangeLog per process. Reset on every network reload.
+        self.change_log = ChangeLog()
 
     # ------------------------------------------------------------------
     # Accessors
@@ -62,6 +65,7 @@ class AppState:
         default_vl = network_loader.pick_default_vl(network)
         self._network = network
         self._selected_vl = None
+        self.change_log.clear()
         for listener in list(self._network_listeners):
             listener(network)
         if default_vl:
