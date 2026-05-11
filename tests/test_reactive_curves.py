@@ -61,18 +61,20 @@ def _make_curves_df(rows):
     return df
 
 
-def test_classify_minmax_inside_outside_edge():
+def test_classify_pq_inside_outside_edge():
+    # All PQ — the setpoint (target_p, target_q) is what the LF honours,
+    # so classification uses that point directly.
     gens = _make_gens_df([
         {"id": "G_in",   "target_p": 50.0, "target_q":   0.0,
          "min_p": 0.0, "max_p": 100.0,
          "min_q": -50.0, "max_q": 50.0,
          "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0,
-         "voltage_regulator_on": True},
+         "voltage_regulator_on": False},
         {"id": "G_out_q", "target_p": 50.0, "target_q":  60.0,
          "min_p": 0.0, "max_p": 100.0,
          "min_q": -50.0, "max_q": 50.0,
          "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0,
-         "voltage_regulator_on": True},
+         "voltage_regulator_on": False},
         {"id": "G_out_p", "target_p": 150.0, "target_q":  0.0,
          "min_p": 0.0, "max_p": 100.0,
          "min_q": -50.0, "max_q": 50.0,
@@ -87,34 +89,69 @@ def test_classify_minmax_inside_outside_edge():
     out = classify_targets(gens, pd.DataFrame())
 
     assert out.loc["G_in", "status"] == "inside"
-    # G_in sits at the center of [0,100]×[-50,50]: closest edge is 50 away.
     assert out.loc["G_in", "distance"] == -50.0
     assert out.loc["G_in", "violation"] == 0.0
     assert out.loc["G_out_q", "status"] == "outside"
-    # G_out_q is 10 MVar above the top edge.
     assert out.loc["G_out_q", "distance"] == 10.0
     assert out.loc["G_out_q", "violation"] == 10.0
     assert out.loc["G_out_p", "status"] == "outside"
-    # G_out_p sits 50 MW past the right edge (which spans the full Q range
-    # at that P, so the closest point is the perpendicular foot at (100, 0)).
     assert out.loc["G_out_p", "distance"] == 50.0
     assert out.loc["G_out_p", "violation"] == 50.0
     assert out.loc["G_edge", "status"] == "edge"
     assert abs(out.loc["G_edge", "distance"]) < 1e-9
     assert out.loc["G_edge", "violation"] == 0.0
 
-    assert out.loc["G_in", "regulation"] == "PV"
-    assert out.loc["G_out_q", "regulation"] == "PV"
-    assert out.loc["G_out_p", "regulation"] == "PQ"
-    assert out.loc["G_edge", "regulation"] == "PQ"
+    for gen_id in ("G_in", "G_out_q", "G_out_p", "G_edge"):
+        assert out.loc[gen_id, "regulation"] == "PQ"
+    # lf_action is the LF ground-truth PV→PQ switch flag; no PV here.
+    assert (out["lf_action"] == "").all()
 
-    # lf_action flags only the PV-outside subset (those the LF will switch).
-    assert out.loc["G_in", "lf_action"] == ""
-    assert out.loc["G_out_q", "lf_action"] == "PV→PQ"
-    assert out.loc["G_out_p", "lf_action"] == ""  # outside but already PQ
-    assert out.loc["G_edge", "lf_action"] == ""   # only edge, not outside
-    switchers = out.index[out["lf_action"] == "PV→PQ"].tolist()
-    assert switchers == ["G_out_q"]
+
+def test_classify_pv_uses_operating_q_from_lf():
+    # PV gens: classify against (target_p, -q_lf) rather than target_q.
+    # target_q on these rows is intentionally garbage to ensure it is ignored.
+    gens = _make_gens_df([
+        {"id": "G_pv_in", "target_p": 50.0, "target_q": 999.0,
+         "q": -10.0,
+         "min_p": 0.0, "max_p": 100.0,
+         "min_q": -50.0, "max_q": 50.0,
+         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0,
+         "voltage_regulator_on": True},
+        {"id": "G_pv_sat", "target_p": 50.0, "target_q": 999.0,
+         "q": -50.0,  # -q = 50 = max_q → LF clamped at the limit
+         "min_p": 0.0, "max_p": 100.0,
+         "min_q": -50.0, "max_q": 50.0,
+         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0,
+         "voltage_regulator_on": True},
+        {"id": "G_pv_near", "target_p": 50.0, "target_q": 999.0,
+         "q": -48.0,  # -q = 48, within 5 MVar of max_q=50
+         "min_p": 0.0, "max_p": 100.0,
+         "min_q": -50.0, "max_q": 50.0,
+         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0,
+         "voltage_regulator_on": True},
+        {"id": "G_pv_no_lf", "target_p": 50.0, "target_q": 999.0,
+         "q": float("nan"),  # no LF run → can't classify a PV gen
+         "min_p": 0.0, "max_p": 100.0,
+         "min_q": -50.0, "max_q": 50.0,
+         "min_q_at_target_p": -50.0, "max_q_at_target_p": 50.0,
+         "voltage_regulator_on": True},
+    ])
+    out = classify_targets(gens, pd.DataFrame())
+
+    assert out.loc["G_pv_in", "status"] == "inside"
+    assert out.loc["G_pv_sat", "status"] == "saturated"
+    assert out.loc["G_pv_near", "status"] == "near_saturation"
+    assert out.loc["G_pv_no_lf", "status"] == "needs_lf"
+
+    for gen_id in ("G_pv_in", "G_pv_sat", "G_pv_near", "G_pv_no_lf"):
+        assert out.loc[gen_id, "regulation"] == "PV"
+
+    # lf_action is the ground-truth list of PV gens the LF switched to PQ.
+    assert out.loc["G_pv_sat", "lf_action"] == "PV→PQ"
+    assert out.loc["G_pv_in", "lf_action"] == ""
+    assert out.loc["G_pv_near", "lf_action"] == ""
+    assert out.loc["G_pv_no_lf", "lf_action"] == ""
+    assert out.index[out["lf_action"] == "PV→PQ"].tolist() == ["G_pv_sat"]
 
 
 def test_classify_regulation_unknown_when_no_target_q_and_off():
