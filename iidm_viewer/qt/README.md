@@ -1,12 +1,15 @@
 # `iidm_viewer.qt` — PySide6 desktop preview
 
 A second front-end that explores moving away from Streamlit's
-rerun-the-whole-script model. Ships three tabs — **Network Map**,
-**Network Area Diagram** and **Single Line Diagram** — to demonstrate
-two killer interactions:
+rerun-the-whole-script model. Ships four tabs — **Network Map**,
+**Network Area Diagram**, **Single Line Diagram** and
+**Data Explorer Components** — covering both the diagram interactions
+and a first read-only DataFrame viewer:
 
 * clicking a substation on the map navigates to its SLD;
-* clicking a node on the NAD navigates to its SLD.
+* clicking a node on the NAD navigates to its SLD;
+* the data tab renders any pypowsybl component DataFrame in a native
+  `QTableView` (no filtering / editing yet — that's next iteration).
 
 Both jumps activate the SLD tab and render the target VL instantly,
 with no script rerun and no websocket round-trip.

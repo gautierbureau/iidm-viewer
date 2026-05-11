@@ -23,6 +23,8 @@ os.environ.setdefault(
     "--disable-gpu --no-sandbox --disable-dev-shm-usage",
 )
 
+import pandas as pd  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from iidm_viewer.qt.main_window import MainWindow  # noqa: E402
@@ -128,6 +130,67 @@ def test_nad_depth_change_invalidates_for_new_key(qapp, loaded_window):
 
     assert (vl, 2) in window.nad_tab._cache
     assert (vl, 1) in window.nad_tab._cache  # old entry preserved
+
+
+def test_data_explorer_renders_voltage_levels_on_load(qapp, loaded_window):
+    """After a network is loaded, the Data Explorer tab shows the
+    default component (Voltage Levels) populated with IEEE14's 14 rows.
+    """
+    model = loaded_window.data_tab._model
+    # Combo defaults to the first entry, "Substations". We seed the
+    # explorer via set_network -> _refresh(<current text>) so the model
+    # is populated for whichever component is selected at load time.
+    assert loaded_window.data_tab._combo.currentText() == "Substations"
+    df = model.dataframe()
+    assert df.shape[0] > 0
+    assert df.shape[1] > 0
+
+
+def test_data_explorer_switches_component(qapp, loaded_window):
+    """Selecting a different component refreshes the table."""
+    explorer = loaded_window.data_tab
+
+    explorer._combo.setCurrentText("Voltage Levels")
+    qapp.processEvents()
+    vl_df = explorer._model.dataframe()
+    assert vl_df.shape[0] == 14  # IEEE14
+    assert "nominal_v" in vl_df.columns
+
+    explorer._combo.setCurrentText("Generators")
+    qapp.processEvents()
+    gen_df = explorer._model.dataframe()
+    assert gen_df.shape[0] > 0
+    # Different component → different schema
+    assert set(vl_df.columns) != set(gen_df.columns)
+
+
+def test_data_explorer_handles_empty_component(qapp, loaded_window):
+    """A component with no rows in this network must not crash the model."""
+    explorer = loaded_window.data_tab
+    explorer._combo.setCurrentText("HVDC Lines")  # IEEE14 has none
+    qapp.processEvents()
+    df = explorer._model.dataframe()
+    assert df.shape[0] == 0
+    # Model's rowCount/columnCount must agree with the DataFrame.
+    assert explorer._model.rowCount() == 0
+    assert "empty" in explorer._summary.text().lower()
+
+
+def test_pandas_table_model_basic_protocol():
+    """Lightweight sanity check on the model itself — no Qt event loop
+    needed once a QApplication exists (the loaded_window fixture has
+    already created one)."""
+    from iidm_viewer.qt.data_explorer_tab import PandasTableModel
+
+    df = pd.DataFrame({"a": [1, 2, float("nan")], "b": ["x", "y", "z"]})
+    m = PandasTableModel(df)
+    assert m.rowCount() == 3
+    assert m.columnCount() == 2
+    # NaN -> em-dash
+    idx = m.index(2, 0)
+    assert m.data(idx, Qt.DisplayRole) == "—"
+    # Column header
+    assert m.headerData(0, Qt.Horizontal, Qt.DisplayRole) == "a"
 
 
 def test_app_state_emits_signal_only_on_change(qapp):
