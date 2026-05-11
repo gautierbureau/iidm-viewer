@@ -376,40 +376,38 @@ def update_components(network, component: str, changes_df):
 def add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: pd.DataFrame):
     """Accumulate successfully-applied cell changes into a per-component session-state log.
 
-    Writes to ``st.session_state[f"_change_log_{method_name}"]``.  Re-edits
-    collapse into the existing entry; if the value returns to the original the
-    entry is removed so the log only shows net differences.
+    Writes to ``st.session_state[f"_change_log_{method_name}"]``.  The
+    collapse + net-diff invariants are delegated to
+    :func:`iidm_viewer.change_log.merge_entry` so the PySide6 and
+    NiceGUI prototypes' ``ChangeLog`` class apply the same rules; the
+    session-state list layout (no ``component`` key — Streamlit looks
+    it up by method-name index) stays unchanged.
     """
+    from iidm_viewer.change_log import merge_entry
+
     key = f"_change_log_{method_name}"
     log: list[dict] = list(st.session_state.get(key, []))
+    # Streamlit's existing on-disk entries don't carry a ``component``
+    # key (the method_name is the implicit grouping). Use the empty
+    # string here; ``merge_entry`` will only compare it against the
+    # same default and the entries stay shape-compatible.
+    component = ""
 
     for element_id in changes_df.index:
         for col in changes_df.columns:
             new_val = changes_df.at[element_id, col]
-            try:
-                if pd.isna(new_val):
-                    continue
-            except (TypeError, ValueError):
-                pass
-            existing = next(
-                (e for e in log if e["element_id"] == element_id and e["property"] == col),
-                None,
+            before_val = (
+                original_df.at[element_id, col]
+                if col in original_df.columns
+                else None
             )
-            if existing is None:
-                before_val = original_df.at[element_id, col] if col in original_df.columns else None
-                log.append({
-                    "element_id": element_id,
-                    "property": col,
-                    "before": before_val,
-                    "after": new_val,
-                })
-            else:
-                existing["after"] = new_val
-                try:
-                    if existing["before"] == existing["after"]:
-                        log.remove(existing)
-                except Exception:
-                    pass
+            merge_entry(log, component, element_id, col, before_val, new_val)
+
+    # Drop the ``component`` key on freshly-appended entries so the
+    # on-disk shape matches what the existing render code expects
+    # (``element_id``, ``property``, ``before``, ``after`` only).
+    for entry in log:
+        entry.pop("component", None)
 
     st.session_state[key] = log
 

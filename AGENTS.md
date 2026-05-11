@@ -132,6 +132,10 @@ The Streamlit app (`iidm-viewer`), the PySide6 prototype (`iidm-viewer-pyside`,
 * `network_loader.py` — `load_from_path`, `load_from_bytes`,
   `create_empty`, `pick_default_vl`, `get_import_extensions`,
   `get_export_formats`. The worker-routed network-IO surface.
+* `change_log.py` — `merge_entry`, `revert_via_apply`, `ChangeLog`
+  class. Collapse + net-diff invariants for the edit history;
+  Streamlit's `state.add_to_change_log` and the prototype Change Log
+  panels both delegate here.
 
 None of those modules import streamlit, PySide6 or NiceGUI. When
 adding behaviour that's plausibly host-agnostic (any pypowsybl

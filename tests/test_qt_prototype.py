@@ -396,6 +396,103 @@ def test_bulk_panel_visibility_follows_editable_component(qapp, loaded_window):
     assert not explorer._bulk_apply.isEnabled()
 
 
+def test_data_explorer_records_cell_edit_in_change_log(qapp, loaded_window):
+    """A single-cell edit through the model lands one entry in
+    ``AppState.change_log`` with the legacy dict shape.
+    """
+    explorer = loaded_window.data_tab
+    explorer._combo.setCurrentText("Generators")
+    qapp.processEvents()
+    assert len(loaded_window.state.change_log) == 0
+
+    df = explorer._model.dataframe()
+    gen_id = str(df["id"].iloc[0])
+    col = list(df.columns).index("target_p")
+    old_value = df["target_p"].iloc[0]
+    new_value = old_value + 1.0
+
+    src_idx = explorer._model.index(0, col)
+    proxy_idx = explorer._proxy.mapFromSource(src_idx)
+    explorer._proxy.setData(proxy_idx, new_value, Qt.EditRole)
+    qapp.processEvents()
+
+    entries = loaded_window.state.change_log.entries()
+    assert len(entries) == 1
+    assert entries[0]["component"] == "Generators"
+    assert entries[0]["element_id"] == gen_id
+    assert entries[0]["property"] == "target_p"
+    assert entries[0]["before"] == pytest.approx(old_value)
+    assert entries[0]["after"] == pytest.approx(new_value)
+
+    # Revert via the panel API and confirm pypowsybl restored.
+    explorer._change_log_panel._log.revert(loaded_window.state.network, entries[0])
+    qapp.processEvents()
+    assert len(loaded_window.state.change_log) == 0
+
+
+def test_data_explorer_bulk_edit_records_n_entries(qapp, loaded_window):
+    """``apply_bulk_edit`` populates the change log with one entry per
+    affected element. Then ``revert_all`` puts everything back.
+    """
+    explorer = loaded_window.data_tab
+    explorer._combo.setCurrentText("Generators")
+    qapp.processEvents()
+
+    df = explorer._model.dataframe()
+    assert df.shape[0] >= 3
+    prev_targets = list(df["target_p"].iloc[:3])
+
+    # Select first 3 proxy rows and apply bulk.
+    sel = explorer._table.selectionModel()
+    sel.clearSelection()
+    from PySide6.QtCore import QItemSelection, QItemSelectionModel
+    for r in range(3):
+        idx_top = explorer._proxy.index(r, 0)
+        idx_right = explorer._proxy.index(r, explorer._proxy.columnCount() - 1)
+        sel.select(
+            QItemSelection(idx_top, idx_right),
+            QItemSelectionModel.Select | QItemSelectionModel.Rows,
+        )
+    qapp.processEvents()
+    explorer._bulk_attr.setCurrentText("target_p")
+    explorer._bulk_value.setText("123.0")
+    explorer._on_bulk_apply()
+    qapp.processEvents()
+
+    assert len(loaded_window.state.change_log) == 3
+
+    # Revert all -> log empties, pypowsybl returns to original values.
+    reverted, skipped = loaded_window.state.change_log.revert_all(loaded_window.state.network)
+    qapp.processEvents()
+    assert reverted == 3
+    assert skipped == []
+    assert len(loaded_window.state.change_log) == 0
+
+    # Network state restored to original (within float tolerance).
+    from iidm_viewer.component_registry import get_dataframe
+    refreshed = get_dataframe(loaded_window.state.network, "Generators")
+    for i, expected in enumerate(prev_targets):
+        assert refreshed["target_p"].iloc[i] == pytest.approx(expected)
+
+
+def test_change_log_panel_repaints_on_record(qapp, loaded_window):
+    """The panel's title and table reflect log mutations in real time
+    via the on_changed bus.
+    """
+    panel = loaded_window.data_tab._change_log_panel
+    log = loaded_window.state.change_log
+    assert "Change Log (0)" in panel._title.text()
+
+    log.record("Generators", "GFAKE", "target_p", 1.0, 2.0)
+    qapp.processEvents()
+    assert "Change Log (1)" in panel._title.text()
+    assert panel._model.rowCount() == 1
+
+    log.clear()
+    qapp.processEvents()
+    assert "Change Log (0)" in panel._title.text()
+
+
 def test_data_explorer_rejects_non_editable_attribute(qapp, loaded_window):
     """setData on a non-editable column must return False and not
     issue an edit_requested signal."""

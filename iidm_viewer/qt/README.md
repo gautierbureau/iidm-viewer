@@ -140,7 +140,14 @@ NiceGUI hosts:
   `qt.map_tab`.
 * `iidm_viewer.component_registry` — `COMPONENT_TYPES`,
   `EDITABLE_COMPONENTS`, `get_dataframe`, `apply_cell_edit`,
-  `TOPOLOGY_AFFECTING_ATTRIBUTES`. Imported by `qt.data_explorer_tab`.
+  `apply_bulk_edit`, `TOPOLOGY_AFFECTING_ATTRIBUTES`. Imported by
+  `qt.data_explorer_tab`.
+* `iidm_viewer.change_log` — `merge_entry`, `revert_via_apply`,
+  `ChangeLog` class. The Streamlit `state.add_to_change_log` uses
+  `merge_entry` for its collapse rules; the PySide6 + NiceGUI
+  prototypes hold a `ChangeLog` instance in their `AppState`.
+  The Qt `change_log_panel.ChangeLogPanel` is the QTableView +
+  revert UI over that instance.
 
 When adding behaviour that's not Qt-specific, put it in those shared
 modules so the NiceGUI port (and the Streamlit app) gets it for free.

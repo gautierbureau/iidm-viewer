@@ -430,7 +430,9 @@ def _build_data_explorer():
         if not is_editable(component, col_id):
             return
         try:
-            apply_cell_edit(_state.network, component, str(element_id), col_id, new_value)
+            prev = apply_cell_edit(
+                _state.network, component, str(element_id), col_id, new_value,
+            )
         except Exception as exc:
             ui.notify(
                 f"Edit rejected — {component}/{element_id}/{col_id}: {exc}",
@@ -439,6 +441,7 @@ def _build_data_explorer():
             # Refresh to revert the failed edit (cheap; 1 worker call).
             refresh()
             return
+        _state.change_log.record(component, str(element_id), col_id, prev, new_value)
         ui.notify(
             f"{component}/{element_id}/{col_id}: {old_value} → {new_value}",
             type="positive",
@@ -475,6 +478,7 @@ def _build_data_explorer():
                 type="negative",
             )
             return
+        _state.change_log.record_bulk(component, attribute, prev_map, new_value)
         ui.notify(
             f"{component}: {attribute} = {new_value} applied to {len(ids)} rows",
             type="positive",
@@ -496,7 +500,148 @@ def _build_data_explorer():
     bulk_button.on_click(on_bulk_apply)
     grid.on("cellValueChanged", on_cell_changed)
     select.on_value_change(lambda _e: refresh())
+
+    # --- Change log panel -------------------------------------------------
+    _build_change_log_panel(refresh)
+
     return refresh
+
+
+def _format_log_value(value) -> str:
+    import math
+    if value is None:
+        return "—"
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "—"
+        return format(value, ".4g")
+    return str(value)
+
+
+def _build_change_log_panel(on_revert_refresh) -> None:
+    """Always-visible Change Log section under the data explorer.
+
+    ``on_revert_refresh`` is the data-grid refresh closure; the panel
+    invokes it after any revert so the grid reflects the live network
+    state. The panel listens on ``_state.change_log`` so cell + bulk
+    edits made elsewhere repaint here without manual wiring.
+    """
+    log = _state.change_log
+
+    with ui.row().classes("q-pa-sm items-center w-full"):
+        title = ui.label("Change Log (0)").classes("text-subtitle1")
+        ui.space()
+        revert_selected_btn = ui.button("Revert selected")
+        revert_all_btn = ui.button("Revert all")
+        clear_btn = ui.button("Clear").props("flat")
+
+    log_grid = ui.aggrid({
+        "columnDefs": [
+            {"headerName": "Component", "field": "component", "sortable": True, "filter": True, "floatingFilter": True},
+            {"headerName": "Element", "field": "element_id", "sortable": True, "filter": True, "floatingFilter": True},
+            {"headerName": "Property", "field": "property", "sortable": True, "filter": True, "floatingFilter": True},
+            {"headerName": "Before", "field": "before"},
+            {"headerName": "After", "field": "after"},
+        ],
+        "rowData": [],
+        "rowSelection": "multiple",
+        "defaultColDef": {"resizable": True},
+    }).classes("w-full").style("height: 180px")
+
+    def repaint() -> None:
+        rows = [
+            {
+                "component": e.get("component", ""),
+                "element_id": e.get("element_id", ""),
+                "property": e.get("property", ""),
+                "before": _format_log_value(e.get("before")),
+                "after": _format_log_value(e.get("after")),
+                # Hidden — used by revert handlers to recover the
+                # original entry.
+                "_idx": i,
+            }
+            for i, e in enumerate(log.entries())
+        ]
+        log_grid.options["rowData"] = rows
+        log_grid.update()
+        n = len(log)
+        title.set_text(f"Change Log ({n})")
+        enabled = n > 0 and _state.network is not None
+        revert_all_btn.set_enabled(enabled)
+        revert_selected_btn.set_enabled(enabled)
+        clear_btn.set_enabled(n > 0)
+
+    log.on_changed(repaint)
+
+    async def revert_selected() -> None:
+        if _state.network is None:
+            return
+        selected_rows = await log_grid.get_selected_rows()
+        # ``_idx`` is the row's position in ``log.entries()`` at repaint
+        # time; mapping back to live entries is the only robust path.
+        live = log.entries()
+        touched: list[tuple[str, str]] = []
+        skipped: list[str] = []
+        for sr in selected_rows or []:
+            idx = sr.get("_idx")
+            if idx is None or idx >= len(live):
+                continue
+            entry = live[idx]
+            try:
+                log.revert(_state.network, entry)
+            except Exception as exc:
+                skipped.append(
+                    f"{entry.get('component', '')}/{entry.get('element_id', '')}/"
+                    f"{entry.get('property', '')}: {exc}"
+                )
+                continue
+            touched.append((str(entry.get("component", "")), str(entry.get("property", ""))))
+        if skipped:
+            ui.notify("Some entries could not be reverted: " + "; ".join(skipped[:3]),
+                      type="warning")
+        if touched:
+            _after_revert(touched, on_revert_refresh)
+
+    async def revert_all_clicked() -> None:
+        if _state.network is None or len(log) == 0:
+            return
+        targets = [(str(e.get("component", "")), str(e.get("property", ""))) for e in log.entries()]
+        reverted, skipped = log.revert_all(_state.network)
+        if skipped:
+            ui.notify(
+                f"Reverted {reverted}; {len(skipped)} skipped (no original value)",
+                type="warning",
+            )
+        elif reverted:
+            ui.notify(f"Reverted {reverted} entries", type="positive")
+        if reverted:
+            _after_revert(targets[:reverted], on_revert_refresh)
+
+    def clear_clicked() -> None:
+        if len(log) == 0:
+            return
+        log.clear()
+        ui.notify("Change log cleared (network edits stay applied).", type="info")
+
+    revert_selected_btn.on_click(revert_selected)
+    revert_all_btn.on_click(revert_all_clicked)
+    clear_btn.on_click(clear_clicked)
+
+    repaint()
+
+
+def _after_revert(touched, refresh_data_grid) -> None:
+    """Post-revert: invalidate diagram caches for topology-affecting
+    attributes and refresh the data grid so the current view reflects
+    the reverted network state.
+    """
+    if any(attr in TOPOLOGY_AFFECTING_ATTRIBUTES for _, attr in touched):
+        _nad_cache.clear()
+        _sld_cache.clear()
+        if _state.selected_vl:
+            _push_sld(_state.selected_vl)
+            _push_nad(_state.selected_vl, _nad_depth)
+    refresh_data_grid()
 
 
 # ---------------------------------------------------------------------------

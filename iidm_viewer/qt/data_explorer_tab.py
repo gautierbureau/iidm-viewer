@@ -40,6 +40,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from iidm_viewer.change_log import ChangeLog
+from iidm_viewer.qt.change_log_panel import ChangeLogPanel
 from iidm_viewer.component_registry import (
     COMPONENT_TYPES,
     TOPOLOGY_AFFECTING_ATTRIBUTES,
@@ -217,6 +219,7 @@ class DataExplorerTab(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
+        self._change_log: Optional[ChangeLog] = None
 
         self._combo = QComboBox()
         for label in COMPONENT_TYPES:
@@ -281,6 +284,9 @@ class DataExplorerTab(QWidget):
         bulk_layout.addWidget(self._bulk_apply)
         self._set_bulk_enabled(False)
 
+        self._change_log_panel = ChangeLogPanel()
+        self._change_log_panel.reverted.connect(self._on_log_reverted)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -288,17 +294,24 @@ class DataExplorerTab(QWidget):
         layout.addWidget(self._summary)
         layout.addWidget(self._table, 1)
         layout.addWidget(self._bulk_panel)
+        layout.addWidget(self._change_log_panel)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
+        self._change_log_panel.set_network(network)
         if network is None:
             self._model.set_dataframe(pd.DataFrame(), editable_cols=[])
             self._summary.setText("No network loaded.")
             return
         self._refresh(self._combo.currentText())
+
+    def set_change_log(self, change_log: ChangeLog) -> None:
+        """Bind the host's ChangeLog instance so cell + bulk edits get recorded."""
+        self._change_log = change_log
+        self._change_log_panel.set_change_log(change_log)
 
     # ------------------------------------------------------------------
     # Internals
@@ -357,6 +370,22 @@ class DataExplorerTab(QWidget):
         # The set of editable attributes is component-specific; refresh
         # the bulk panel so its dropdown reflects the current frame.
         self._refresh_bulk_attrs()
+
+    def _on_log_reverted(self, touched) -> None:
+        """When the change-log panel reverts entries, refresh the grid
+        if the currently-displayed component was touched. Also signal
+        the main window so it can clear NAD/SLD caches when needed.
+        """
+        if not touched or self._network is None:
+            return
+        current = self._combo.currentText()
+        if any(component == current for component, _ in touched):
+            self._refresh(current)
+        # Surface each touched (component, attribute) up via the
+        # bulk_edit_applied signal — MainWindow already invalidates
+        # diagram caches for topology-affecting attributes on that path.
+        for component, attribute in touched:
+            self.bulk_edit_applied.emit(component, [], attribute, None, {})
 
     def _set_bulk_enabled(self, enabled: bool) -> None:
         for w in (self._bulk_attr, self._bulk_value, self._bulk_apply):
@@ -440,6 +469,10 @@ class DataExplorerTab(QWidget):
         except Exception:
             display_value = new_value
         self._bulk_value.clear()
+        if self._change_log is not None:
+            self._change_log.record_bulk(
+                component, attribute, prev_map, display_value,
+            )
         self.bulk_edit_applied.emit(component, ids, attribute, display_value, prev_map)
         self._update_bulk_state()
 
@@ -476,4 +509,8 @@ class DataExplorerTab(QWidget):
         except Exception:
             display_value = new_value
         self._model.commit_edit(row_pos, col_pos, display_value)
+        if self._change_log is not None:
+            self._change_log.record(
+                component, element_id, attribute, prev, display_value,
+            )
         self.edit_applied.emit(component, element_id, attribute, display_value, prev)

@@ -172,8 +172,15 @@ PySide6 hosts:
   `_generate_nad`, `_extract_map_data` aliases.
 * `iidm_viewer.component_registry` — `COMPONENT_TYPES`,
   `EDITABLE_COMPONENTS`, `get_dataframe`, `apply_cell_edit`,
-  `TOPOLOGY_AFFECTING_ATTRIBUTES`. Imported by `web.app` for the
-  Data Explorer tab.
+  `apply_bulk_edit`, `TOPOLOGY_AFFECTING_ATTRIBUTES`. Imported by
+  `web.app` for the Data Explorer tab.
+* `iidm_viewer.change_log` — `merge_entry`, `revert_via_apply`,
+  `ChangeLog` class. The Streamlit `state.add_to_change_log`
+  uses `merge_entry` for its collapse rules; this prototype holds
+  a `ChangeLog` instance in `AppState.change_log`. The
+  data-explorer panel below the bulk row is an `ui.aggrid` over
+  that instance with Revert selected / Revert all / Clear
+  buttons.
 
 When adding behaviour that's not NiceGUI-specific, put it in those
 shared modules so the PySide6 port (and the Streamlit app) gets it
