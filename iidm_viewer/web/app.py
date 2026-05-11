@@ -85,65 +85,24 @@ _nad_depth: int = 1
 
 
 # ---------------------------------------------------------------------------
-# pypowsybl helpers (all worker-routed)
+# pypowsybl helpers — routed through the shared
+# ``iidm_viewer.diagram_services`` so the Streamlit + Qt + NiceGUI
+# front-ends share one code path.
 # ---------------------------------------------------------------------------
-def _extract_map_data(network: NetworkProxy):
-    raw = object.__getattribute__(network, "_obj")
-
-    def _extract():
-        from pypowsybl_jupyter.networkmapwidget import NetworkMapWidget
-
-        class _Extractor(NetworkMapWidget):
-            def __init__(self):  # skip widget init
-                pass
-
-            def __del__(self):
-                pass
-
-        (lmap, lpos, smap, spos, _vl_subs, _sub_vls, _subs_ids, tlmap, hlmap) = (
-            _Extractor().extract_map_data(raw, display_lines=True, use_line_geodata=False)
-        )
-        if not spos:
-            return None
-        return smap, spos, lmap + tlmap + hlmap, lpos
-
-    return run(_extract)
+from iidm_viewer.diagram_services import (
+    extract_map_data as _extract_map_data,
+    generate_nad as _generate_nad,
+    generate_sld as _generate_sld,
+)
 
 
-def _generate_sld(network: NetworkProxy, vl_id: str):
-    raw = object.__getattribute__(network, "_obj")
-
-    def _do():
-        from pypowsybl.network import SldParameters
-        params = SldParameters(use_name=True, tooltip_enabled=True)
-        sld = raw.get_single_line_diagram(vl_id, parameters=params)
-        return sld.svg, sld.metadata
-
-    return run(_do)
-
-
-def _generate_nad(network: NetworkProxy, vl_id: str, depth: int):
-    raw = object.__getattribute__(network, "_obj")
-
-    def _do():
-        from pypowsybl.network import NadParameters
-        params = NadParameters(edge_name_displayed=True, power_value_precision=1)
-        nad = raw.get_network_area_diagram(
-            voltage_level_ids=[vl_id],
-            depth=depth,
-            nad_parameters=params,
-        )
-        return nad.svg, nad.metadata
-
-    return run(_do)
-
-
-# ``_fetch_dataframe`` used to live here; it's been promoted to
-# ``iidm_viewer.component_registry.get_dataframe``. Keep a thin
-# shim — the old name takes a *getter method string* rather than a
-# component label, so existing tests that probe the worker path
-# don't have to change.
 def _fetch_dataframe(network: NetworkProxy, getter_name: str):
+    """Worker-routed fetch by *pypowsybl method name*.
+
+    A thin shim against the registry's :func:`get_dataframe`, which
+    takes a *component label*. Kept so existing tests that probe the
+    lower-level entry don't have to change.
+    """
     import pandas as pd
 
     raw = object.__getattribute__(network, "_obj")

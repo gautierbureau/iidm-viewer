@@ -2,14 +2,17 @@
 
 Plain Python observer pattern — no NiceGUI-specific types here so the
 state can be exercised in unit tests without booting a server. The
-pypowsybl worker (``iidm_viewer.powsybl_worker``) is reused as-is so
-the GraalVM thread-affinity rule from AGENTS.md §1 holds.
+actual network load + default-VL pick live in
+:mod:`iidm_viewer.network_loader`, shared with the Streamlit and
+PySide6 front-ends. The GraalVM thread-affinity rule from AGENTS.md
+§1 is preserved.
 """
 from __future__ import annotations
 
 from typing import Callable, Optional
 
-from iidm_viewer.powsybl_worker import NetworkProxy, run
+from iidm_viewer import network_loader
+from iidm_viewer.powsybl_worker import NetworkProxy
 
 
 _NetworkListener = Callable[[Optional[NetworkProxy]], None]
@@ -51,23 +54,12 @@ class AppState:
     def load_network_from_path(self, path: str) -> NetworkProxy:
         """Load a network and auto-select the highest-nominal-V VL.
 
-        Mirrors :class:`iidm_viewer.qt.state.AppState.load_network_from_path`
-        so both prototypes behave the same on open.
+        Delegates to :mod:`iidm_viewer.network_loader` for both the
+        load itself and the "highest nominal V" default-VL pick so
+        the Streamlit, PySide6 and NiceGUI hosts share one code path.
         """
-        def _load_and_default():
-            import pypowsybl.network as pn
-            net = pn.load(path)
-            vls = net.get_voltage_levels()
-            default = None
-            if vls is not None and not vls.empty:
-                if "nominal_v" in vls.columns:
-                    default = str(vls["nominal_v"].idxmax())
-                else:
-                    default = str(vls.index[0])
-            return net, default
-
-        net, default_vl = run(_load_and_default)
-        network = NetworkProxy(net)
+        network = network_loader.load_from_path(path)
+        default_vl = network_loader.pick_default_vl(network)
         self._network = network
         self._selected_vl = None
         for listener in list(self._network_listeners):

@@ -16,7 +16,8 @@ from typing import Optional
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from iidm_viewer.powsybl_worker import NetworkProxy, run
+from iidm_viewer.diagram_services import extract_map_data as _extract_map_data
+from iidm_viewer.powsybl_worker import NetworkProxy
 from iidm_viewer.qt.web_view import PowsyblWebView
 
 
@@ -24,35 +25,6 @@ _MAP_DIST = os.path.join(
     os.path.dirname(os.path.dirname(__file__)),
     "frontend", "map_component", "dist",
 )
-
-
-def _extract_map_data(network: NetworkProxy):
-    """Return (substations, positions, lines, line_positions) or None.
-
-    Same extraction path as ``iidm_viewer.network_map._extract_map_data``
-    — kept inline here to decouple the Qt prototype from the Streamlit
-    module's session-state caching.
-    """
-    raw = object.__getattribute__(network, "_obj")
-
-    def _extract():
-        from pypowsybl_jupyter.networkmapwidget import NetworkMapWidget
-
-        class _Extractor(NetworkMapWidget):
-            def __init__(self):  # skip widget init
-                pass
-
-            def __del__(self):   # suppress ipywidgets cleanup noise
-                pass
-
-        (lmap, lpos, smap, spos, _vl_subs, _sub_vls, _subs_ids, tlmap, hlmap) = (
-            _Extractor().extract_map_data(raw, display_lines=True, use_line_geodata=False)
-        )
-        if not spos:
-            return None
-        return smap, spos, lmap + tlmap + hlmap, lpos
-
-    return run(_extract)
 
 
 class MapTab(QWidget):

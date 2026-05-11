@@ -23,7 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from iidm_viewer.powsybl_worker import NetworkProxy, run
+from iidm_viewer.diagram_services import generate_nad as _generate_nad
+from iidm_viewer.powsybl_worker import NetworkProxy
 from iidm_viewer.qt.web_view import PowsyblWebView
 
 
@@ -31,23 +32,6 @@ _NAD_DIST = os.path.join(
     os.path.dirname(os.path.dirname(__file__)),
     "frontend", "nad_component", "dist",
 )
-
-
-def _generate_nad(network: NetworkProxy, vl_id: str, depth: int):
-    """Return ``(svg, metadata_json)`` for ``vl_id`` expanded ``depth`` hops."""
-    raw = object.__getattribute__(network, "_obj")
-
-    def _do():
-        from pypowsybl.network import NadParameters
-        params = NadParameters(edge_name_displayed=True, power_value_precision=1)
-        nad = raw.get_network_area_diagram(
-            voltage_level_ids=[vl_id],
-            depth=depth,
-            nad_parameters=params,
-        )
-        return nad.svg, nad.metadata
-
-    return run(_do)
 
 
 class NadTab(QWidget):
