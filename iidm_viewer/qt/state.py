@@ -34,15 +34,32 @@ class AppState(QObject):
         return self._selected_vl
 
     def load_network_from_path(self, path: str) -> NetworkProxy:
-        """Load a network file on the pypowsybl worker thread."""
-        def _load():
-            import pypowsybl.network as pn
-            return pn.load(path)
+        """Load a network file and auto-select a default voltage level.
 
-        network = NetworkProxy(run(_load))
+        The default matches the Streamlit ``vl_selector``: the VL with
+        the highest nominal voltage (e.g. 400 kV). Both diagram tabs
+        react to ``selected_vl_changed`` and can render immediately
+        after load — no "select a VL first" empty state.
+        """
+        def _load_and_default():
+            import pypowsybl.network as pn
+            net = pn.load(path)
+            vls = net.get_voltage_levels()
+            default = None
+            if vls is not None and not vls.empty:
+                if "nominal_v" in vls.columns:
+                    default = str(vls["nominal_v"].idxmax())
+                else:
+                    default = str(vls.index[0])
+            return net, default
+
+        net, default_vl = run(_load_and_default)
+        network = NetworkProxy(net)
         self._network = network
-        self._selected_vl = None
+        self._selected_vl = None  # cleared first so set_selected_vl emits below
         self.network_changed.emit(network)
+        if default_vl:
+            self.set_selected_vl(default_vl)
         return network
 
     def set_selected_vl(self, vl_id: Optional[str]) -> None:
