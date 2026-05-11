@@ -1,9 +1,10 @@
-"""Session Script tab — preview + download the HMI-mirror script.
+"""Session Script dialog — preview + download the HMI-mirror script.
 
-Reads the op log written by ``script_recorder`` and renders the script
-produced by ``script_generator``. Provides a download button, a
-toggle to switch between net-state and full-transcript output, and a
-toggle to pause/resume recording.
+Opened from the sidebar's "View live Script" button. Reads the op log
+written by ``script_recorder`` and renders the script produced by
+``script_generator``. Provides a download button, a Recording
+pause/resume toggle, a net-state vs full-transcript toggle, and a
+clear-log button.
 """
 from __future__ import annotations
 
@@ -25,8 +26,8 @@ def _on_recording_change() -> None:
     script_recorder.set_paused(not is_recording)
 
 
-def render_session_script_tab() -> None:
-    st.subheader("Session Script")
+@st.dialog("Session Script", width="large")
+def show_session_script_dialog() -> None:
     st.caption(
         "A runnable Python script that replays the operations you have "
         "performed in this session against any pypowsybl-loadable network."
@@ -95,23 +96,8 @@ def render_session_script_tab() -> None:
         if st.button(
             "Clear log",
             key="_session_script_clear",
-            help="Drop every recorded operation. This cannot be undone.",
+            help="Drop every recorded operation. Cannot be undone.",
             use_container_width=True,
         ):
-            _confirm_clear_dialog()
-
-
-@st.dialog("Clear session script log?")
-def _confirm_clear_dialog() -> None:
-    st.write(
-        "This drops every recorded operation. The session script will be "
-        "empty until you load a network or run a new operation."
-    )
-    col_cancel, col_ok = st.columns(2)
-    if col_cancel.button("Cancel", key="_session_script_clear_cancel", use_container_width=True):
-        st.rerun()
-    if col_ok.button(
-        "Clear", key="_session_script_clear_ok", type="primary", use_container_width=True
-    ):
-        script_recorder.clear_log()
-        st.rerun()
+            script_recorder.clear_log()
+            st.rerun()
