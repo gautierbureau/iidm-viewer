@@ -734,6 +734,68 @@ def test_data_explorer_apply_and_run_lf_triggers_loadflow(qapp, loaded_window):
     assert reverted >= 2
 
 
+def test_create_panel_is_hidden_for_non_creatable_component(qapp, loaded_window):
+    """IEEE14 has only bus-breaker VLs, so even Loads is not creatable.
+    The Qt create panel hides itself in that case."""
+    explorer = loaded_window.data_tab
+    explorer._combo.setCurrentText("Loads")
+    qapp.processEvents()
+    # No node-breaker VLs -> panel is hidden (set_network already ran).
+    assert explorer._create_panel.isVisible() is False
+
+
+def test_create_panel_creates_load_on_node_breaker_network(qapp):
+    """Drive the Qt create panel end-to-end against a synthetic
+    node-breaker network. Asserts the new Load shows up via
+    get_loads + the panel emits its component_created signal.
+    """
+    from iidm_viewer.qt.create_panel import CreateComponentPanel
+    from iidm_viewer.component_creation import (
+        list_busbar_sections,
+        list_node_breaker_voltage_levels,
+    )
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+
+    panel = CreateComponentPanel()
+    panel.set_network(network)
+    panel.set_component("Loads")
+    qapp.processEvents()
+
+    # Sanity: the panel detected node-breaker VLs.
+    vls = list_node_breaker_voltage_levels(network)
+    assert vls.shape[0] > 0
+    assert panel._vl_combo.isEnabled()
+
+    # Pick the first VL + its first busbar.
+    vl_id = panel._vl_combo.currentData()
+    bbs_id = list_busbar_sections(network, str(vl_id))[0]
+    # The panel populates busbar combo via the VL-change signal already.
+    panel._bbs_combo.setCurrentText(bbs_id)
+    qapp.processEvents()
+
+    # Fill ID + drive the create.
+    panel._field_widgets["id"].setText("QT_NEW_LOAD")
+    panel._field_widgets["p0"].setValue(15.0)
+    panel._field_widgets["q0"].setValue(5.0)
+
+    seen: list = []
+    panel.component_created.connect(lambda c, eid: seen.append((c, eid)))
+    panel._on_create_clicked()
+    qapp.processEvents()
+
+    assert "QT_NEW_LOAD" in network.get_loads().index
+    assert seen == [("Loads", "QT_NEW_LOAD")]
+
+
 def test_change_log_panel_repaints_on_record(qapp, loaded_window):
     """The panel's title and table reflect log mutations in real time
     via the on_changed bus.
