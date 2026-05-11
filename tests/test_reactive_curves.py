@@ -206,12 +206,19 @@ def test_classify_real_network(xiidm_upload):
     curves = network.get_reactive_capability_curve_points()
     gens = network.get_generators(all_attributes=True)
     out = classify_targets(gens, curves)
-    assert set(out["status"].unique()).issubset({"inside", "edge", "outside", "n/a"})
+    valid_statuses = {
+        "inside", "edge", "outside", "n/a",
+        "saturated", "near_saturation", "needs_lf",
+    }
+    assert set(out["status"].unique()).issubset(valid_statuses)
     # Sign of distance must agree with the status classification.
     inside = out["status"] == "inside"
     outside = out["status"] == "outside"
+    near_sat = out["status"] == "near_saturation"
     assert (out.loc[inside, "distance"] <= 0).all()
     assert (out.loc[outside, "distance"] > 0).all()
+    # Near-saturation: PV, strictly inside the polygon but close to the edge.
+    assert (out.loc[near_sat, "distance"] < 0).all()
 
 
 def test_step_up_transformer_picks_highest_other_side():
