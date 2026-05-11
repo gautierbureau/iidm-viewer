@@ -1,16 +1,19 @@
 import streamlit as st
 
-from iidm_viewer.powsybl_worker import run
+from iidm_viewer.loadflow import GENERIC_PARAMETERS as _GENERIC_PARAMS  # noqa: F401
+from iidm_viewer.loadflow import get_provider_parameters_df
 
 
 def _get_provider_params_info():
-    """Return the provider parameters DataFrame (cached)."""
+    """Return the provider parameters DataFrame (cached).
+
+    Delegates the worker-routed pypowsybl fetch to
+    :func:`iidm_viewer.loadflow.get_provider_parameters_df`; the
+    session-state caching stays Streamlit-side.
+    """
     cache = st.session_state.setdefault("_lf_provider_info", {})
     if "df" not in cache:
-        def _fetch():
-            import pypowsybl.loadflow as lf
-            return lf.get_provider_parameters()
-        cache["df"] = run(_fetch)
+        cache["df"] = get_provider_parameters_df()
     return cache["df"]
 
 
@@ -20,40 +23,6 @@ def get_lf_parameters():
         st.session_state.get("_lf_generic_params", {}),
         st.session_state.get("_lf_provider_params", {}),
     )
-
-
-# Generic parameter definitions: (name, type, default, description, options)
-_GENERIC_PARAMS = [
-    ("voltage_init_mode", "enum", "UNIFORM_VALUES",
-     "Voltage initialization mode",
-     ["UNIFORM_VALUES", "PREVIOUS_VALUES", "DC_VALUES"]),
-    ("transformer_voltage_control_on", "bool", False,
-     "Enable transformer voltage control"),
-    ("phase_shifter_regulation_on", "bool", False,
-     "Enable phase-shifter regulation"),
-    ("use_reactive_limits", "bool", True,
-     "Use generator reactive limits"),
-    ("shunt_compensator_voltage_control_on", "bool", False,
-     "Enable shunt compensator voltage control"),
-    ("distributed_slack", "bool", True,
-     "Distribute slack on generators"),
-    ("balance_type", "enum", "PROPORTIONAL_TO_GENERATION_P_MAX",
-     "Active power balance type",
-     ["PROPORTIONAL_TO_GENERATION_P_MAX", "PROPORTIONAL_TO_GENERATION_P",
-      "PROPORTIONAL_TO_GENERATION_REMAINING_MARGIN",
-      "PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR",
-      "PROPORTIONAL_TO_LOAD", "PROPORTIONAL_TO_CONFORM_LOAD"]),
-    ("dc_use_transformer_ratio", "bool", True,
-     "Use transformer ratio in DC mode"),
-    ("hvdc_ac_emulation", "bool", True,
-     "Enable HVDC AC emulation"),
-    ("read_slack_bus", "bool", True,
-     "Read slack bus from network"),
-    ("write_slack_bus", "bool", True,
-     "Write slack bus to network"),
-    ("dc_power_factor", "float", 1.0,
-     "Power factor for DC load flow"),
-]
 
 
 def _render_generic_tab():

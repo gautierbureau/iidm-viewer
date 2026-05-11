@@ -238,6 +238,9 @@ class DataExplorerTab(QWidget):
     edit_applied = Signal(str, str, str, object, object)  # component, element_id, attribute, new, prev
     bulk_edit_applied = Signal(str, list, str, object, dict)  # component, ids, attribute, new, prev_map
     bulk_removed = Signal(str, list)  # component, removed_ids
+    # Emitted after a successful "Apply & Run LF" bulk edit — the
+    # MainWindow listens and calls state.run_loadflow().
+    loadflow_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -329,6 +332,12 @@ class DataExplorerTab(QWidget):
         self._bulk_value.setMinimumWidth(120)
         self._bulk_apply = QPushButton("Apply")
         self._bulk_apply.clicked.connect(self._on_bulk_apply)
+        # "Apply & Run LF" mirrors Streamlit's twin-button layout: the
+        # edit goes through ``apply_bulk_edit`` as usual, then an AC
+        # load flow runs on the network. The Run-LF call sits outside
+        # this tab; we surface a callback the MainWindow plugs in.
+        self._bulk_apply_lf = QPushButton("Apply && Run LF")
+        self._bulk_apply_lf.clicked.connect(self._on_bulk_apply_lf)
         # Two more bulk actions next to "Apply", both vectorised
         # through the shared registry. "Disconnect" flips the right
         # ``connected*`` / ``open`` attribute(s) per component type;
@@ -358,6 +367,7 @@ class DataExplorerTab(QWidget):
         bulk_layout.addWidget(QLabel("="))
         bulk_layout.addWidget(self._bulk_value, 1)
         bulk_layout.addWidget(self._bulk_apply)
+        bulk_layout.addWidget(self._bulk_apply_lf)
         bulk_layout.addWidget(self._bulk_disconnect)
         bulk_layout.addWidget(self._bulk_delete)
         self._set_bulk_enabled(False)
@@ -659,7 +669,7 @@ class DataExplorerTab(QWidget):
         # ``enabled`` here is the bulk-EDIT enable state. Disconnect /
         # Delete have their own enable rules (any selection, vs. the
         # component being disconnectable / removable).
-        for w in (self._bulk_attr, self._bulk_value, self._bulk_apply):
+        for w in (self._bulk_attr, self._bulk_value, self._bulk_apply, self._bulk_apply_lf):
             w.setEnabled(enabled)
         n_selected = len(self._selected_element_ids())
         component = self._combo.currentText()
@@ -806,6 +816,21 @@ class DataExplorerTab(QWidget):
         self.bulk_removed.emit(component, removed)
         self._update_bulk_state()
 
+    def _on_bulk_apply_lf(self) -> None:
+        """Apply the bulk edit and then immediately request a load flow.
+
+        Same path as :meth:`_on_bulk_apply` but emits
+        :pyattr:`loadflow_requested` on success so the MainWindow
+        kicks off the LF.
+        """
+        # Tag the run so _on_bulk_apply knows to fire the request
+        # only when its own pypowsybl call succeeded.
+        self._pending_lf_after_apply = True
+        try:
+            self._on_bulk_apply()
+        finally:
+            self._pending_lf_after_apply = False
+
     def _on_bulk_apply(self) -> None:
         component = self._combo.currentText()
         attribute = self._bulk_attr.currentText()
@@ -847,6 +872,8 @@ class DataExplorerTab(QWidget):
                 component, attribute, prev_map, display_value,
             )
         self.bulk_edit_applied.emit(component, ids, attribute, display_value, prev_map)
+        if getattr(self, "_pending_lf_after_apply", False):
+            self.loadflow_requested.emit()
         self._update_bulk_state()
 
     def _on_edit_requested(self, element_id: str, attribute: str, new_value, previous) -> None:

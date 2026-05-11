@@ -183,6 +183,33 @@ def test_app_state_owns_change_log():
     assert len(state.change_log) == 1
 
 
+def test_app_state_run_loadflow_emits_listener():
+    """The NiceGUI ``AppState.run_loadflow`` fans out to listeners
+    registered via ``on_loadflow_completed``."""
+    import os
+    from iidm_viewer.web.state import AppState
+
+    state = AppState()
+    xiidm = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir, "test_ieee14.xiidm")
+    )
+    state.load_network_from_path(xiidm)
+
+    seen = []
+    state.on_loadflow_completed(seen.append)
+    result = state.run_loadflow()
+    assert result is not None
+    assert result.converged is True
+    assert len(seen) == 1
+    assert seen[0] is result
+
+
+def test_app_state_run_loadflow_noop_without_network():
+    from iidm_viewer.web.state import AppState
+    state = AppState()
+    assert state.run_loadflow() is None
+
+
 def test_change_log_cleared_on_new_network_load():
     import os
     from iidm_viewer.web.state import AppState

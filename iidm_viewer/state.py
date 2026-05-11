@@ -159,29 +159,27 @@ def get_network():
 
 
 def run_loadflow(network):
-    raw = object.__getattribute__(network, "_obj")
+    """Run AC load flow + invalidate Streamlit caches.
 
-    # Read parameters from session state on the main thread
+    The actual pypowsybl call lives in
+    :func:`iidm_viewer.loadflow.run_ac` so the PySide6 and NiceGUI
+    prototypes share the same worker round-trip. This wrapper reads
+    the dialog parameters from session_state, stashes the report JSON
+    in session_state, and calls :func:`invalidate_on_load_flow`.
+
+    Returns the raw pypowsybl ``LoadFlowResult`` list (legacy
+    contract — callers index `[0].status.name`).
+    """
     from iidm_viewer.lf_parameters import get_lf_parameters
+    from iidm_viewer.loadflow import run_ac
+
     generic, provider = get_lf_parameters()
-
-    def _run_ac():
-        import pypowsybl.loadflow as lf
-        import pypowsybl.report as r
-        params = lf.Parameters(**generic)
-        if provider:
-            params.provider_parameters = {k: str(v) for k, v in provider.items()}
-        rn = r.ReportNode(task_key="loadFlowTask", default_name="Load Flow")
-        results = lf.run_ac(raw, parameters=params, report_node=rn)
-        # Extract JSON string inside worker thread before the handle escapes
-        return results, rn.to_json()
-
-    results, report_json = run(_run_ac)
-    st.session_state["_lf_report_json"] = report_json
+    result = run_ac(network, generic, provider)
+    st.session_state["_lf_report_json"] = result.report_json
     # Invalidate cached lookups so tabs reload fresh data
     invalidate_on_load_flow()
     script_recorder.record_run_loadflow(generic, provider)
-    return results
+    return result.results
 
 
 # Source of truth lives in iidm_viewer.component_registry so the Qt /

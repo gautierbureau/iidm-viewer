@@ -483,6 +483,8 @@ def _build_data_explorer():
         bulk_value = ui.input(placeholder="New value") \
             .props("dense outlined").classes("flex-grow")
         bulk_button = ui.button("Apply")
+        # "Apply & Run LF" mirrors Streamlit's twin-button layout.
+        bulk_button_lf = ui.button("Apply && Run LF").props("flat")
         # Disconnect + Delete sit alongside Apply. Disconnect flips
         # ``connected*`` / ``open`` and goes through the change log;
         # Delete is destructive and bypasses the log.
@@ -619,7 +621,7 @@ def _build_data_explorer():
                 _push_sld(_state.selected_vl)
                 _push_nad(_state.selected_vl, _nad_depth)
 
-    async def on_bulk_apply() -> None:
+    async def on_bulk_apply(run_lf_after: bool = False) -> None:
         component = select.value
         attribute = bulk_attr.value
         new_value = bulk_value.value
@@ -658,6 +660,21 @@ def _build_data_explorer():
                 _push_nad(_state.selected_vl, _nad_depth)
         # Refresh the grid so the new (possibly coerced) values appear.
         refresh()
+        # "Apply & Run LF" path: kick off the load flow after the edit.
+        # The state listener handles cache flush + diagram refresh.
+        if run_lf_after:
+            try:
+                result = await asyncio.to_thread(_state.run_loadflow)
+            except Exception as exc:
+                ui.notify(f"Load flow failed: {exc}", type="negative")
+                return
+            if result and result.converged:
+                ui.notify(f"AC load flow: {result.status}", type="positive")
+            else:
+                ui.notify(
+                    f"AC load flow: {result.status if result else 'UNKNOWN'}",
+                    type="warning",
+                )
 
     async def on_bulk_disconnect() -> None:
         component = select.value
@@ -785,7 +802,8 @@ def _build_data_explorer():
 
     download_btn.on_click(on_csv_clicked)
     vl_filter.on_value_change(lambda _e: refresh())
-    bulk_button.on_click(on_bulk_apply)
+    bulk_button.on_click(lambda: on_bulk_apply(run_lf_after=False))
+    bulk_button_lf.on_click(lambda: on_bulk_apply(run_lf_after=True))
     disconnect_button.on_click(on_bulk_disconnect)
     delete_button.on_click(on_bulk_delete)
     grid.on("cellValueChanged", on_cell_changed)
@@ -1012,6 +1030,31 @@ def main_page() -> None:
             label="Load network…",
         ).props("flat dense accept='.xiidm,.iidm,.xml,.zip,.mat,.uct'").classes("q-mr-md")
 
+        # AC load-flow trigger — disabled until a network is loaded;
+        # status appears next to it via ui.notify when the run returns.
+        run_lf_btn = ui.button("Run AC Load Flow").props("flat dense")
+        run_lf_btn.set_enabled(False)
+        lf_status_lbl = ui.label("").classes("text-caption q-ml-sm")
+
+        async def on_run_lf() -> None:
+            if _state.network is None:
+                return
+            lf_status_lbl.set_text("Running…")
+            try:
+                result = await asyncio.to_thread(_state.run_loadflow)
+            except Exception as exc:
+                lf_status_lbl.set_text(f"Failed: {exc}")
+                ui.notify(f"Load flow failed: {exc}", type="negative")
+                return
+            status = result.status if result else "UNKNOWN"
+            lf_status_lbl.set_text(f"LF: {status}")
+            if result and result.converged:
+                ui.notify(f"AC load flow: {status}", type="positive")
+            else:
+                ui.notify(f"AC load flow: {status}", type="warning")
+
+        run_lf_btn.on_click(on_run_lf)
+
     with ui.tabs().classes("w-full") as tabs:
         map_tab = ui.tab("Network Map")
         nad_tab = ui.tab("Network Area Diagram")
@@ -1059,6 +1102,10 @@ def main_page() -> None:
     # Cross-tab navigation: substation click on map -> SLD tab on that VL.
     # ------------------------------------------------------------------
     def _on_state_network(network):
+        # Enable the Run-LF button + reset status whenever the network
+        # changes (load / clear).
+        run_lf_btn.set_enabled(network is not None)
+        lf_status_lbl.set_text("")
         if network is None:
             return
         _push_map()
@@ -1071,12 +1118,25 @@ def main_page() -> None:
             _push_sld(vl_id)
             _push_nad(vl_id, _nad_depth)
 
+    def _on_loadflow_completed(result):
+        """LF rewrites line P/Q/I + bus V/angle, baked into the SVGs and
+        the enriched DataFrames. Flush the diagram caches and refresh
+        whichever VL is active + the data grid.
+        """
+        _nad_cache.clear()
+        _sld_cache.clear()
+        if _state.selected_vl:
+            _push_sld(_state.selected_vl)
+            _push_nad(_state.selected_vl, _nad_depth)
+        refresh_data_grid()
+
     # Listeners are registered fresh on every page connect; if a
     # previous registration is still around (browser refresh), the
     # old one calls into a stale `tabs` and would noop on a closed
     # client. NiceGUI is forgiving here for a single-user prototype.
     _state.on_network_changed(_on_state_network)
     _state.on_selected_vl_changed(_on_state_vl)
+    _state.on_loadflow_completed(_on_loadflow_completed)
 
     # ------------------------------------------------------------------
     # Iframe -> Python event handlers
@@ -1131,6 +1191,7 @@ def main_page() -> None:
     # state right away.
     if _state.network is not None:
         file_lbl.set_text("(pre-loaded)")
+        run_lf_btn.set_enabled(True)
         _push_map()
         refresh_data_grid()
         if _state.selected_vl:

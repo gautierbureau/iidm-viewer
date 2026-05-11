@@ -83,7 +83,7 @@ def test_get_provider_params_info_fetches_when_cache_empty():
     mock_df = _fake_params_df()
     with patch("iidm_viewer.lf_parameters.st") as mock_st:
         mock_st.session_state = {}
-        with patch("iidm_viewer.lf_parameters.run", return_value=mock_df):
+        with patch("iidm_viewer.lf_parameters.get_provider_parameters_df", return_value=mock_df):
             result = _get_provider_params_info()
 
     assert result is mock_df
@@ -97,7 +97,7 @@ def test_get_provider_params_info_returns_cached_df():
     cached_df = _fake_params_df()
     with patch("iidm_viewer.lf_parameters.st") as mock_st:
         mock_st.session_state = {"_lf_provider_info": {"df": cached_df}}
-        with patch("iidm_viewer.lf_parameters.run") as mock_run:
+        with patch("iidm_viewer.lf_parameters.get_provider_parameters_df") as mock_run:
             result = _get_provider_params_info()
             mock_run.assert_not_called()
 
@@ -111,7 +111,7 @@ def test_get_provider_params_info_populates_cache_for_subsequent_calls():
     mock_df = _fake_params_df()
     call_count = 0
 
-    def _run(fn):
+    def _run(*_args, **_kwargs):
         nonlocal call_count
         call_count += 1
         return mock_df
@@ -119,7 +119,7 @@ def test_get_provider_params_info_populates_cache_for_subsequent_calls():
     fake_state = {}
     with patch("iidm_viewer.lf_parameters.st") as mock_st:
         mock_st.session_state = fake_state
-        with patch("iidm_viewer.lf_parameters.run", side_effect=_run):
+        with patch("iidm_viewer.lf_parameters.get_provider_parameters_df", side_effect=_run):
             _get_provider_params_info()
             _get_provider_params_info()
 

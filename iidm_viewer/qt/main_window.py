@@ -32,7 +32,7 @@ from iidm_viewer.qt.state import AppState
 
 
 class _Sidebar(QWidget):
-    def __init__(self, on_load, parent=None) -> None:
+    def __init__(self, on_load, on_run_loadflow, parent=None) -> None:
         super().__init__(parent)
         self.setFixedWidth(220)
         self.setStyleSheet("background: #f6f6f6;")
@@ -50,12 +50,21 @@ class _Sidebar(QWidget):
         self._vl_lbl = QLabel("Selected VL: —")
         self._vl_lbl.setStyleSheet("padding: 8px 10px; color: #333; font-size: 12px;")
 
+        self._run_lf_btn = QPushButton("Run AC Load Flow")
+        self._run_lf_btn.clicked.connect(on_run_loadflow)
+        self._run_lf_btn.setEnabled(False)
+        self._lf_status = QLabel("")
+        self._lf_status.setWordWrap(True)
+        self._lf_status.setStyleSheet("padding: 4px 10px; font-size: 11px;")
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.addWidget(title)
         layout.addWidget(self._load_btn)
         layout.addWidget(self._file_lbl)
         layout.addWidget(self._vl_lbl)
+        layout.addWidget(self._run_lf_btn)
+        layout.addWidget(self._lf_status)
         layout.addStretch(1)
 
     def set_file(self, path: Optional[str]) -> None:
@@ -63,6 +72,20 @@ class _Sidebar(QWidget):
 
     def set_vl(self, vl_id: Optional[str]) -> None:
         self._vl_lbl.setText(f"Selected VL: {vl_id}" if vl_id else "Selected VL: —")
+
+    def set_loadflow_enabled(self, enabled: bool) -> None:
+        self._run_lf_btn.setEnabled(enabled)
+
+    def set_loadflow_status(self, text: str, ok: bool = True) -> None:
+        if not text:
+            self._lf_status.setText("")
+            self._lf_status.setStyleSheet("padding: 4px 10px; font-size: 11px;")
+            return
+        color = "#0a7e2a" if ok else "#b30000"
+        self._lf_status.setText(text)
+        self._lf_status.setStyleSheet(
+            f"padding: 4px 10px; font-size: 11px; color: {color};"
+        )
 
 
 class MainWindow(QMainWindow):
@@ -88,7 +111,7 @@ class MainWindow(QMainWindow):
         # survives tab switches and component changes.
         self.data_tab.set_change_log(self.state.change_log)
 
-        self.sidebar = _Sidebar(self._on_load_clicked)
+        self.sidebar = _Sidebar(self._on_load_clicked, self._on_run_loadflow_clicked)
 
         central = QWidget()
         layout = QHBoxLayout(central)
@@ -103,6 +126,7 @@ class MainWindow(QMainWindow):
         self.setStatusBar(status)
 
         self.state.network_changed.connect(self._on_network_changed)
+        self.state.loadflow_completed.connect(self._on_loadflow_completed)
         self.state.selected_vl_changed.connect(self._on_selected_vl_changed)
         self.map_tab.substation_clicked.connect(self._on_map_substation_clicked)
         self.nad_tab.node_clicked.connect(self._on_nad_node_clicked)
@@ -112,6 +136,7 @@ class MainWindow(QMainWindow):
         self.data_tab.edit_applied.connect(self._on_data_edit_applied)
         self.data_tab.bulk_edit_applied.connect(self._on_data_bulk_edit_applied)
         self.data_tab.bulk_removed.connect(self._on_data_bulk_removed)
+        self.data_tab.loadflow_requested.connect(self._on_run_loadflow_clicked)
 
     # ------------------------------------------------------------------
     # User actions
@@ -141,11 +166,49 @@ class MainWindow(QMainWindow):
         self.sidebar.set_file(path)
         self.statusBar().showMessage(f"Loaded {os.path.basename(path)}.")
 
+    def _on_run_loadflow_clicked(self) -> None:
+        if self.state.network is None:
+            return
+        self.statusBar().showMessage("Running AC load flow…")
+        self.sidebar.set_loadflow_status("Running…", ok=True)
+        try:
+            self.state.run_loadflow()
+        except Exception as exc:
+            self.sidebar.set_loadflow_status(f"Failed: {exc}", ok=False)
+            self.statusBar().showMessage(f"Load flow failed: {exc}")
+
+    def _on_loadflow_completed(self, result) -> None:
+        """Refresh peripheral views once the flow returns.
+
+        LF rewrites the network's flows (P / Q / I on branches) and
+        bus voltages. The NAD / SLD bundles bake those into the
+        rendered SVG, so the per-VL diagram caches need a flush;
+        the Data Explorer's enriched columns also change.
+        """
+        ok = bool(result and result.converged)
+        status = result.status if result else "UNKNOWN"
+        self.sidebar.set_loadflow_status(f"Status: {status}", ok=ok)
+        self.statusBar().showMessage(
+            f"AC load flow: {status}",
+        )
+        # Flush diagram caches (P/Q labels change) and refresh the
+        # currently-shown VL diagrams.
+        self.nad_tab._cache.clear()
+        self.sld_tab._cache.clear()
+        if self.state.selected_vl:
+            self.nad_tab.show_voltage_level(self.state.selected_vl)
+            self.sld_tab.show_voltage_level(self.state.selected_vl)
+        # Refresh the Data Explorer in case the user is looking at
+        # something the LF touched (lines/transformers with new flows).
+        self.data_tab.set_network(self.state.network)
+
     # ------------------------------------------------------------------
     # State → UI plumbing
     # ------------------------------------------------------------------
     def _on_network_changed(self, network) -> None:
         self.sidebar.set_vl(None)
+        self.sidebar.set_loadflow_enabled(network is not None)
+        self.sidebar.set_loadflow_status("")
         self.map_tab.set_network(network)
         self.nad_tab.set_network(network)
         self.sld_tab.set_network(network)
