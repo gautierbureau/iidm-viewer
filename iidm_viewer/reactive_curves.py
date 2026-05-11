@@ -315,11 +315,15 @@ def _render_target_containment_summary(classified, gens_df):
 
         extra = [c for c in ("voltage_level_id", "nominal_v", "country")
                  if c in gens_df.columns]
-        if extra:
-            issues = issues.join(gens_df[extra], how="left")
+        gen_attrs = [c for c in ("regulated_element_id", "connected")
+                     if c in gens_df.columns]
+        join_cols = extra + gen_attrs
+        if join_cols:
+            issues = issues.join(gens_df[join_cols], how="left")
 
         cols = extra + [
             "status", "regulation", "lf_action", "distance", "violation",
+        ] + gen_attrs + [
             "target_p", "target_q",
             "p_lo", "p_hi", "min_q_at_target_p", "max_q_at_target_p",
         ]
