@@ -4,7 +4,11 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-from iidm_viewer.caches import get_generators_all, get_reactive_curve_points
+from iidm_viewer.caches import (
+    _net_key,
+    get_generators_all,
+    get_reactive_curve_points,
+)
 from iidm_viewer.filters import (
     FILTERS,
     build_vl_lookup,
@@ -237,6 +241,27 @@ def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
     return df
 
 
+def _classify_targets_cached(network, gens_df, curves_df):
+    """Cached wrapper around ``classify_targets``.
+
+    Key: ``(net_key, lf_gen, tuple(gens_df.index))``. The classification
+    depends only on which generators are displayed and their cached
+    ``get_generators`` values, so a selectbox-only rerun reuses the result.
+    Invalidated on every load flow via ``_LOAD_FLOW_CACHE_KEYS``.
+    """
+    key = (
+        _net_key(network),
+        st.session_state.get("_lf_gen", 0),
+        tuple(gens_df.index),
+    )
+    cached = st.session_state.get("_rcc_classified_cache")
+    if cached is not None and cached["key"] == key:
+        return cached["df"]
+    classified = classify_targets(gens_df, curves_df)
+    st.session_state["_rcc_classified_cache"] = {"key": key, "df": classified}
+    return classified
+
+
 def _render_target_containment_summary(classified, gens_df):
     n_inside = int((classified["status"] == "inside").sum())
     n_edge = int((classified["status"] == "edge").sum())
@@ -348,7 +373,7 @@ def render_reactive_curves(network, selected_vl):
     gen_ids = gens_df.index.tolist()
     st.caption(f"{len(gen_ids)} generators with reactive limits")
 
-    classified = classify_targets(gens_df, curves_df)
+    classified = _classify_targets_cached(network, gens_df, curves_df)
 
     # Warm the sensitivity cache for every displayed PV generator in one
     # batched AC sensitivity call. Without this, each selectbox change

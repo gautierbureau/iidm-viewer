@@ -389,6 +389,7 @@ _LOAD_FLOW_CACHE_KEYS = (
     "_svcs_enriched_cache",
     "_loading_cache",        # operational limits loading %
     "_dq_dv_cache",          # AC sensitivity dQ_bus/dV_target per (network, lf_gen, gen)
+    "_rcc_classified_cache", # classify_targets per (net_key, lf_gen, displayed gen ids)
 )
 
 # Caches holding pre-rendered map payloads or positions — only need to
