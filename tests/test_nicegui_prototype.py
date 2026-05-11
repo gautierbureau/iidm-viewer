@@ -140,7 +140,10 @@ def test_dataframe_to_aggrid_options_handles_nan_and_empty():
     from iidm_viewer.web.app import _dataframe_to_aggrid_options
 
     empty = _dataframe_to_aggrid_options(pd.DataFrame())
-    assert empty == {"columnDefs": [], "rowData": []}
+    assert empty["columnDefs"] == [] and empty["rowData"] == []
+    # Empty frames still carry the default col def so the grid keeps
+    # its filter / sort affordances when the next refresh arrives.
+    assert "defaultColDef" in empty
 
     df = pd.DataFrame({"id": ["a", "b"], "v": [1.0, math.nan]})
     opts = _dataframe_to_aggrid_options(df)
@@ -148,8 +151,44 @@ def test_dataframe_to_aggrid_options_handles_nan_and_empty():
     # Numeric columns should be tagged for ag-Grid right-alignment.
     v_col = next(c for c in opts["columnDefs"] if c["field"] == "v")
     assert v_col.get("type") == "numericColumn"
+    assert v_col.get("filter") == "agNumberColumnFilter"
+    # The id column is pinned-left so it stays visible while scrolling.
+    id_col = next(c for c in opts["columnDefs"] if c["field"] == "id")
+    assert id_col.get("pinned") == "left"
     # NaN values render as em-dash.
     assert opts["rowData"][1]["v"] == "—"
+
+
+def test_dataframe_to_aggrid_options_marks_editable_columns():
+    import pandas as pd
+    from iidm_viewer.web.app import _dataframe_to_aggrid_options
+
+    df = pd.DataFrame({"id": ["g1"], "target_p": [10.0], "name": ["foo"]})
+    opts = _dataframe_to_aggrid_options(df, editable_cols=["target_p"])
+    by_field = {c["field"]: c for c in opts["columnDefs"]}
+    assert by_field["target_p"].get("editable") is True
+    assert "cellStyle" in by_field["target_p"]
+    # Non-editable columns get no editable flag.
+    assert "editable" not in by_field["name"]
+    assert "editable" not in by_field["id"]
+
+
+def test_dataframe_to_aggrid_options_default_col_def_enables_sort_and_filter():
+    """The default col def must give every column sort + floating filter.
+
+    Floating filters are the per-column quick-filter row ag-Grid renders
+    under the header — the headline feature for "filter in the grid"
+    parity with the Qt prototype's filter text box.
+    """
+    import pandas as pd
+    from iidm_viewer.web.app import _dataframe_to_aggrid_options
+
+    opts = _dataframe_to_aggrid_options(pd.DataFrame({"a": [1]}))
+    default = opts["defaultColDef"]
+    assert default["sortable"] is True
+    assert default["resizable"] is True
+    assert default["filter"] is True
+    assert default["floatingFilter"] is True
 
 
 def test_bridge_js_has_expected_hooks():

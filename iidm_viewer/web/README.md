@@ -128,14 +128,27 @@ iframe that needs a new payload gets one.
 
 Pure NiceGUI — no iframe. A `ui.select` lists 18 pypowsybl component
 types (Substations, Voltage Levels, Buses, Generators, Lines, …);
-`ui.aggrid` renders the corresponding DataFrame. Selecting a
-different component fires `select.on_value_change`, which fetches
-the new DataFrame on the worker thread via `_fetch_dataframe`,
-converts it to ag-Grid `{columnDefs, rowData}` via
-`_dataframe_to_aggrid_options` (NaN → em-dash, numeric columns
-right-aligned), and pushes it into the grid with `grid.options =
-... ; grid.update()`. ag-Grid handles sort + column resize for free.
-Filtering and editing are left for the next iteration.
+`ui.aggrid` renders the corresponding DataFrame.
+
+* **Sort** — every column header is clickable (via the shared
+  `defaultColDef.sortable: true`).
+* **Filter** — every column has a per-column floating filter row
+  under the header (`defaultColDef.floatingFilter: true`). Numeric
+  columns use ag-Grid's number filter; everything else gets the
+  default text filter.
+* **Edit** — columns listed in
+  `iidm_viewer.component_registry.EDITABLE_COMPONENTS` get
+  `editable: true` and a pale-yellow background. Editing a cell
+  fires ag-Grid's `cellValueChanged`; the handler calls
+  `apply_cell_edit(...)` on the worker, which routes through the
+  appropriate `update_<component>` pypowsybl method. Failures
+  surface as `ui.notify` errors and the row is refreshed to revert.
+  Topology-affecting edits (`connected`, `open`, …) clear the NAD
+  and SLD caches so a subsequent tab switch shows the new picture.
+
+All grid behaviours are inside ag-Grid Community — no server
+round-trip per keystroke, no `ui.refreshable` decorators, no Vue
+state hassle.
 
 ## pypowsybl thread-affinity rule
 
