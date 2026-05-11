@@ -46,6 +46,20 @@ class SldTab(QWidget):
     # focuses the Map tab on that substation.
     feeder_clicked = Signal(dict)
 
+    # Emitted when the user clicks one of the per-feeder "→ next VL"
+    # navigation arrows. Payload is the target voltage-level id. The
+    # MainWindow routes this through ``AppState.set_selected_vl`` so
+    # both diagram tabs follow — same path as a Map / NAD click.
+    # Mirrors Streamlit's diagrams.render_sld_tab handler.
+    vl_navigation_requested = Signal(str)
+
+    # Emitted when the user clicks a switch / breaker. Payload is the
+    # already-decoded pypowsybl switch id + the desired new ``open``
+    # value (the JS library animates the symbol before firing, so the
+    # value is the *target* state). Mirrors Streamlit's handler in
+    # diagrams.render_sld_tab.
+    breaker_toggled = Signal(str, bool)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
@@ -96,7 +110,28 @@ class SldTab(QWidget):
         self._render()
 
     def _on_value(self, value: dict) -> None:
-        if value.get("type") == "sld-feeder-click":
+        vtype = value.get("type")
+        if vtype == "sld-vl-click":
+            # The bundle's onNextVoltageCallback already returns the
+            # target VL id; no decoding needed — pypowsybl VL ids never
+            # contain the escapable characters the SLG renderer
+            # transforms.
+            vl = value.get("vl")
+            if vl:
+                self.vl_navigation_requested.emit(str(vl))
+        elif vtype == "sld-breaker-click":
+            # The breakerId in the payload is the *SVG-encoded* form
+            # (``_45_`` for ``-``, etc.); decode back to the real
+            # pypowsybl switch id before emitting so listeners can
+            # route it straight to toggle_switch.
+            from iidm_viewer.navigation import decode_svg_id
+            encoded = str(value.get("breakerId", ""))
+            if encoded:
+                self.breaker_toggled.emit(
+                    decode_svg_id(encoded),
+                    bool(value.get("open", False)),
+                )
+        elif vtype == "sld-feeder-click":
             self.feeder_clicked.emit({
                 "equipment_id": value.get("equipmentId"),
                 "equipment_type": value.get("equipmentType"),

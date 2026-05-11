@@ -1,20 +1,37 @@
-"""Framework-agnostic helpers for cross-tab navigation.
+"""Framework-agnostic helpers for SLD / NAD / Map cross-tab events.
 
-The "click X → focus its substation on the Map" pattern needs to
-resolve, from a clicked equipment on the SLD, which substation the
-Map should fly to. For a branch-style equipment (a Line / 2-Winding
-Transformer / Tie Line) that's the substation on the other side; for
-a local injection (a Load / Generator / …) it's the substation
-containing the current voltage level.
+Two responsibilities:
+
+* :func:`resolve_feeder_substation` — given a feeder click on the
+  SLD, walk pypowsybl to figure out which substation the Map tab
+  should fly to (the "other side" of a branch, or the current
+  substation for a local injection).
+* :func:`decode_svg_id` — undo the SLG renderer's
+  ``_<decimal-ascii>_`` escaping of non-alphanumeric characters in
+  SVG element ids (e.g. ``BR_45_1`` → ``BR-1``). Used by every host
+  that decodes a ``sld-breaker-click`` payload back into a real
+  pypowsybl switch id.
 
 All pypowsybl access runs on the worker thread per the AGENTS.md §1
 thread-affinity rule.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from iidm_viewer.powsybl_worker import NetworkProxy, run
+
+
+# The SLG renderer escapes non-alphanumeric chars in SVG element ids as
+# _<decimal>_  (underscore stays underscore, ``-`` becomes ``_45_``,
+# etc.). Every host has to undo it to map a click back to a real id.
+_SVG_ID_ENCODE_RE = re.compile(r"_(\d+)_")
+
+
+def decode_svg_id(encoded: str) -> str:
+    """Reverse the SLG renderer's ``_<decimal>_`` id escaping."""
+    return _SVG_ID_ENCODE_RE.sub(lambda m: chr(int(m.group(1))), encoded)
 
 
 # Equipment types that pypowsybl emits as ``equipmentType`` strings on

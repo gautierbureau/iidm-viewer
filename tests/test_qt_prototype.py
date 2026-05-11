@@ -539,6 +539,69 @@ def test_disconnect_button_disabled_for_non_disconnectable_component(qapp, loade
     assert explorer._bulk_delete.isEnabled()
 
 
+def test_sld_vl_click_updates_selected_vl(qapp, loaded_window):
+    """Clicking a "→ next VL" arrow on the SLD must mirror Streamlit's
+    behaviour: AppState.selected_vl flips to the target.
+    """
+    window = loaded_window
+    window.sld_tab._current_vl = "VL1"
+    window.state.set_selected_vl("VL1")
+    qapp.processEvents()
+    assert window.state.selected_vl == "VL1"
+
+    window.sld_tab._on_value({"type": "sld-vl-click", "vl": "VL5", "ts": 0})
+    qapp.processEvents()
+    assert window.state.selected_vl == "VL5"
+
+
+def test_sld_breaker_click_toggles_switch_and_records_change_log(qapp, loaded_window):
+    """Clicking a switch on the SLD mirrors Streamlit's path:
+    decode the SVG id, toggle on the worker, and write a Switches/open
+    entry to the ChangeLog. Uses a synthetic node-breaker network so
+    IEEE14 (bus-breaker, no switches) doesn't get in the way.
+    """
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    nb_network = NetworkProxy(run(_make))
+    window = loaded_window
+    # Swap the loaded IEEE14 network for the node-breaker one without
+    # going through load_from_path (we want to keep the existing tabs
+    # alive but point at a switches-bearing network).
+    window.state._network = nb_network
+    df = nb_network.get_switches()
+    sw_id = str(df.index[0])
+    before = bool(df["open"].iloc[0])
+    new_open = not before
+
+    # The bundle sends the SVG-encoded id; ``BR-1`` would come back as
+    # ``BR_45_1``. Our switch ids here are simple ascii, but the
+    # decoder is still exercised end-to-end.
+    window.sld_tab._on_value({
+        "type": "sld-breaker-click",
+        "breakerId": sw_id,
+        "open": new_open,
+        "ts": 0,
+    })
+    qapp.processEvents()
+
+    df_after = nb_network.get_switches()
+    assert bool(df_after.at[sw_id, "open"]) is new_open
+
+    entries = window.state.change_log.entries("Switches")
+    assert len(entries) == 1
+    assert entries[0]["element_id"] == sw_id
+    assert entries[0]["before"] is before
+    assert entries[0]["after"] is new_open
+
+    # Revert so the worker network doesn't carry the toggle across tests.
+    from iidm_viewer.component_registry import toggle_switch
+    toggle_switch(nb_network, sw_id, before)
+
+
 def test_sld_feeder_click_routes_to_map_substation(qapp, loaded_window):
     """End-to-end cross-tab nav: an SLD feeder-click payload for a
     real IEEE14 line lands the user on the Map tab and triggers a

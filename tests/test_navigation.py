@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from iidm_viewer import network_loader
-from iidm_viewer.navigation import resolve_feeder_substation
+from iidm_viewer.navigation import decode_svg_id, resolve_feeder_substation
 from iidm_viewer.powsybl_worker import NetworkProxy
 
 
@@ -122,6 +122,19 @@ def test_resolve_feeder_handles_lowercase_equipment_type(ieee14):
     sub_upper = resolve_feeder_substation(ieee14, vl1, line_id, "LINE")
     sub_lower = resolve_feeder_substation(ieee14, vl1, line_id, "line")
     assert sub_upper == sub_lower
+
+
+def test_decode_svg_id_round_trips_streamlit_examples():
+    """The SLG renderer escapes non-alphanumeric chars as ``_<dec>_``.
+    Decoding must invert that for every known example."""
+    # Hyphens become _45_ (45 = ord('-')).
+    assert decode_svg_id("BR_45_1") == "BR-1"
+    # A switch named ``SW.A`` becomes ``SW_46_A`` (46 = ord('.')).
+    assert decode_svg_id("SW_46_A") == "SW.A"
+    # IDs without escapable chars round-trip unchanged.
+    assert decode_svg_id("simpleId") == "simpleId"
+    # Mixed: multiple substitutions in one id.
+    assert decode_svg_id("A_45_B_46_C") == "A-B.C"
 
 
 def test_sld_bundle_carries_feeder_click_path():

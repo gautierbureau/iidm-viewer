@@ -295,26 +295,16 @@ def add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: p
 def toggle_switch(network, switch_id: str, new_open: bool) -> tuple[bool, bool]:
     """Open or close a single switch; return ``(before_open, after_open)``.
 
-    Fetches the current open state on the worker thread, applies the change
-    via ``update_components``, and returns ``(old, new)`` so the caller can
-    record a change-log entry.  Raises ``KeyError`` if the switch is not found.
+    The pypowsybl read + write pair lives in
+    :func:`iidm_viewer.component_registry.toggle_switch` so the
+    Streamlit, PySide6 and NiceGUI breaker handlers share the same
+    code path. This wrapper just adds the Streamlit-side
+    topology-cache invalidation.
     """
-    raw = object.__getattribute__(network, "_obj")
-
-    def _get_current():
-        df = raw.get_switches(attributes=["open"])
-        if switch_id not in df.index:
-            raise KeyError(f"Switch {switch_id!r} not found in network")
-        return bool(df.at[switch_id, "open"])
-
-    current_open: bool = run(_get_current)
-
-    changes_df = pd.DataFrame(
-        {"open": [new_open]},
-        index=pd.Index([switch_id], name="id"),
-    )
-    update_components(network, "Switches", changes_df)
-    return current_open, new_open
+    from iidm_viewer.component_registry import toggle_switch as _shared
+    result = _shared(network, switch_id, new_open)
+    invalidate_on_topology_change()
+    return result
 
 
 # Extension name -> list of columns that pypowsybl's update_extensions accepts.
