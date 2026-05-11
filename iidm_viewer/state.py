@@ -189,159 +189,39 @@ def run_loadflow(network):
 from iidm_viewer.component_registry import EDITABLE_COMPONENTS  # noqa: F401
 
 
-# Injection types: pn.remove_feeder_bays removes the element AND its bay switches
-# (breaker + disconnectors), which is the correct deep-removal for node-breaker topology.
-_FEEDER_BAY_TYPES: frozenset[str] = frozenset({
-    "Loads",
-    "Generators",
-    "Batteries",
-    "Shunt Compensators",
-    "Static VAR Compensators",
-})
-
-# HVDC triples: removing any one of the three elements (line or either station)
-# must cascade to remove all three — the line is removed first so the stations
-# are no longer attached to it, then the station bays are cleaned up.
-_HVDC_TYPES: frozenset[str] = frozenset({
-    "HVDC Lines",
-    "VSC Converter Stations",
-    "LCC Converter Stations",
-})
-
-# Branch/link types removed via the generic remove_elements API.
-_SHALLOW_REMOVE_TYPES: frozenset[str] = frozenset({
-    "Lines",
-    "2-Winding Transformers",
-    "Dangling Lines",
-})
-
-REMOVABLE_COMPONENTS: frozenset[str] = (
-    _FEEDER_BAY_TYPES | _HVDC_TYPES | _SHALLOW_REMOVE_TYPES
-    | {"Voltage Levels", "Substations"}
+# Removal-related registries live in the framework-agnostic component
+# registry; re-export so the existing Streamlit imports keep working.
+from iidm_viewer.component_registry import (  # noqa: F401
+    REMOVABLE_COMPONENTS,
+    _FEEDER_BAY_TYPES,
+    _HVDC_TYPES,
+    _SHALLOW_REMOVE_TYPES,
 )
 
 
-def _find_vl_ids_for_substations(network, substation_ids: list[str]) -> list[str]:
-    """Return all voltage level ids that belong to the given substations."""
-    raw = object.__getattribute__(network, "_obj")
-    sub_set = set(substation_ids)
-
-    def _gather():
-        vl_df = raw.get_voltage_levels()
-        if vl_df.empty or "substation_id" not in vl_df.columns:
-            return []
-        return vl_df[vl_df["substation_id"].isin(sub_set)].index.tolist()
-
-    return run(_gather)
+# Voltage-level resolution for substation removal lives in the shared
+# registry; kept as a re-export here for any external caller.
+from iidm_viewer.component_registry import _find_vl_ids_for_substations  # noqa: F401, E402
 
 
-def _resolve_hvdc_removal(
-    network, component: str, ids: list[str]
-) -> tuple[list[str], list[str]]:
-    """Expand an HVDC removal request to the full triple: stations + line.
-
-    In IIDM an HVDC set is always exactly one line and two converter stations.
-    Removing any element in the set triggers removal of all three, so this
-    function returns (station_ids, hvdc_line_ids) for the caller to act on.
-    """
-    raw = object.__getattribute__(network, "_obj")
-
-    def _gather():
-        hvdc_df = raw.get_hvdc_lines()
-        hvdc_to_stations: dict[str, tuple[str, str]] = {}
-        station_to_hvdc: dict[str, str] = {}
-        for hvdc_id in hvdc_df.index:
-            cs1 = hvdc_df.at[hvdc_id, "converter_station1_id"]
-            cs2 = hvdc_df.at[hvdc_id, "converter_station2_id"]
-            hvdc_to_stations[hvdc_id] = (cs1, cs2)
-            station_to_hvdc[cs1] = hvdc_id
-            station_to_hvdc[cs2] = hvdc_id
-        return hvdc_to_stations, station_to_hvdc
-
-    hvdc_to_stations, station_to_hvdc = run(_gather)
-
-    hvdc_ids: set[str] = set()
-    for eid in ids:
-        if component == "HVDC Lines":
-            hvdc_ids.add(eid)
-        else:
-            hvdc_id = station_to_hvdc.get(eid)
-            if hvdc_id:
-                hvdc_ids.add(hvdc_id)
-
-    station_ids: set[str] = set()
-    for hvdc_id in hvdc_ids:
-        cs1, cs2 = hvdc_to_stations.get(hvdc_id, (None, None))
-        if cs1:
-            station_ids.add(cs1)
-        if cs2:
-            station_ids.add(cs2)
-
-    return list(station_ids), list(hvdc_ids)
+# _resolve_hvdc_removal also lives in the shared registry — re-export
+# for any external caller.
+from iidm_viewer.component_registry import _resolve_hvdc_removal  # noqa: F401, E402
+from iidm_viewer.component_registry import remove_elements as _remove_elements_shared
 
 
 def remove_components(network, component: str, ids: list[str]) -> list[str]:
-    """Remove elements from the network on the worker thread.
+    """Remove elements from the network and invalidate session caches.
 
-    Returns the complete list of element ids that were actually removed,
-    which may be larger than *ids* for HVDC, Voltage Level, and Substation
-    cascades.
-
-    - Plain injections: pn.remove_feeder_bays — deep bay-switch removal.
-    - HVDC triples: pn.remove_hvdc_lines — handles line and both stations.
-    - Voltage Levels: pn.remove_voltage_levels — cascades all connectables.
-    - Substations: resolve contained VLs, then pn.remove_voltage_levels.
-    - Branches: individual shallow remove_* methods via the raw network object.
+    The removal logic itself (feeder-bays / HVDC triples / VLs /
+    substations / branches) lives in
+    :func:`iidm_viewer.component_registry.remove_elements` so the
+    PySide6 and NiceGUI prototypes use the same code path. This
+    wrapper just adds the Streamlit cache-invalidation step.
     """
-    raw = object.__getattribute__(network, "_obj")
-
-    if component in _FEEDER_BAY_TYPES:
-        def _do_remove():
-            import pypowsybl.network as pn
-            pn.remove_feeder_bays(raw, ids)
-        run(_do_remove)
-        invalidate_on_topology_change()
-        return ids
-
-    if component in _HVDC_TYPES:
-        station_ids, hvdc_line_ids = _resolve_hvdc_removal(network, component, ids)
-
-        def _do_remove():
-            import pypowsybl.network as pn
-            pn.remove_hvdc_lines(raw, hvdc_line_ids)
-
-        run(_do_remove)
-        invalidate_on_topology_change()
-        return station_ids + hvdc_line_ids
-
-    if component == "Voltage Levels":
-        def _do_remove():
-            import pypowsybl.network as pn
-            pn.remove_voltage_levels(raw, ids)
-
-        run(_do_remove)
-        invalidate_on_topology_change()
-        return ids
-
-    if component == "Substations":
-        vl_ids = _find_vl_ids_for_substations(network, ids)
-
-        def _do_remove():
-            import pypowsybl.network as pn
-            if vl_ids:
-                pn.remove_voltage_levels(raw, vl_ids)
-
-        run(_do_remove)
-        invalidate_on_topology_change()
-        return ids + vl_ids
-
-    # Shallow branch removal via generic remove_elements
-    def _do_remove():
-        raw.remove_elements(ids)
-
-    run(_do_remove)
+    removed = _remove_elements_shared(network, component, ids)
     invalidate_on_topology_change()
-    return ids
+    return removed
 
 
 def update_components(network, component: str, changes_df):

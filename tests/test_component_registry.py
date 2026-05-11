@@ -13,14 +13,19 @@ import pytest
 
 from iidm_viewer.component_registry import (
     COMPONENT_TYPES,
+    DISCONNECTABLE_COMPONENTS,
+    DISCONNECT_ATTRS,
     EDITABLE_COMPONENTS,
+    REMOVABLE_COMPONENTS,
     TOPOLOGY_AFFECTING_ATTRIBUTES,
     _coerce,
+    apply_bulk_disconnect,
     apply_bulk_edit,
     apply_cell_edit,
     editable_attributes,
     get_dataframe,
     is_editable,
+    remove_elements,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy, run
 
@@ -211,3 +216,104 @@ def test_apply_bulk_edit_rejects_non_editable_attribute(ieee14_network):
         apply_bulk_edit(
             ieee14_network, "Generators", [gen_id], "name", "renamed",
         )
+
+
+# ---------------------------------------------------------------------------
+# apply_bulk_disconnect
+# ---------------------------------------------------------------------------
+def test_disconnect_attrs_covers_editable_branches_and_switches():
+    """The disconnect-attribute map must touch every connection-style
+    attribute the editable registry exposes. Sanity check the
+    cross-table invariant."""
+    assert "Generators" in DISCONNECTABLE_COMPONENTS
+    assert DISCONNECT_ATTRS["Switches"] == {"open": True}
+    assert DISCONNECT_ATTRS["Lines"] == {"connected1": False, "connected2": False}
+
+
+def test_apply_bulk_disconnect_flips_connected_and_returns_prev_map(ieee14_network):
+    df_before = get_dataframe(ieee14_network, "Generators")
+    ids = [str(x) for x in df_before["id"].iloc[:3]]
+    prev = {i: bool(df_before[df_before["id"].astype(str) == i]["connected"].iloc[0])
+            for i in ids}
+
+    per_attr = apply_bulk_disconnect(ieee14_network, "Generators", ids)
+    assert set(per_attr.keys()) == {"connected"}
+    assert set(per_attr["connected"].keys()) == set(ids)
+
+    df_after = get_dataframe(ieee14_network, "Generators")
+    for i in ids:
+        assert bool(df_after[df_after["id"].astype(str) == i]["connected"].iloc[0]) is False
+
+    # Restore so other tests aren't affected.
+    for i in ids:
+        apply_cell_edit(ieee14_network, "Generators", i, "connected", prev[i])
+
+
+def test_apply_bulk_disconnect_for_lines_touches_both_terminals(ieee14_network):
+    """Lines have two terminals — the disconnect call must apply both
+    connected1 and connected2 in one go and report both prev maps."""
+    df = get_dataframe(ieee14_network, "Lines")
+    ids = [str(df["id"].iloc[0])]
+    prev1 = bool(df[df["id"].astype(str) == ids[0]]["connected1"].iloc[0])
+    prev2 = bool(df[df["id"].astype(str) == ids[0]]["connected2"].iloc[0])
+
+    per_attr = apply_bulk_disconnect(ieee14_network, "Lines", ids)
+    assert set(per_attr.keys()) == {"connected1", "connected2"}
+
+    df_after = get_dataframe(ieee14_network, "Lines")
+    row = df_after[df_after["id"].astype(str) == ids[0]].iloc[0]
+    assert bool(row["connected1"]) is False
+    assert bool(row["connected2"]) is False
+
+    # Restore.
+    apply_cell_edit(ieee14_network, "Lines", ids[0], "connected1", prev1)
+    apply_cell_edit(ieee14_network, "Lines", ids[0], "connected2", prev2)
+
+
+def test_apply_bulk_disconnect_rejects_non_disconnectable_component(ieee14_network):
+    with pytest.raises(ValueError, match="no bulk-disconnect attribute"):
+        apply_bulk_disconnect(ieee14_network, "Voltage Levels", ["VL1"])
+
+
+def test_apply_bulk_disconnect_with_empty_ids_is_noop(ieee14_network):
+    assert apply_bulk_disconnect(ieee14_network, "Generators", []) == {}
+
+
+# ---------------------------------------------------------------------------
+# remove_elements
+# ---------------------------------------------------------------------------
+def test_removable_components_covers_streamlit_set():
+    """Streamlit's REMOVABLE_COMPONENTS frozenset must round-trip the
+    full union of feeder-bay, HVDC, branch, VL and substation types."""
+    expected_buckets = {
+        "Loads", "Generators", "Batteries",
+        "Shunt Compensators", "Static VAR Compensators",  # feeder bays
+        "HVDC Lines", "VSC Converter Stations", "LCC Converter Stations",  # hvdc
+        "Lines", "2-Winding Transformers", "Dangling Lines",  # shallow
+        "Voltage Levels", "Substations",
+    }
+    assert expected_buckets <= REMOVABLE_COMPONENTS
+
+
+def test_remove_elements_drops_a_load_via_feeder_bay_cascade(ieee14_network):
+    """Loads go through ``pn.remove_feeder_bays``. After the call the
+    load id is no longer in ``get_loads``.
+    """
+    df = get_dataframe(ieee14_network, "Loads")
+    assert df.shape[0] > 0
+    load_id = str(df["id"].iloc[0])
+
+    removed = remove_elements(ieee14_network, "Loads", [load_id])
+    assert load_id in removed
+
+    df_after = get_dataframe(ieee14_network, "Loads")
+    assert load_id not in df_after["id"].astype(str).tolist()
+
+
+def test_remove_elements_rejects_unknown_component(ieee14_network):
+    with pytest.raises(ValueError, match="not removable"):
+        remove_elements(ieee14_network, "Buses", ["B1"])
+
+
+def test_remove_elements_with_empty_ids_is_noop(ieee14_network):
+    assert remove_elements(ieee14_network, "Loads", []) == []

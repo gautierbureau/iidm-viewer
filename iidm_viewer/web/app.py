@@ -52,12 +52,17 @@ app.add_static_files(_SLD_URL, _SLD_DIST)
 # from this module.
 from iidm_viewer.component_registry import (
     COMPONENT_TYPES as COMPONENT_GETTERS,
+    DISCONNECTABLE_COMPONENTS,
+    DISCONNECT_ATTRS,
+    REMOVABLE_COMPONENTS,
     TOPOLOGY_AFFECTING_ATTRIBUTES,
+    apply_bulk_disconnect,
     apply_bulk_edit,
     apply_cell_edit,
     editable_attributes,
     get_dataframe,
     is_editable,
+    remove_elements,
 )
 
 
@@ -371,6 +376,11 @@ def _build_data_explorer():
         bulk_value = ui.input(placeholder="New value") \
             .props("dense outlined").classes("flex-grow")
         bulk_button = ui.button("Apply")
+        # Disconnect + Delete sit alongside Apply. Disconnect flips
+        # ``connected*`` / ``open`` and goes through the change log;
+        # Delete is destructive and bypasses the log.
+        disconnect_button = ui.button("Disconnect").props("flat")
+        delete_button = ui.button("Delete").props("flat color=negative")
     bulk_row.set_visibility(False)
 
     def refresh() -> None:
@@ -408,12 +418,23 @@ def _build_data_explorer():
                 f"{label}: {df.shape[0]} rows · {df.shape[1]} columns{editable_msg}"
             )
         # Refresh the bulk-edit attribute combo so it offers only the
-        # editable columns for *this* component. Hide the whole panel
-        # when the component isn't editable at all.
+        # editable columns for *this* component. The whole panel is
+        # visible whenever the component supports any bulk action
+        # (edit, disconnect, or delete).
         bulk_attr.options = cols
         bulk_attr.value = cols[0] if cols else None
         bulk_attr.update()
-        bulk_row.set_visibility(bool(cols))
+        is_disconnectable = label in DISCONNECTABLE_COMPONENTS
+        is_removable = label in REMOVABLE_COMPONENTS
+        bulk_row.set_visibility(bool(cols) or is_disconnectable or is_removable)
+        # When the component isn't editable, hide the edit-only inputs
+        # so the row reads cleanly as just "Disconnect" / "Delete".
+        bulk_label.set_visibility(bool(cols))
+        bulk_attr.set_visibility(bool(cols))
+        bulk_value.set_visibility(bool(cols))
+        bulk_button.set_visibility(bool(cols))
+        disconnect_button.set_visibility(is_disconnectable)
+        delete_button.set_visibility(is_removable)
         bulk_label.set_text("Apply to selection:")
 
     def on_cell_changed(e) -> None:
@@ -497,7 +518,109 @@ def _build_data_explorer():
         # Refresh the grid so the new (possibly coerced) values appear.
         refresh()
 
+    async def on_bulk_disconnect() -> None:
+        component = select.value
+        if _state.network is None or not component:
+            return
+        if component not in DISCONNECTABLE_COMPONENTS:
+            return
+        selected = await grid.get_selected_rows()
+        ids = [str(r["id"]) for r in (selected or []) if r.get("id") is not None]
+        if not ids:
+            ui.notify("Select one or more rows first.", type="warning")
+            return
+        try:
+            per_attr_prev_map = apply_bulk_disconnect(_state.network, component, ids)
+        except Exception as exc:
+            ui.notify(
+                f"Disconnect rejected — {component}/{len(ids)} rows: {exc}",
+                type="negative",
+            )
+            return
+        for attribute, prev_map in per_attr_prev_map.items():
+            _state.change_log.record_bulk(
+                component, attribute, prev_map,
+                DISCONNECT_ATTRS[component][attribute],
+            )
+        ui.notify(
+            f"{component}: disconnected {len(ids)} row(s)",
+            type="positive",
+            timeout=1500,
+        )
+        # Disconnect always touches a topology-affecting attribute, so
+        # flush the diagram caches unconditionally.
+        _nad_cache.clear()
+        _sld_cache.clear()
+        if _state.selected_vl:
+            _push_sld(_state.selected_vl)
+            _push_nad(_state.selected_vl, _nad_depth)
+        refresh()
+
+    async def on_bulk_delete() -> None:
+        component = select.value
+        if _state.network is None or not component:
+            return
+        if component not in REMOVABLE_COMPONENTS:
+            return
+        selected = await grid.get_selected_rows()
+        ids = [str(r["id"]) for r in (selected or []) if r.get("id") is not None]
+        if not ids:
+            ui.notify("Select one or more rows first.", type="warning")
+            return
+        # Confirm via Quasar's built-in dialog. ``await`` only resolves
+        # after the user clicks one of the buttons.
+        with ui.dialog() as confirm, ui.card():
+            ui.label(
+                f"Permanently remove {len(ids)} {component.lower()} from "
+                f"the network?"
+            ).classes("text-subtitle1")
+            ui.label(
+                "Cascades to bay switches, HVDC triples, VL contents — "
+                "not reversible by the Change Log."
+            ).classes("text-caption")
+            with ui.row().classes("justify-end w-full"):
+                ui.button("Cancel", on_click=lambda: confirm.submit(False)).props("flat")
+                ui.button(
+                    "Delete",
+                    on_click=lambda: confirm.submit(True),
+                ).props("color=negative")
+        ok = await confirm
+        if not ok:
+            return
+        try:
+            removed = remove_elements(_state.network, component, ids)
+        except Exception as exc:
+            ui.notify(
+                f"Delete failed — {component}/{len(ids)} rows: {exc}",
+                type="negative",
+            )
+            return
+        # Drop change-log entries for removed ids; they can't be reverted.
+        removed_set = set(map(str, removed))
+        live = _state.change_log.entries(component)
+        for entry in live:
+            if str(entry.get("element_id")) in removed_set:
+                try:
+                    _state.change_log._entries.remove(entry)
+                except ValueError:
+                    pass
+        _state.change_log._fire()
+        # Deletion always changes topology -> flush diagram caches.
+        _nad_cache.clear()
+        _sld_cache.clear()
+        if _state.selected_vl:
+            _push_sld(_state.selected_vl)
+            _push_nad(_state.selected_vl, _nad_depth)
+        ui.notify(
+            f"{component}: removed {len(removed)} element(s)",
+            type="positive",
+            timeout=1500,
+        )
+        refresh()
+
     bulk_button.on_click(on_bulk_apply)
+    disconnect_button.on_click(on_bulk_disconnect)
+    delete_button.on_click(on_bulk_delete)
     grid.on("cellValueChanged", on_cell_changed)
     select.on_value_change(lambda _e: refresh())
 

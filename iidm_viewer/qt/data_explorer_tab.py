@@ -44,12 +44,17 @@ from iidm_viewer.change_log import ChangeLog
 from iidm_viewer.qt.change_log_panel import ChangeLogPanel
 from iidm_viewer.component_registry import (
     COMPONENT_TYPES,
+    DISCONNECTABLE_COMPONENTS,
+    DISCONNECT_ATTRS,
+    REMOVABLE_COMPONENTS,
     TOPOLOGY_AFFECTING_ATTRIBUTES,
+    apply_bulk_disconnect,
     apply_bulk_edit,
     apply_cell_edit,
     editable_attributes,
     get_dataframe,
     is_editable,
+    remove_elements,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy
 
@@ -215,6 +220,7 @@ class DataExplorerTab(QWidget):
 
     edit_applied = Signal(str, str, str, object, object)  # component, element_id, attribute, new, prev
     bulk_edit_applied = Signal(str, list, str, object, dict)  # component, ids, attribute, new, prev_map
+    bulk_removed = Signal(str, list)  # component, removed_ids
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -273,6 +279,26 @@ class DataExplorerTab(QWidget):
         self._bulk_value.setMinimumWidth(120)
         self._bulk_apply = QPushButton("Apply")
         self._bulk_apply.clicked.connect(self._on_bulk_apply)
+        # Two more bulk actions next to "Apply", both vectorised
+        # through the shared registry. "Disconnect" flips the right
+        # ``connected*`` / ``open`` attribute(s) per component type;
+        # "Delete" routes through pn.remove_feeder_bays /
+        # remove_hvdc_lines / remove_voltage_levels as appropriate.
+        self._bulk_disconnect = QPushButton("Disconnect")
+        self._bulk_disconnect.clicked.connect(self._on_bulk_disconnect)
+        self._bulk_disconnect.setToolTip(
+            "Set connected=False (or open=True for switches) on the "
+            "selected elements; records each change in the Change Log."
+        )
+        self._bulk_delete = QPushButton("Delete")
+        self._bulk_delete.setStyleSheet("color: #b30000;")
+        self._bulk_delete.clicked.connect(self._on_bulk_delete)
+        self._bulk_delete.setToolTip(
+            "Remove the selected elements from the network. "
+            "Cascades to bay switches, HVDC triples, and VL "
+            "containers as appropriate. Not reversible."
+        )
+
         self._bulk_panel = QFrame()
         self._bulk_panel.setFrameShape(QFrame.NoFrame)
         bulk_layout = QHBoxLayout(self._bulk_panel)
@@ -282,6 +308,8 @@ class DataExplorerTab(QWidget):
         bulk_layout.addWidget(QLabel("="))
         bulk_layout.addWidget(self._bulk_value, 1)
         bulk_layout.addWidget(self._bulk_apply)
+        bulk_layout.addWidget(self._bulk_disconnect)
+        bulk_layout.addWidget(self._bulk_delete)
         self._set_bulk_enabled(False)
 
         self._change_log_panel = ChangeLogPanel()
@@ -388,8 +416,19 @@ class DataExplorerTab(QWidget):
             self.bulk_edit_applied.emit(component, [], attribute, None, {})
 
     def _set_bulk_enabled(self, enabled: bool) -> None:
+        # ``enabled`` here is the bulk-EDIT enable state. Disconnect /
+        # Delete have their own enable rules (any selection, vs. the
+        # component being disconnectable / removable).
         for w in (self._bulk_attr, self._bulk_value, self._bulk_apply):
             w.setEnabled(enabled)
+        n_selected = len(self._selected_element_ids())
+        component = self._combo.currentText()
+        self._bulk_disconnect.setEnabled(
+            n_selected > 0 and component in DISCONNECTABLE_COMPONENTS
+        )
+        self._bulk_delete.setEnabled(
+            n_selected > 0 and component in REMOVABLE_COMPONENTS
+        )
 
     def _refresh_bulk_attrs(self) -> None:
         """Re-fill the bulk-attr combo with the current component's
@@ -428,9 +467,94 @@ class DataExplorerTab(QWidget):
         component = self._combo.currentText()
         has_editable = self._bulk_attr.count() > 0
         self._bulk_label.setText(f"Apply to {n} selected:")
+        # ``_set_bulk_enabled`` updates the disconnect / delete enable
+        # state too, based on the current component's membership in
+        # DISCONNECTABLE_COMPONENTS / REMOVABLE_COMPONENTS.
         self._set_bulk_enabled(n > 0 and has_editable and is_editable(component))
 
     def _on_selection_changed(self, *_args) -> None:
+        self._update_bulk_state()
+
+    def _on_bulk_disconnect(self) -> None:
+        component = self._combo.currentText()
+        ids = self._selected_element_ids()
+        if not ids or self._network is None:
+            return
+        if component not in DISCONNECTABLE_COMPONENTS:
+            return
+        try:
+            per_attr_prev_map = apply_bulk_disconnect(self._network, component, ids)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Disconnect rejected",
+                f"{component}/{len(ids)} rows\n\n{exc}",
+            )
+            return
+        # Refresh the live frame so the model reflects the new
+        # connection state.
+        try:
+            df = get_dataframe(self._network, component)
+        except Exception:
+            df = self._model.dataframe()
+        cols = [c for c in editable_attributes(component) if c in df.columns]
+        self._model.set_dataframe(df, editable_cols=cols)
+        # Record one batch per attribute (Lines / 2W flip two).
+        if self._change_log is not None:
+            for attribute, prev_map in per_attr_prev_map.items():
+                target_value = DISCONNECT_ATTRS[component][attribute]
+                self._change_log.record_bulk(component, attribute, prev_map, target_value)
+        # Re-emit on bulk_edit_applied so MainWindow flushes NAD/SLD caches
+        # for each touched attribute.
+        for attribute, prev_map in per_attr_prev_map.items():
+            self.bulk_edit_applied.emit(
+                component, ids, attribute,
+                DISCONNECT_ATTRS[component][attribute], prev_map,
+            )
+        self._update_bulk_state()
+
+    def _on_bulk_delete(self) -> None:
+        component = self._combo.currentText()
+        ids = self._selected_element_ids()
+        if not ids or self._network is None:
+            return
+        if component not in REMOVABLE_COMPONENTS:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Delete elements?",
+            f"Permanently remove {len(ids)} {component.lower()} from the "
+            f"network?\n\n"
+            f"This cascades (feeder-bay switches, HVDC triples, VL "
+            f"contents) and is not reversible by the Change Log.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            removed = remove_elements(self._network, component, ids)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Delete failed",
+                f"{component}/{len(ids)} rows\n\n{exc}",
+            )
+            return
+        # Drop any change-log entries for the removed ids — they can
+        # no longer be reverted via apply_cell_edit anyway.
+        if self._change_log is not None:
+            for entry in list(self._change_log.entries(component)):
+                if str(entry.get("element_id")) in set(map(str, removed)):
+                    try:
+                        self._change_log._entries.remove(entry)
+                    except ValueError:
+                        pass
+            # Manually fire so the panel repaints.
+            self._change_log._fire()
+        # Refetch the live frame.
+        self._refresh(component)
+        self.bulk_removed.emit(component, removed)
         self._update_bulk_state()
 
     def _on_bulk_apply(self) -> None:

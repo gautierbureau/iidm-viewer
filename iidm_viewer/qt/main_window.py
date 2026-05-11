@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         self.nad_tab.node_clicked.connect(self._on_nad_node_clicked)
         self.data_tab.edit_applied.connect(self._on_data_edit_applied)
         self.data_tab.bulk_edit_applied.connect(self._on_data_bulk_edit_applied)
+        self.data_tab.bulk_removed.connect(self._on_data_bulk_removed)
 
     # ------------------------------------------------------------------
     # User actions
@@ -170,6 +171,18 @@ class MainWindow(QMainWindow):
         vl_id = vl_ids[0]
         self.tabs.setCurrentWidget(self.sld_tab)
         self.state.set_selected_vl(vl_id)
+
+    def _on_data_bulk_removed(self, component: str, removed_ids) -> None:
+        """A deletion always changes topology — flush the diagram caches
+        and re-render the current VL so the user sees the holes."""
+        self.nad_tab._cache.clear()
+        self.sld_tab._cache.clear()
+        if self.state.selected_vl:
+            self.nad_tab.show_voltage_level(self.state.selected_vl)
+            self.sld_tab.show_voltage_level(self.state.selected_vl)
+        self.statusBar().showMessage(
+            f"{component}: removed {len(removed_ids)} element(s)"
+        )
 
     def _on_data_bulk_edit_applied(self, component: str, ids, attribute: str, new_value, prev_map) -> None:
         from iidm_viewer.component_registry import TOPOLOGY_AFFECTING_ATTRIBUTES

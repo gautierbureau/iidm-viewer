@@ -171,9 +171,11 @@ PySide6 hosts:
   `extract_map_data`. Imported by `web.app` as `_generate_sld`,
   `_generate_nad`, `_extract_map_data` aliases.
 * `iidm_viewer.component_registry` — `COMPONENT_TYPES`,
-  `EDITABLE_COMPONENTS`, `get_dataframe`, `apply_cell_edit`,
-  `apply_bulk_edit`, `TOPOLOGY_AFFECTING_ATTRIBUTES`. Imported by
-  `web.app` for the Data Explorer tab.
+  `EDITABLE_COMPONENTS`, `REMOVABLE_COMPONENTS`,
+  `DISCONNECTABLE_COMPONENTS`, `get_dataframe`, `apply_cell_edit`,
+  `apply_bulk_edit`, `apply_bulk_disconnect`, `remove_elements`,
+  `TOPOLOGY_AFFECTING_ATTRIBUTES`. Imported by `web.app` for every
+  action in the bulk row.
 * `iidm_viewer.change_log` — `merge_entry`, `revert_via_apply`,
   `ChangeLog` class. The Streamlit `state.add_to_change_log`
   uses `merge_entry` for its collapse rules; this prototype holds
