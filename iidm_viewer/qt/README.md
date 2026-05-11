@@ -139,9 +139,11 @@ NiceGUI hosts:
   `extract_map_data`. Imported by `qt.sld_tab`, `qt.nad_tab`,
   `qt.map_tab`.
 * `iidm_viewer.component_registry` — `COMPONENT_TYPES`,
-  `EDITABLE_COMPONENTS`, `get_dataframe`, `apply_cell_edit`,
-  `apply_bulk_edit`, `TOPOLOGY_AFFECTING_ATTRIBUTES`. Imported by
-  `qt.data_explorer_tab`.
+  `EDITABLE_COMPONENTS`, `REMOVABLE_COMPONENTS`,
+  `DISCONNECTABLE_COMPONENTS`, `get_dataframe`, `apply_cell_edit`,
+  `apply_bulk_edit`, `apply_bulk_disconnect`, `remove_elements`,
+  `TOPOLOGY_AFFECTING_ATTRIBUTES`. Imported by
+  `qt.data_explorer_tab` for every action in the bulk panel.
 * `iidm_viewer.change_log` — `merge_entry`, `revert_via_apply`,
   `ChangeLog` class. The Streamlit `state.add_to_change_log` uses
   `merge_entry` for its collapse rules; the PySide6 + NiceGUI

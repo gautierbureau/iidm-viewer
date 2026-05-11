@@ -101,6 +101,61 @@ TOPOLOGY_AFFECTING_ATTRIBUTES: frozenset[str] = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# Disconnect / delete registries
+# ---------------------------------------------------------------------------
+# Per-component "disconnect" target — the attribute(s) to flip + value(s)
+# that mean "this element is no longer carrying power". Reused by
+# ``apply_bulk_disconnect`` and by the disconnect buttons in both
+# prototypes' bulk panels.
+DISCONNECT_ATTRS: dict[str, dict[str, Any]] = {
+    "Loads": {"connected": False},
+    "Generators": {"connected": False},
+    "Batteries": {"connected": False},
+    "Shunt Compensators": {"connected": False},
+    "Static VAR Compensators": {"connected": False},
+    "VSC Converter Stations": {"connected": False},
+    "LCC Converter Stations": {"connected": False},
+    "Dangling Lines": {"connected": False},
+    "Switches": {"open": True},
+    "Lines": {"connected1": False, "connected2": False},
+    "2-Winding Transformers": {"connected1": False, "connected2": False},
+}
+
+DISCONNECTABLE_COMPONENTS: frozenset[str] = frozenset(DISCONNECT_ATTRS)
+
+
+# Injection types that ``pn.remove_feeder_bays`` knows how to deep-remove
+# (the element plus its bay breaker + disconnector chain).
+_FEEDER_BAY_TYPES: frozenset[str] = frozenset({
+    "Loads",
+    "Generators",
+    "Batteries",
+    "Shunt Compensators",
+    "Static VAR Compensators",
+})
+
+# HVDC triples: removing any one of the three elements (line or either
+# converter station) cascades to remove all three.
+_HVDC_TYPES: frozenset[str] = frozenset({
+    "HVDC Lines",
+    "VSC Converter Stations",
+    "LCC Converter Stations",
+})
+
+# Branch / link types removed via the generic ``raw.remove_elements`` API.
+_SHALLOW_REMOVE_TYPES: frozenset[str] = frozenset({
+    "Lines",
+    "2-Winding Transformers",
+    "Dangling Lines",
+})
+
+REMOVABLE_COMPONENTS: frozenset[str] = (
+    _FEEDER_BAY_TYPES | _HVDC_TYPES | _SHALLOW_REMOVE_TYPES
+    | {"Voltage Levels", "Substations"}
+)
+
+
 def is_editable(component: str, attribute: Optional[str] = None) -> bool:
     """``True`` if the component (or specific attribute) is editable."""
     entry = EDITABLE_COMPONENTS.get(component)
@@ -226,6 +281,165 @@ def apply_bulk_edit(
         return prev
 
     return run(_do)
+
+
+def apply_bulk_disconnect(
+    network: NetworkProxy,
+    component: str,
+    element_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Disconnect every id in ``element_ids`` using the right pypowsybl
+    attribute(s) for the component type.
+
+    Returns ``{attribute: {element_id: previous_value}}`` for the
+    caller's change log — one inner map per attribute touched
+    (Lines / 2-Winding Transformers flip two attributes; everything
+    else flips one). Worker-thread bound.
+    """
+    if component not in DISCONNECT_ATTRS:
+        raise ValueError(
+            f"component {component!r} has no bulk-disconnect attribute"
+        )
+    if not element_ids:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for attribute, target in DISCONNECT_ATTRS[component].items():
+        out[attribute] = apply_bulk_edit(
+            network, component, element_ids, attribute, target,
+        )
+    return out
+
+
+def _find_vl_ids_for_substations(
+    network: NetworkProxy, substation_ids: list[str],
+) -> list[str]:
+    """Return all voltage-level ids that belong to the given substations."""
+    raw = object.__getattribute__(network, "_obj")
+    sub_set = set(substation_ids)
+
+    def _gather():
+        vl_df = raw.get_voltage_levels()
+        if vl_df.empty or "substation_id" not in vl_df.columns:
+            return []
+        return vl_df[vl_df["substation_id"].isin(sub_set)].index.tolist()
+
+    return run(_gather)
+
+
+def _resolve_hvdc_removal(
+    network: NetworkProxy, component: str, ids: list[str],
+) -> tuple[list[str], list[str]]:
+    """Expand an HVDC removal request to the full triple: stations + line.
+
+    Returns ``(station_ids, hvdc_line_ids)``. Removing any element in
+    an HVDC set cascades to all three; ``pn.remove_hvdc_lines`` handles
+    the line + both stations in one call.
+    """
+    raw = object.__getattribute__(network, "_obj")
+
+    def _gather():
+        hvdc_df = raw.get_hvdc_lines()
+        hvdc_to_stations: dict[str, tuple[str, str]] = {}
+        station_to_hvdc: dict[str, str] = {}
+        for hvdc_id in hvdc_df.index:
+            cs1 = hvdc_df.at[hvdc_id, "converter_station1_id"]
+            cs2 = hvdc_df.at[hvdc_id, "converter_station2_id"]
+            hvdc_to_stations[hvdc_id] = (cs1, cs2)
+            station_to_hvdc[cs1] = hvdc_id
+            station_to_hvdc[cs2] = hvdc_id
+        return hvdc_to_stations, station_to_hvdc
+
+    hvdc_to_stations, station_to_hvdc = run(_gather)
+
+    hvdc_ids: set[str] = set()
+    for eid in ids:
+        if component == "HVDC Lines":
+            hvdc_ids.add(eid)
+        else:
+            hvdc_id = station_to_hvdc.get(eid)
+            if hvdc_id:
+                hvdc_ids.add(hvdc_id)
+
+    station_ids: set[str] = set()
+    for hvdc_id in hvdc_ids:
+        cs1, cs2 = hvdc_to_stations.get(hvdc_id, (None, None))
+        if cs1:
+            station_ids.add(cs1)
+        if cs2:
+            station_ids.add(cs2)
+
+    return list(station_ids), list(hvdc_ids)
+
+
+def remove_elements(
+    network: NetworkProxy,
+    component: str,
+    ids: list[str],
+) -> list[str]:
+    """Remove ``ids`` from the network on the worker thread.
+
+    Returns the full list of element ids that were actually removed,
+    which can be larger than ``ids`` for HVDC, Voltage Level, and
+    Substation cascades:
+
+    * Feeder-bay injections → ``pn.remove_feeder_bays`` (deep removal,
+      drops the bay breaker + disconnectors too).
+    * HVDC triples → ``pn.remove_hvdc_lines`` (handles line + both
+      converter stations as one set).
+    * Voltage Levels → ``pn.remove_voltage_levels`` (cascades every
+      connectable inside the VL).
+    * Substations → resolve contained VLs first, then
+      ``pn.remove_voltage_levels``.
+    * Branches → ``raw.remove_elements`` (shallow).
+
+    Raises ``ValueError`` for unknown component types so the UI can
+    fail loud rather than silently no-op.
+    """
+    if component not in REMOVABLE_COMPONENTS:
+        raise ValueError(f"component {component!r} is not removable")
+    if not ids:
+        return []
+    raw = object.__getattribute__(network, "_obj")
+
+    if component in _FEEDER_BAY_TYPES:
+        def _do():
+            import pypowsybl.network as pn
+            pn.remove_feeder_bays(raw, ids)
+        run(_do)
+        return list(ids)
+
+    if component in _HVDC_TYPES:
+        station_ids, hvdc_line_ids = _resolve_hvdc_removal(network, component, ids)
+
+        def _do():
+            import pypowsybl.network as pn
+            pn.remove_hvdc_lines(raw, hvdc_line_ids)
+        run(_do)
+        return station_ids + hvdc_line_ids
+
+    if component == "Voltage Levels":
+        def _do():
+            import pypowsybl.network as pn
+            pn.remove_voltage_levels(raw, ids)
+        run(_do)
+        return list(ids)
+
+    if component == "Substations":
+        vl_ids = _find_vl_ids_for_substations(network, ids)
+
+        def _do():
+            import pypowsybl.network as pn
+            if vl_ids:
+                pn.remove_voltage_levels(raw, vl_ids)
+        run(_do)
+        return list(ids) + vl_ids
+
+    # _SHALLOW_REMOVE_TYPES — branches and dangling lines.
+    def _do():
+        raw.remove_elements(ids)
+
+    run(_do)
+    return list(ids)
 
 
 def apply_cell_edit(

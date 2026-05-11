@@ -475,6 +475,70 @@ def test_data_explorer_bulk_edit_records_n_entries(qapp, loaded_window):
         assert refreshed["target_p"].iloc[i] == pytest.approx(expected)
 
 
+def test_data_explorer_bulk_disconnect_flips_connected_and_records(qapp, loaded_window):
+    """Selecting N rows + clicking Disconnect calls apply_bulk_disconnect
+    and records one ChangeLog entry per (id, attribute)."""
+    explorer = loaded_window.data_tab
+    explorer._combo.setCurrentText("Generators")
+    qapp.processEvents()
+
+    # Select first 3 proxy rows.
+    sel = explorer._table.selectionModel()
+    sel.clearSelection()
+    from PySide6.QtCore import QItemSelection, QItemSelectionModel
+    for r in range(3):
+        idx_top = explorer._proxy.index(r, 0)
+        idx_right = explorer._proxy.index(r, explorer._proxy.columnCount() - 1)
+        sel.select(
+            QItemSelection(idx_top, idx_right),
+            QItemSelectionModel.Select | QItemSelectionModel.Rows,
+        )
+    qapp.processEvents()
+    explorer._update_bulk_state()
+    assert explorer._bulk_disconnect.isEnabled()
+
+    ids = explorer._selected_element_ids()
+    explorer._on_bulk_disconnect()
+    qapp.processEvents()
+
+    df_after = explorer._model.dataframe()
+    for i in ids:
+        assert bool(df_after[df_after["id"].astype(str) == i]["connected"].iloc[0]) is False
+
+    # One change-log entry per id, all with property=connected.
+    log_entries = loaded_window.state.change_log.entries("Generators")
+    assert len(log_entries) == 3
+    assert {e["property"] for e in log_entries} == {"connected"}
+
+    # Restore (so subsequent tests using shared worker thread aren't broken).
+    log = loaded_window.state.change_log
+    reverted, _ = log.revert_all(loaded_window.state.network)
+    assert reverted == 3
+
+
+def test_disconnect_button_disabled_for_non_disconnectable_component(qapp, loaded_window):
+    explorer = loaded_window.data_tab
+    # Voltage Levels aren't in DISCONNECTABLE_COMPONENTS.
+    explorer._combo.setCurrentText("Voltage Levels")
+    qapp.processEvents()
+
+    # Even with rows selected, disconnect stays disabled.
+    sel = explorer._table.selectionModel()
+    sel.clearSelection()
+    from PySide6.QtCore import QItemSelection, QItemSelectionModel
+    idx_top = explorer._proxy.index(0, 0)
+    idx_right = explorer._proxy.index(0, explorer._proxy.columnCount() - 1)
+    sel.select(
+        QItemSelection(idx_top, idx_right),
+        QItemSelectionModel.Select | QItemSelectionModel.Rows,
+    )
+    qapp.processEvents()
+    explorer._update_bulk_state()
+    assert not explorer._bulk_disconnect.isEnabled()
+    # Voltage Levels ARE in REMOVABLE_COMPONENTS — delete should be enabled.
+    assert explorer._bulk_delete.isEnabled()
+
+
 def test_change_log_panel_repaints_on_record(qapp, loaded_window):
     """The panel's title and table reflect log mutations in real time
     via the on_changed bus.
