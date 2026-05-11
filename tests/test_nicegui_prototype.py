@@ -173,6 +173,20 @@ def test_dataframe_to_aggrid_options_marks_editable_columns():
     assert "editable" not in by_field["id"]
 
 
+def test_dataframe_to_aggrid_options_enables_multi_row_selection():
+    """Bulk edit needs ag-Grid ``rowSelection: 'multiple'`` and the
+    ``id`` column's checkbox affordance — guard both."""
+    import pandas as pd
+    from iidm_viewer.web.app import _dataframe_to_aggrid_options
+
+    opts = _dataframe_to_aggrid_options(pd.DataFrame({"id": ["a"], "v": [1]}))
+    assert opts.get("rowSelection") == "multiple"
+
+    id_col = next(c for c in opts["columnDefs"] if c["field"] == "id")
+    assert id_col.get("checkboxSelection") is True
+    assert id_col.get("headerCheckboxSelection") is True
+
+
 def test_dataframe_to_aggrid_options_default_col_def_enables_sort_and_filter():
     """The default col def must give every column sort + floating filter.
 

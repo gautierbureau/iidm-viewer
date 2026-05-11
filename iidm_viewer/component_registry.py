@@ -172,6 +172,62 @@ def _coerce(raw_value: Any, dtype) -> Any:
     return str(raw_value)
 
 
+def apply_bulk_edit(
+    network: NetworkProxy,
+    component: str,
+    element_ids: list[str],
+    attribute: str,
+    new_value: Any,
+) -> dict[str, Any]:
+    """Apply the same edit to every id in ``element_ids`` in a single
+    vectorised ``update_<component>`` call.
+
+    Returns ``{element_id: previous_value}`` for any id whose previous
+    value could be read — hosts can use it to populate a change log or
+    revert. Coercion happens once against the column's dtype, so all
+    rows receive the same typed value.
+
+    The whole read + write pair runs on the pypowsybl worker thread,
+    same constraint as :func:`apply_cell_edit`.
+    """
+    if component not in EDITABLE_COMPONENTS:
+        raise ValueError(f"component {component!r} is not editable")
+    method_name, editable_attrs = EDITABLE_COMPONENTS[component]
+    if attribute not in editable_attrs:
+        raise ValueError(
+            f"attribute {attribute!r} is not editable for {component}"
+        )
+    ids = [str(eid) for eid in element_ids]
+    if not ids:
+        return {}
+    getter_name = COMPONENT_TYPES[component]
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do():
+        import pandas as pd
+
+        prev: dict[str, Any] = {}
+        coerced = new_value
+        getter = getattr(raw, getter_name, None)
+        if getter is not None:
+            df = getter()
+            if df is not None and attribute in df.columns:
+                coerced = _coerce(new_value, df[attribute].dtype)
+                for eid in ids:
+                    if eid in df.index:
+                        prev[eid] = df.at[eid, attribute]
+
+        update_method = getattr(raw, method_name)
+        changes = pd.DataFrame(
+            {attribute: [coerced] * len(ids)},
+            index=pd.Index(ids, name="id"),
+        )
+        update_method(changes)
+        return prev
+
+    return run(_do)
+
+
 def apply_cell_edit(
     network: NetworkProxy,
     component: str,
