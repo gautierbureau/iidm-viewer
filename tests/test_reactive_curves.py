@@ -2,6 +2,7 @@
 import pandas as pd
 
 from iidm_viewer.reactive_curves import (
+    _add_bus_voltage_columns,
     _vl_to_step_up_transformer_table,
     classify_targets,
 )
@@ -241,6 +242,48 @@ def test_step_up_transformer_empty_inputs_dont_crash():
     bad = pd.DataFrame([{"id": "X", "voltage_level1_id": "A"}]).set_index("id")
     out = _vl_to_step_up_transformer_table(bad)
     assert out.empty
+
+
+def test_add_bus_voltage_columns_gap_sign():
+    # G_ok regulates successfully (gap = 0). G_low has its bus at 235 kV
+    # against target 240 → gap = +5 kV (LF wanted more Q production but
+    # clamped). G_high has its bus at 245 kV against target 240 → gap = -5.
+    # G_missing's bus has no entry in the LF voltage frame → NaN.
+    gens = pd.DataFrame([
+        {"id": "G_ok",      "bus_id": "B1", "target_v": 24.0},
+        {"id": "G_low",     "bus_id": "B2", "target_v": 240.0},
+        {"id": "G_high",    "bus_id": "B3", "target_v": 240.0},
+        {"id": "G_missing", "bus_id": "B4", "target_v": 24.0},
+    ]).set_index("id")
+    buses = pd.DataFrame([
+        {"bus_id": "B1", "v_mag": 24.0},
+        {"bus_id": "B2", "v_mag": 235.0},
+        {"bus_id": "B3", "v_mag": 245.0},
+    ])
+    out = _add_bus_voltage_columns(gens, buses)
+    assert out.loc["G_ok", "v_bus"] == 24.0
+    assert out.loc["G_ok", "v_target_gap"] == 0.0
+    assert out.loc["G_low", "v_target_gap"] == 5.0
+    assert out.loc["G_high", "v_target_gap"] == -5.0
+    assert pd.isna(out.loc["G_missing", "v_bus"])
+    assert pd.isna(out.loc["G_missing", "v_target_gap"])
+
+
+def test_add_bus_voltage_columns_empty_inputs():
+    gens = pd.DataFrame([
+        {"id": "G", "bus_id": "B1", "target_v": 24.0},
+    ]).set_index("id")
+    out = _add_bus_voltage_columns(gens, pd.DataFrame())
+    # No voltages available → columns added as NaN, not raised.
+    assert pd.isna(out.loc["G", "v_bus"])
+    assert pd.isna(out.loc["G", "v_target_gap"])
+    # Missing input columns → function is a no-op (no v_bus/gap added).
+    no_target_v = pd.DataFrame([
+        {"id": "G", "bus_id": "B1"},
+    ]).set_index("id")
+    out2 = _add_bus_voltage_columns(no_target_v, pd.DataFrame())
+    assert "v_bus" not in out2.columns
+    assert "v_target_gap" not in out2.columns
 
 
 def test_classify_distance_diagonal_corner():
