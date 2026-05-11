@@ -127,6 +127,24 @@ stays there for the lifetime of the process — exactly the same
 guarantee the Streamlit path makes (AGENTS.md §1). Qt's GUI thread
 never touches pypowsybl directly.
 
+## Shared backbone
+
+This package is render-only. Every pypowsybl-facing helper lives in
+the framework-agnostic modules and is reused with the Streamlit and
+NiceGUI hosts:
+
+* `iidm_viewer.network_loader` — `load_from_path`, `pick_default_vl`,
+  `get_import_extensions`. Used by `qt.state.AppState`.
+* `iidm_viewer.diagram_services` — `generate_sld`, `generate_nad`,
+  `extract_map_data`. Imported by `qt.sld_tab`, `qt.nad_tab`,
+  `qt.map_tab`.
+* `iidm_viewer.component_registry` — `COMPONENT_TYPES`,
+  `EDITABLE_COMPONENTS`, `get_dataframe`, `apply_cell_edit`,
+  `TOPOLOGY_AFFECTING_ATTRIBUTES`. Imported by `qt.data_explorer_tab`.
+
+When adding behaviour that's not Qt-specific, put it in those shared
+modules so the NiceGUI port (and the Streamlit app) gets it for free.
+
 ## Test it offscreen
 
 ```bash

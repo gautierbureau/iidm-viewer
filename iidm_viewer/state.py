@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from iidm_viewer.powsybl_worker import NetworkProxy, run
+from iidm_viewer import network_loader
 from iidm_viewer.caches import (
     invalidate_on_load_flow,
     invalidate_on_network_replace,
@@ -28,32 +29,18 @@ def get_import_extensions() -> list[str]:
 
     Result is cached in session state so the worker is only hit once per
     browser session. ``zip`` is always included for pre-zipped archives.
+    Delegates to :mod:`iidm_viewer.network_loader` for the actual
+    worker-routed pypowsybl call.
     """
     if "import_extensions" not in st.session_state:
-        def _get():
-            import pypowsybl.network as pn
-            return pn.get_import_supported_extensions()
-        raw = run(_get)
-        seen: set[str] = set()
-        exts: list[str] = []
-        for e in raw:
-            e_lower = e.lower()
-            if e_lower not in seen:
-                seen.add(e_lower)
-                exts.append(e_lower)
-        if "zip" not in seen:
-            exts.append("zip")
-        st.session_state["import_extensions"] = exts
+        st.session_state["import_extensions"] = network_loader.get_import_extensions()
     return st.session_state["import_extensions"]
 
 
 def get_export_formats() -> list[str]:
     """Return export format names supported by pypowsybl, cached per session."""
     if "export_formats" not in st.session_state:
-        def _get():
-            import pypowsybl.network as pn
-            return pn.get_export_formats()
-        st.session_state["export_formats"] = run(_get)
+        st.session_state["export_formats"] = network_loader.get_export_formats()
     return st.session_state["export_formats"]
 
 
@@ -116,25 +103,13 @@ def load_network(
     The raw file bytes are stored in ``_last_file_bytes`` so the UI can offer
     a "Reload with options" flow without requiring a second upload.
     """
-    from io import BytesIO
     raw_bytes = uploaded_file.getvalue()
-    if uploaded_file.name.lower().endswith(".zip"):
-        buf = BytesIO(raw_bytes)
-    else:
-        import zipfile
-        buf = BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(uploaded_file.name, raw_bytes)
-        buf.seek(0)
-
-    params = parameters or {}
-    pp_list = post_processors or []
-
-    def _load():
-        import pypowsybl.network as pn
-        return pn.load_from_binary_buffer(buf, parameters=params, post_processors=pp_list)
-
-    network = NetworkProxy(run(_load))
+    network = network_loader.load_from_bytes(
+        uploaded_file.name,
+        raw_bytes,
+        parameters=parameters,
+        post_processors=post_processors,
+    )
     st.session_state.network = network
     st.session_state.selected_vl = None
     st.session_state["vl_selector_gen"] = st.session_state.get("vl_selector_gen", 0) + 1
@@ -161,13 +136,7 @@ def create_empty_network(network_id: str = "network"):
     :class:`NetworkProxy` so every subsequent pypowsybl call runs on the
     worker thread.
     """
-    nid = (network_id or "network").strip() or "network"
-
-    def _create():
-        import pypowsybl.network as pn
-        return pn.create_empty(network_id=nid)
-
-    network = NetworkProxy(run(_create))
+    network = network_loader.create_empty(network_id)
     st.session_state.network = network
     st.session_state.selected_vl = None
     st.session_state["vl_selector_gen"] = st.session_state.get("vl_selector_gen", 0) + 1
@@ -215,39 +184,9 @@ def run_loadflow(network):
     return results
 
 
-# Component label -> (update method, [editable attributes])
-EDITABLE_COMPONENTS: dict[str, tuple[str, list[str]]] = {
-    "Loads": ("update_loads", ["p0", "q0", "connected"]),
-    "Generators": (
-        "update_generators",
-        ["target_p", "target_v", "target_q", "voltage_regulator_on", "regulated_element_id", "connected"],
-    ),
-    "Batteries": ("update_batteries", ["target_p", "target_q", "connected"]),
-    "Switches": ("update_switches", ["open"]),
-    "Shunt Compensators": ("update_shunt_compensators", ["section_count", "connected"]),
-    "Static VAR Compensators": (
-        "update_static_var_compensators",
-        ["regulation_mode", "voltage_setpoint", "reactive_power_setpoint", "regulated_element_id", "connected"],
-    ),
-    "VSC Converter Stations": (
-        "update_vsc_converter_stations",
-        ["target_v", "target_q", "voltage_regulator_on", "regulated_element_id", "connected"],
-    ),
-    "LCC Converter Stations": (
-        "update_lcc_converter_stations",
-        ["power_factor", "connected"],
-    ),
-    "HVDC Lines": ("update_hvdc_lines", ["active_power_setpoint", "converters_mode"]),
-    "Dangling Lines": ("update_dangling_lines", ["p0", "q0", "connected"]),
-    "Lines": (
-        "update_lines",
-        ["r", "x", "g1", "b1", "g2", "b2", "connected1", "connected2"],
-    ),
-    "2-Winding Transformers": (
-        "update_2_windings_transformers",
-        ["r", "x", "g", "b", "connected1", "connected2"],
-    ),
-}
+# Source of truth lives in iidm_viewer.component_registry so the Qt /
+# NiceGUI prototypes can reuse it without importing streamlit.
+from iidm_viewer.component_registry import EDITABLE_COMPONENTS  # noqa: F401
 
 
 # Injection types: pn.remove_feeder_bays removes the element AND its bay switches

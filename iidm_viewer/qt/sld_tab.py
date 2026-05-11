@@ -12,7 +12,8 @@ from typing import Optional
 
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from iidm_viewer.powsybl_worker import NetworkProxy, run
+from iidm_viewer.diagram_services import generate_sld as _generate_sld
+from iidm_viewer.powsybl_worker import NetworkProxy
 from iidm_viewer.qt.web_view import PowsyblWebView
 
 
@@ -20,19 +21,6 @@ _SLD_DIST = os.path.join(
     os.path.dirname(os.path.dirname(__file__)),
     "frontend", "sld_component", "dist",
 )
-
-
-def _generate_sld(network: NetworkProxy, vl_id: str):
-    """Return ``(svg, metadata_json)`` for ``vl_id``. Worker-thread bound."""
-    raw = object.__getattribute__(network, "_obj")
-
-    def _do():
-        from pypowsybl.network import SldParameters
-        params = SldParameters(use_name=True, tooltip_enabled=True)
-        sld = raw.get_single_line_diagram(vl_id, parameters=params)
-        return sld.svg, sld.metadata
-
-    return run(_do)
 
 
 class SldTab(QWidget):

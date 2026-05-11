@@ -118,12 +118,35 @@ Minimum steps every end-to-end run must perform:
 Everything pypowsybl-facing flows: UI code → `NetworkProxy` → worker thread →
 pypowsybl → result wrapped and handed back.
 
+The Streamlit app (`iidm-viewer`), the PySide6 prototype (`iidm-viewer-pyside`,
+`iidm_viewer/qt/`) and the NiceGUI prototype (`iidm-viewer-nicegui`,
+`iidm_viewer/web/`) share three framework-agnostic backbone modules:
+
+* `component_registry.py` — `COMPONENT_TYPES`, `EDITABLE_COMPONENTS`,
+  `get_dataframe`, `apply_cell_edit`. Single source of truth for which
+  pypowsybl components the Data Explorer surfaces and which of their
+  attributes are editable.
+* `diagram_services.py` — `generate_sld`, `generate_nad`,
+  `extract_map_data`. The three worker-routed "produce a viewable
+  artefact" helpers every host calls.
+* `network_loader.py` — `load_from_path`, `load_from_bytes`,
+  `create_empty`, `pick_default_vl`, `get_import_extensions`,
+  `get_export_formats`. The worker-routed network-IO surface.
+
+None of those modules import streamlit, PySide6 or NiceGUI. When
+adding behaviour that's plausibly host-agnostic (any pypowsybl
+read/write helper, any "default" pick the UI exposes), put it here
+and import from each host rather than copying.
+
 ### Module map
 
 | File | Role | Deep-dive |
 |---|---|---|
 | `powsybl_worker.py` | Single-threaded executor + `NetworkProxy` | [docs/threading.md](docs/threading.md) |
-| `state.py` | Session state init, `load_network`, `create_empty_network`, `run_loadflow`, `update_components`, `EDITABLE_COMPONENTS` | [docs/loadflow.md](docs/loadflow.md) |
+| `component_registry.py` | Shared pypowsybl component + editable-attribute registry | — |
+| `diagram_services.py` | Shared SLD / NAD / map-data generators (worker-routed) | — |
+| `network_loader.py` | Shared network IO (load from path / bytes, default-VL pick) | — |
+| `state.py` | Streamlit session-state shim. Re-exports `EDITABLE_COMPONENTS` from `component_registry`; routes loaders through `network_loader` | [docs/loadflow.md](docs/loadflow.md) |
 | `lf_parameters.py` | Load flow parameter dialog + `get_lf_parameters()` | [docs/loadflow.md](docs/loadflow.md) |
 | `app.py` | Entry point: sidebar + 8 tabs | [docs/tabs.md](docs/tabs.md) |
 | `components.py` | `vl_selector`, `render_svg` | [docs/tabs.md](docs/tabs.md) |

@@ -159,6 +159,26 @@ as-is. All pypowsybl calls (`pn.load`, `get_voltage_levels`,
 NiceGUI's event handlers off-load to that thread via the same
 helpers as the Streamlit and PySide6 paths.
 
+## Shared backbone
+
+This package is render-only. Every pypowsybl-facing helper lives in
+the framework-agnostic modules and is reused with the Streamlit and
+PySide6 hosts:
+
+* `iidm_viewer.network_loader` — `load_from_path`, `pick_default_vl`.
+  Used by `web.state.AppState`.
+* `iidm_viewer.diagram_services` — `generate_sld`, `generate_nad`,
+  `extract_map_data`. Imported by `web.app` as `_generate_sld`,
+  `_generate_nad`, `_extract_map_data` aliases.
+* `iidm_viewer.component_registry` — `COMPONENT_TYPES`,
+  `EDITABLE_COMPONENTS`, `get_dataframe`, `apply_cell_edit`,
+  `TOPOLOGY_AFFECTING_ATTRIBUTES`. Imported by `web.app` for the
+  Data Explorer tab.
+
+When adding behaviour that's not NiceGUI-specific, put it in those
+shared modules so the PySide6 port (and the Streamlit app) gets it
+for free.
+
 ## Test it
 
 ```bash
