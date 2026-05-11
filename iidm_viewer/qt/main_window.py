@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from iidm_viewer.qt.data_explorer_tab import DataExplorerTab
 from iidm_viewer.qt.map_tab import MapTab
 from iidm_viewer.qt.nad_tab import NadTab
 from iidm_viewer.qt.sld_tab import SldTab
@@ -74,11 +75,13 @@ class MainWindow(QMainWindow):
         self.map_tab = MapTab()
         self.nad_tab = NadTab()
         self.sld_tab = SldTab()
+        self.data_tab = DataExplorerTab()
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.map_tab, "Network Map")
         self.tabs.addTab(self.nad_tab, "Network Area Diagram")
         self.tabs.addTab(self.sld_tab, "Single Line Diagram")
+        self.tabs.addTab(self.data_tab, "Data Explorer Components")
 
         self.sidebar = _Sidebar(self._on_load_clicked)
 
@@ -135,6 +138,7 @@ class MainWindow(QMainWindow):
         self.map_tab.set_network(network)
         self.nad_tab.set_network(network)
         self.sld_tab.set_network(network)
+        self.data_tab.set_network(network)
         self.tabs.setCurrentWidget(self.map_tab)
 
     def _on_selected_vl_changed(self, vl_id: str) -> None:
