@@ -539,6 +539,61 @@ def test_disconnect_button_disabled_for_non_disconnectable_component(qapp, loade
     assert explorer._bulk_delete.isEnabled()
 
 
+def test_sld_feeder_click_routes_to_map_substation(qapp, loaded_window):
+    """End-to-end cross-tab nav: an SLD feeder-click payload for a
+    real IEEE14 line lands the user on the Map tab and triggers a
+    flyTo on the map widget.
+    """
+    window = loaded_window
+
+    # Capture render_component calls on the map view to confirm a
+    # flyTo arg arrives. The widget may not be ``_ready`` yet under
+    # offscreen Qt, in which case the args land on ``_pending``
+    # instead — accept either path.
+    captured: list[dict] = []
+    original_render = window.map_tab._view.render_component
+    window.map_tab._view.render_component = lambda **kw: captured.append(kw)
+
+    # Pick a real IEEE14 line — VL1↔VL2 in the IEEE 14-bus fixture.
+    from iidm_viewer.component_registry import get_dataframe
+    lines = get_dataframe(window.state.network, "Lines")
+    assert lines.shape[0] > 0
+    line_id = str(lines["id"].iloc[0])
+    current_vl = str(lines["voltage_level1_id"].iloc[0])
+
+    # Park the SLD on the line's VL1 so the resolver picks VL2.
+    window.sld_tab._current_vl = current_vl
+    window.tabs.setCurrentWidget(window.sld_tab)
+    qapp.processEvents()
+
+    # Synthesise the JS payload.
+    window.sld_tab._on_value({
+        "type": "sld-feeder-click",
+        "equipmentId": line_id,
+        "equipmentType": "LINE",
+        "x": 0,
+        "y": 0,
+        "ts": 0,
+    })
+    qapp.processEvents()
+
+    window.map_tab._view.render_component = original_render
+    # Tab switched to Map.
+    assert window.tabs.currentWidget() is window.map_tab
+    # A flyTo arg was either dispatched or queued onto _pending.
+    pending_flyto = (window.map_tab._pending or {}).get("flyTo") if window.map_tab._pending else None
+    dispatched_flyto = next((c.get("flyTo") for c in captured if c.get("flyTo")), None)
+    flyto = dispatched_flyto or pending_flyto
+    assert flyto is not None
+    assert flyto.get("substationId")
+    # That substation id matches the resolver's answer.
+    from iidm_viewer.navigation import resolve_feeder_substation
+    expected = resolve_feeder_substation(
+        window.state.network, current_vl, line_id, "LINE",
+    )
+    assert flyto["substationId"] == expected
+
+
 def test_change_log_panel_repaints_on_record(qapp, loaded_window):
     """The panel's title and table reflect log mutations in real time
     via the on_changed bus.

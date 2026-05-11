@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from iidm_viewer.diagram_services import generate_sld as _generate_sld
@@ -39,6 +40,12 @@ _SLD_DIST = os.path.join(
 class SldTab(QWidget):
     """Renders the SLD for the currently selected voltage level."""
 
+    # Emitted when the user clicks a feeder's equipment glyph. Payload
+    # is the parsed bundle event dict — the MainWindow resolves it to
+    # a substation via ``navigation.resolve_feeder_substation`` and
+    # focuses the Map tab on that substation.
+    feeder_clicked = Signal(dict)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
@@ -49,6 +56,7 @@ class SldTab(QWidget):
         self._status = QLabel("Select a substation on the Network Map.")
         self._status.setStyleSheet("padding: 6px 10px; color: #444;")
         self._view = PowsyblWebView(_SLD_DIST, self)
+        self._view.value_received.connect(self._on_value)
         self._view.ready.connect(self._on_ready)
 
         layout = QVBoxLayout(self)
@@ -86,6 +94,14 @@ class SldTab(QWidget):
     def _on_ready(self) -> None:
         self._ready = True
         self._render()
+
+    def _on_value(self, value: dict) -> None:
+        if value.get("type") == "sld-feeder-click":
+            self.feeder_clicked.emit({
+                "equipment_id": value.get("equipmentId"),
+                "equipment_type": value.get("equipmentType"),
+                "current_vl_id": self._current_vl,
+            })
 
     def _render(self) -> None:
         if not self._ready or self._current_vl is None:
