@@ -1,11 +1,12 @@
-# HMI Mirror Script (Session Script tab)
+# HMI Mirror Script (Session Script dialog)
 
-The "Session Script" tab turns the user's HMI session into a runnable
-Python script.  Every time the app mutates the network (load, edit,
-remove, create, run a load flow, run security analysis), one op is
-appended to a per-session log; the user downloads a self-contained
-`session_<timestamp>.py` that calls into pypowsybl directly to replay
-those ops against any compatible network.
+The "View live Script" button at the bottom of the sidebar opens a
+dialog showing a runnable Python script that mirrors the user's HMI
+session.  Every time the app mutates the network (load, edit, remove,
+create, run a load flow, run security or short-circuit analysis), one
+op is appended to a per-session log; the dialog renders a
+self-contained `session_<timestamp>.py` that calls into pypowsybl
+directly to replay those ops against any compatible network.
 
 The generator does not depend on Streamlit or pypowsybl, so its tests
 run without bringing the JVM online.
@@ -16,7 +17,7 @@ run without bringing the JVM online.
 |---|---|
 | `iidm_viewer/script_recorder.py` | Session-state op log; `record_*` helpers called from `state.py` mutators |
 | `iidm_viewer/script_generator.py` | Pure-Python op log → runnable script string |
-| `iidm_viewer/session_script.py` | "Session Script" tab UI: live preview, download, clear, include-reverted toggle |
+| `iidm_viewer/session_script.py` | `show_session_script_dialog` — live preview, download, clear, Recording + Include-reverted toggles |
 
 ## Op log
 
@@ -26,7 +27,7 @@ op is appended in its place — there is no "before-load" garbage.
 
 ## Pause / resume
 
-Recording is on by default.  The Session Script tab carries a
+Recording is on by default.  The Session Script dialog carries a
 *Recording* toggle; flipping it off makes every subsequent `record_*`
 call a silent no-op.  The op log itself is preserved, so toggling
 back on resumes appending.
@@ -36,7 +37,8 @@ The pause flag (`st.session_state["_op_log_paused"]`) is reset to
 `record_create_empty`, and `clear_log` all auto-resume so the next
 session always starts recording.  Loading a new network also pops the
 widget's session-state key (`script_recorder.RECORDING_WIDGET_KEY`)
-so the toggle visibly snaps back to ON.
+so the toggle visibly snaps back to ON the next time the dialog
+opens.
 
 Op kinds (all phases):
 

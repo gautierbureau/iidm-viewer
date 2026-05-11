@@ -152,7 +152,7 @@ pypowsybl → result wrapped and handed back.
 | `cli.py` | `iidm-viewer` entry-point shim | — |
 | `script_recorder.py` | Session-state op log appended by `state.py` mutators | [docs/hmi-mirror-script.md](docs/hmi-mirror-script.md) |
 | `script_generator.py` | Pure-Python op-log → runnable script | [docs/hmi-mirror-script.md](docs/hmi-mirror-script.md) |
-| `session_script.py` | "Session Script" tab: preview, toggle, download, clear | [docs/hmi-mirror-script.md](docs/hmi-mirror-script.md) |
+| `session_script.py` | "Session Script" dialog (sidebar "View live Script" button): preview, Recording + Include-reverted toggles, download, clear | [docs/hmi-mirror-script.md](docs/hmi-mirror-script.md) |
 
 ### Quick-start by task
 
