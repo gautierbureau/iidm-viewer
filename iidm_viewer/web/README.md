@@ -1,9 +1,10 @@
 # `iidm_viewer.web` — NiceGUI preview
 
 A third front-end alongside the Streamlit app (`iidm-viewer`) and
-the PySide6 prototype (`iidm-viewer-pyside`). Two tabs only —
-**Network Map** and **Single Line Diagram** — same scope as the
-PySide6 spike, so the two can be compared head-to-head on:
+the PySide6 prototype (`iidm-viewer-pyside`). Four tabs —
+**Network Map**, **Network Area Diagram**, **Single Line Diagram**,
+and **Data Explorer Components** — same scope as the PySide6 spike,
+so the two can be compared head-to-head on:
 
 * responsiveness of the killer interaction (click a substation on
   the map → land on its SLD);
@@ -26,29 +27,37 @@ is opt-in.
 ## Architecture
 
 ```
-                 ┌────────────────── NiceGUI page ─────────────────────┐
-                 │ header: load · file label · VL label                │
-                 │ ┌─ Network Map (tab) ───────────────────────────┐  │
-                 │ │ <iframe id="iidm-map-iframe"                   │  │
-                 │ │   src="/_iidm/map_component/index.html">       │  │
-                 │ │ ←  postMessage  →                              │  │
-                 │ └────────────────────────────────────────────────┘  │
-                 │ ┌─ Single Line Diagram (tab) ────────────────────┐  │
-                 │ │ <iframe id="iidm-sld-iframe"                   │  │
-                 │ │   src="/_iidm/sld_component/index.html">       │  │
-                 │ └────────────────────────────────────────────────┘  │
-                 │ <script> bridge.js: postMessage  ←→  emitEvent  </script>
-                 └────────────────────────────────────────────────────┘
-                                       │
-                            ui.on('iidm-component-value', …)
-                            ui.on('iidm-component-ready', …)
-                                       │
-                              AppState (plain Python)
-                            on_network_changed / on_selected_vl_changed
-                                       │
-                       iidm_viewer.powsybl_worker.run(…)
-                       (same worker as the Streamlit + PySide6 paths
-                       — AGENTS.md §1 thread-affinity rule unchanged)
+   ┌─────────────────────────── NiceGUI page ───────────────────────────┐
+   │ header: load · file label · VL label                               │
+   │ ┌─ Network Map (tab) ───────────────────────────────────────────┐ │
+   │ │ <iframe id="iidm-map-iframe"                                  │ │
+   │ │   src="/_iidm/map_component/index.html">                      │ │
+   │ │ ←  postMessage  →                                             │ │
+   │ └───────────────────────────────────────────────────────────────┘ │
+   │ ┌─ Network Area Diagram (tab) ──────────────────────────────────┐ │
+   │ │ depth: <ui.number>                                            │ │
+   │ │ <iframe id="iidm-nad-iframe"                                  │ │
+   │ │   src="/_iidm/nad_component/index.html">                      │ │
+   │ └───────────────────────────────────────────────────────────────┘ │
+   │ ┌─ Single Line Diagram (tab) ───────────────────────────────────┐ │
+   │ │ <iframe id="iidm-sld-iframe"                                  │ │
+   │ │   src="/_iidm/sld_component/index.html">                      │ │
+   │ └───────────────────────────────────────────────────────────────┘ │
+   │ ┌─ Data Explorer Components (tab) ──────────────────────────────┐ │
+   │ │ <ui.select> Component:  <ui.aggrid> rows × cols               │ │
+   │ └───────────────────────────────────────────────────────────────┘ │
+   │ <script> bridge.js: postMessage  ←→  emitEvent  </script>          │
+   └────────────────────────────────────────────────────────────────────┘
+                            │
+                  ui.on('iidm-component-value', …)
+                  ui.on('iidm-component-ready', …)
+                            │
+                       AppState (plain Python)
+                  on_network_changed / on_selected_vl_changed
+                            │
+                  iidm_viewer.powsybl_worker.run(…)
+                  (same worker as the Streamlit + PySide6 paths
+                  — AGENTS.md §1 thread-affinity rule unchanged)
 ```
 
 ### The JS reuse trick
@@ -73,10 +82,10 @@ posted into the iframe via `iframe.contentWindow.postMessage(...)`.
 The bundles are **byte-for-byte identical** to what the Streamlit and
 PySide6 paths ship. No fork, no second build.
 
-### Map → SLD wiring
+### Map → SLD and NAD → SLD wiring
 
 ```
-   deck.gl onClick on a substation                          (map main.ts)
+   Map: deck.gl onClick on a substation                     (map main.ts)
        │
        ▼
    setComponentValue({type:'map-substation-click', vlIds, …})
@@ -91,20 +100,42 @@ PySide6 paths ship. No fork, no second build.
        └─ _state.set_selected_vl(vlIds[0])
                    │
                    ▼  (state listener)
-            _push_sld(vl_id)
+            _push_sld(vl); _push_nad(vl, depth)
                    │
-                   ▼   cached? no → run(get_single_line_diagram)  (worker)
-            ui.run_javascript("window.iidmRenderTo('sld', {...})")
+                   ▼   cached? no → run(get_single_line_diagram / get_network_area_diagram)
+            ui.run_javascript("window.iidmRenderTo(component, {...})")
                    │
                    ▼
             iframe.contentWindow.postMessage({type:'streamlit:render', args})
                    │
                    ▼
-            sld main.ts renders the SVG, no script rerun
+            bundle's main.ts renders the SVG, no script rerun
+
+
+   NAD: NetworkAreaDiagramViewer.onSelectNodeCallback        (nad main.ts)
+       │
+       ▼
+   setComponentValue({type:'nad-vl-click', vl, ts})
+       │  ↳ same path as Map → SLD from this point on
+       ▼
+   tabs.set_value(sld_tab) + _state.set_selected_vl(vl)
 ```
 
 No full-page reload, no Streamlit-style "rerun the script". Only the
-two iframes that need a new payload get one.
+iframe that needs a new payload gets one.
+
+### Data Explorer Components tab
+
+Pure NiceGUI — no iframe. A `ui.select` lists 18 pypowsybl component
+types (Substations, Voltage Levels, Buses, Generators, Lines, …);
+`ui.aggrid` renders the corresponding DataFrame. Selecting a
+different component fires `select.on_value_change`, which fetches
+the new DataFrame on the worker thread via `_fetch_dataframe`,
+converts it to ag-Grid `{columnDefs, rowData}` via
+`_dataframe_to_aggrid_options` (NaN → em-dash, numeric columns
+right-aligned), and pushes it into the grid with `grid.options =
+... ; grid.update()`. ag-Grid handles sort + column resize for free.
+Filtering and editing are left for the next iteration.
 
 ## pypowsybl thread-affinity rule
 

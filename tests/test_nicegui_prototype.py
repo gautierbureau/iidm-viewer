@@ -97,6 +97,61 @@ def test_generate_sld_returns_real_svg():
     assert isinstance(metadata, str) and metadata.strip().startswith("{")
 
 
+def test_generate_nad_returns_real_svg():
+    from iidm_viewer.web.app import _generate_nad
+    from iidm_viewer.web.state import AppState
+
+    state = AppState()
+    xiidm = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir, "test_ieee14.xiidm")
+    )
+    state.load_network_from_path(xiidm)
+
+    svg, metadata = _generate_nad(state.network, state.selected_vl, 1)
+    assert isinstance(svg, str) and ("<svg" in svg or svg.lstrip().startswith("<?xml"))
+    assert isinstance(metadata, str) and metadata.strip().startswith("{")
+
+
+def test_fetch_dataframe_returns_dataframes_per_component():
+    from iidm_viewer.web.app import _fetch_dataframe, COMPONENT_GETTERS
+    from iidm_viewer.web.state import AppState
+
+    state = AppState()
+    xiidm = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir, "test_ieee14.xiidm")
+    )
+    state.load_network_from_path(xiidm)
+
+    vl_df = _fetch_dataframe(state.network, COMPONENT_GETTERS["Voltage Levels"])
+    assert vl_df.shape[0] == 14
+    assert "nominal_v" in vl_df.columns
+
+    gen_df = _fetch_dataframe(state.network, COMPONENT_GETTERS["Generators"])
+    assert gen_df.shape[0] > 0
+    assert set(vl_df.columns) != set(gen_df.columns)
+
+    hvdc_df = _fetch_dataframe(state.network, COMPONENT_GETTERS["HVDC Lines"])
+    assert hvdc_df.shape[0] == 0  # IEEE14 has none, must not raise
+
+
+def test_dataframe_to_aggrid_options_handles_nan_and_empty():
+    import math
+    import pandas as pd
+    from iidm_viewer.web.app import _dataframe_to_aggrid_options
+
+    empty = _dataframe_to_aggrid_options(pd.DataFrame())
+    assert empty == {"columnDefs": [], "rowData": []}
+
+    df = pd.DataFrame({"id": ["a", "b"], "v": [1.0, math.nan]})
+    opts = _dataframe_to_aggrid_options(df)
+    assert {c["field"] for c in opts["columnDefs"]} == {"id", "v"}
+    # Numeric columns should be tagged for ag-Grid right-alignment.
+    v_col = next(c for c in opts["columnDefs"] if c["field"] == "v")
+    assert v_col.get("type") == "numericColumn"
+    # NaN values render as em-dash.
+    assert opts["rowData"][1]["v"] == "—"
+
+
 def test_bridge_js_has_expected_hooks():
     """The shim glues the bundles' Streamlit wire-protocol to NiceGUI's
     emitEvent bus. If any of these names drifts, the iframes can't
@@ -105,8 +160,12 @@ def test_bridge_js_has_expected_hooks():
     from iidm_viewer.web.app import _BRIDGE_JS
 
     for token in (
-        "iidm-map-iframe",
-        "iidm-sld-iframe",
+        # The COMPONENTS registry the bridge iterates over; iframe ids
+        # are derived as `'iidm-' + component + '-iframe'`.
+        "'map'",
+        "'nad'",
+        "'sld'",
+        "'iidm-' + component + '-iframe'",
         "iidm-component-ready",
         "iidm-component-value",
         "iidmRenderTo",
@@ -132,8 +191,8 @@ def test_page_route_is_registered():
 
 
 def test_static_mounts_are_registered():
-    """The map / sld bundles must be served under the URLs the page
-    references. ``app.add_static_files`` registers FastAPI mounts.
+    """The map / nad / sld bundles must be served under the URLs the
+    page references. ``app.add_static_files`` registers FastAPI mounts.
     """
     from nicegui import app
     import iidm_viewer.web.app  # noqa: F401
@@ -141,4 +200,5 @@ def test_static_mounts_are_registered():
     mounts = {getattr(r, "path", None) for r in app.routes}
     # Mount prefixes include their trailing slash in FastAPI.
     assert any(p and p.startswith("/_iidm/map_component") for p in mounts)
+    assert any(p and p.startswith("/_iidm/nad_component") for p in mounts)
     assert any(p and p.startswith("/_iidm/sld_component") for p in mounts)
