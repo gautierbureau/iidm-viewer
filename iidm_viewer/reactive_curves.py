@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 
 from iidm_viewer.caches import (
     _net_key,
+    get_2wt_all,
     get_generators_all,
     get_reactive_curve_points,
 )
@@ -241,6 +242,91 @@ def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
     return df
 
 
+def _vl_to_step_up_transformer_table(twts_enriched):
+    """Pure-pandas helper: from an enriched 2WT frame, return a table indexed
+    by voltage_level_id with the step-up transformer for that VL — i.e. the
+    2WT whose *other* side has the highest nominal voltage.
+
+    Columns of the result: ``step_up_transformer_id`` (str) and
+    ``step_up_transformer_connected`` (bool, = ``connected1 AND connected2``).
+    """
+    empty = pd.DataFrame(
+        columns=["step_up_transformer_id", "step_up_transformer_connected"]
+    )
+    if twts_enriched.empty:
+        return empty
+    needed = {"voltage_level1_id", "voltage_level2_id",
+              "connected1", "connected2", "nominal_v1", "nominal_v2"}
+    if not needed.issubset(twts_enriched.columns):
+        return empty
+
+    df = twts_enriched.reset_index().rename(columns={"id": "transformer_id"})
+    connected_both = (
+        df["connected1"].fillna(False).astype(bool)
+        & df["connected2"].fillna(False).astype(bool)
+    )
+    side1 = pd.DataFrame({
+        "voltage_level_id": df["voltage_level1_id"],
+        "transformer_id": df["transformer_id"],
+        "connected": connected_both,
+        "other_nv": df["nominal_v2"],
+    })
+    side2 = pd.DataFrame({
+        "voltage_level_id": df["voltage_level2_id"],
+        "transformer_id": df["transformer_id"],
+        "connected": connected_both,
+        "other_nv": df["nominal_v1"],
+    })
+    both = pd.concat([side1, side2], ignore_index=True)
+    best = (
+        both.sort_values("other_nv", ascending=False)
+        .drop_duplicates("voltage_level_id", keep="first")
+        .set_index("voltage_level_id")
+    )
+    return best[["transformer_id", "connected"]].rename(columns={
+        "transformer_id": "step_up_transformer_id",
+        "connected": "step_up_transformer_connected",
+    })
+
+
+def _vl_to_step_up_transformer_cached(network):
+    """Cache the VL → step-up transformer table by ``net_key``.
+
+    Registered in ``caches._TOPOLOGY_CACHE_KEYS`` so topology edits (and
+    load flow, since that pops the topology set too) refresh the table.
+    """
+    cache_key = _net_key(network)
+    cached = st.session_state.get("_rcc_vl_to_xf_cache")
+    if cached is not None and cached["key"] == cache_key:
+        return cached["df"]
+
+    twts = get_2wt_all(network)
+    if not twts.empty:
+        twts = enrich_with_joins(twts.copy(), build_vl_lookup(network))
+    df = _vl_to_step_up_transformer_table(twts)
+    st.session_state["_rcc_vl_to_xf_cache"] = {"key": cache_key, "df": df}
+    return df
+
+
+def _augment_gens_with_step_up_transformer(network, gens_df):
+    """Add ``step_up_transformer_id`` / ``step_up_transformer_connected`` to
+    a generators frame, mapped via the gen's ``voltage_level_id``.
+    """
+    if "voltage_level_id" not in gens_df.columns:
+        return gens_df
+    vl_map = _vl_to_step_up_transformer_cached(network)
+    if vl_map.empty:
+        return gens_df.assign(
+            step_up_transformer_id=pd.Series(pd.NA, index=gens_df.index, dtype="object"),
+            step_up_transformer_connected=pd.Series(pd.NA, index=gens_df.index, dtype="object"),
+        )
+    vl_series = gens_df["voltage_level_id"]
+    return gens_df.assign(
+        step_up_transformer_id=vl_series.map(vl_map["step_up_transformer_id"]),
+        step_up_transformer_connected=vl_series.map(vl_map["step_up_transformer_connected"]),
+    )
+
+
 def _classify_targets_cached(network, gens_df, curves_df):
     """Cached wrapper around ``classify_targets``.
 
@@ -300,8 +386,10 @@ def _render_target_containment_summary(classified, gens_df):
 
         extra = [c for c in ("voltage_level_id", "nominal_v", "country")
                  if c in gens_df.columns]
-        gen_attrs = [c for c in ("regulated_element_id", "connected")
-                     if c in gens_df.columns]
+        gen_attrs = [c for c in (
+            "regulated_element_id", "connected",
+            "step_up_transformer_id", "step_up_transformer_connected",
+        ) if c in gens_df.columns]
         join_cols = extra + gen_attrs
         if join_cols:
             issues = issues.join(gens_df[join_cols], how="left")
@@ -320,7 +408,15 @@ def _render_target_containment_summary(classified, gens_df):
             ]
             if sub.empty:
                 return sub
-            return sub.sort_values("distance", ascending=False)
+            # Push generators dispatched at zero MW to the end: their
+            # diagram violation is often a side effect of the step-up
+            # transformer being out of service rather than a real Q issue.
+            is_zero_p = (sub["target_p"] == 0).astype(int)
+            return (
+                sub.assign(_zero_p=is_zero_p)
+                .sort_values(["_zero_p", "distance"], ascending=[True, False])
+                .drop(columns="_zero_p")
+            )
 
         pv_out = _subset("outside", "PV")
         pq_out = _subset("outside", "PQ")
@@ -393,6 +489,8 @@ def render_reactive_curves(network, selected_vl):
 
     gen_ids = gens_df.index.tolist()
     st.caption(f"{len(gen_ids)} generators with reactive limits")
+
+    gens_df = _augment_gens_with_step_up_transformer(network, gens_df)
 
     classified = _classify_targets_cached(network, gens_df, curves_df)
 

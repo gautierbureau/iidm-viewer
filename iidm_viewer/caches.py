@@ -368,6 +368,7 @@ _TOPOLOGY_CACHE_KEYS = (
     "_de_component_cache",
     "_ext_df_cache",
     "_enriched_component_cache",  # dict keyed by (net_key, lf_gen, method_name)
+    "_rcc_vl_to_xf_cache",        # VL → step-up 2WT mapping per net_key
 )
 
 # Caches additionally tied to geographic layout (lat/lon extensions).

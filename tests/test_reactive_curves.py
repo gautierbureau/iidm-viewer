@@ -1,7 +1,10 @@
 """Tests for iidm_viewer.reactive_curves."""
 import pandas as pd
 
-from iidm_viewer.reactive_curves import classify_targets
+from iidm_viewer.reactive_curves import (
+    _vl_to_step_up_transformer_table,
+    classify_targets,
+)
 from iidm_viewer.state import load_network
 
 
@@ -171,6 +174,36 @@ def test_classify_real_network(xiidm_upload):
     outside = out["status"] == "outside"
     assert (out.loc[inside, "distance"] <= 0).all()
     assert (out.loc[outside, "distance"] > 0).all()
+
+
+def test_step_up_transformer_picks_highest_other_side():
+    # Two 2WTs on VL_LV: one to VL_MV (nominal_v=63), one to VL_HV (225).
+    # The step-up choice for VL_LV must be the one with the higher
+    # other-side nominal voltage (XF_HV).
+    twts = pd.DataFrame([
+        {"id": "XF_MV", "voltage_level1_id": "VL_LV",
+         "voltage_level2_id": "VL_MV", "connected1": True,
+         "connected2": True, "nominal_v1": 11.0, "nominal_v2": 63.0},
+        {"id": "XF_HV", "voltage_level1_id": "VL_LV",
+         "voltage_level2_id": "VL_HV", "connected1": True,
+         "connected2": False, "nominal_v1": 11.0, "nominal_v2": 225.0},
+    ]).set_index("id")
+    out = _vl_to_step_up_transformer_table(twts)
+    assert out.loc["VL_LV", "step_up_transformer_id"] == "XF_HV"
+    # XF_HV has connected2=False → step-up is not fully connected.
+    assert bool(out.loc["VL_LV", "step_up_transformer_connected"]) is False
+    # Mirror entries for the high-side VLs should also be present.
+    assert out.loc["VL_HV", "step_up_transformer_id"] == "XF_HV"
+    assert out.loc["VL_MV", "step_up_transformer_id"] == "XF_MV"
+
+
+def test_step_up_transformer_empty_inputs_dont_crash():
+    out = _vl_to_step_up_transformer_table(pd.DataFrame())
+    assert out.empty
+    # Missing required columns should also return empty, not crash.
+    bad = pd.DataFrame([{"id": "X", "voltage_level1_id": "A"}]).set_index("id")
+    out = _vl_to_step_up_transformer_table(bad)
+    assert out.empty
 
 
 def test_classify_distance_diagonal_corner():
