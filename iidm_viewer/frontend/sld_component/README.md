@@ -69,11 +69,12 @@ new SingleLineDiagramViewer(
 
 ### Imperative API on the viewer instance
 
-`src/main.ts` currently throws the viewer away and recreates it on
-every `render()`. The library also offers:
+`src/main.ts` rebuilds the viewer on every `render()` because the
+library's `init()` clears the container unconditionally — so there
+is no "hot-swap without tear-down" path. The instance methods that
+matter:
 
 ```ts
-viewer.setSvgContent(svgContent)   // hot-swap SVG without rebuilding handlers
 viewer.setViewBox(viewBox)         // pan/zoom programmatically
 viewer.getViewBox()
 viewer.refreshZoom()
@@ -82,9 +83,19 @@ viewer.getDimensionsFromSvg()
 viewer.setContainer(container)     // re-anchor to a different DOM node
 ```
 
-`setSvgContent` would preserve pan/zoom state across VL changes.
-`setViewBox` lets the host land the user *centered on a specific
-feeder* after a cross-tab jump rather than at the SVG's origin.
+**`setSvgContent(svg)` is a no-op trap**: the upstream library
+implements it as a one-line property setter (`this.svgContent = …`)
+that does not re-render. Calling it without also re-running `init()`
+leaves the DOM untouched; re-running `init()` clears the container
+anyway, defeating the point.
+
+The actually-working preserve-pan/zoom contract is the **viewBox
+round-trip**: capture `viewer.getViewBox()` before the tear-down,
+build the new viewer, restore via `viewer.setViewBox(...)`, then
+`viewer.refreshZoom()` to clamp to the new VL's min/max zoom. The
+PySide6 host opts into this via the `preserveViewport: true` render
+arg the wrapper now recognises (see `src/main.ts`); Streamlit and
+NiceGUI leave it off and keep auto-fit-on-render.
 
 ### Built-in interactions (no JS hook required)
 
@@ -128,7 +139,7 @@ asking the JS for anything extra.
 |---|---|---|
 | `onFeederCallback` → cross-tab/cross-VL navigation | 1 callback in `main.ts`, +1 rebuild, host routing | Equivalent of the Map→SLD and NAD→SLD demos but inside the SLD itself (line → other-end substation, generator → data tab). |
 | `onToggleHoverCallback` → live P/Q/I popover | 1 callback in `main.ts`, +Qt `QLabel` painted at `(x, y)` | The kind of interaction Streamlit can't do without a full script rerun. Trivial in Qt: no rerun, just paint. |
-| `setSvgContent` instead of tear-down/rebuild | Replace the `innerHTML=''` path in `render()` | Smoother VL transitions, preserves pan/zoom state. |
+| `preserveViewport: true` (viewBox round-trip on render) | Wired | Pan/zoom continuity across VL transitions for the PySide6 host. *Not* via the library's `setSvgContent` (which is a no-op setter) — see "Imperative API". |
 | `setViewBox` after cross-tab nav | Pass feeder `(x, y)` from metadata | Lands the user on the relevant feeder, not the SVG origin. |
 | `onBusCallback` → bus filter | Small | Pays off once a Data Explorer tab exists in the Qt port. |
 

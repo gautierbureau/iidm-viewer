@@ -281,6 +281,48 @@ def test_data_explorer_edit_updates_pypowsybl_and_grid(qapp, loaded_window):
     assert pytest.approx(live_row["target_p"], rel=1e-9) == new_value
 
 
+def test_sld_render_opts_into_preserve_viewport(qapp, loaded_window):
+    """The PySide6 host opts into pan/zoom continuity by passing
+    ``preserveViewport=True`` to the SLD bundle. Streamlit and
+    NiceGUI omit it. Regression-guard so the kwarg doesn't get
+    silently dropped.
+    """
+    explorer = loaded_window.sld_tab
+    captured: list[dict] = []
+    original = explorer._view.render_component
+    explorer._view.render_component = lambda **kw: captured.append(kw)
+
+    explorer._ready = True  # bypass the WebView readiness gate
+    explorer.show_voltage_level(loaded_window.state.selected_vl or "VL1")
+    qapp.processEvents()
+
+    explorer._view.render_component = original
+    assert captured, "show_voltage_level should have dispatched a render"
+    assert captured[0].get("preserveViewport") is True
+    assert captured[0].get("svgType") == "voltage-level"
+    assert isinstance(captured[0].get("svg"), str)
+    assert isinstance(captured[0].get("metadata"), str)
+
+
+def test_sld_bundle_carries_preserve_viewport_path():
+    """The built bundle must contain the new restore-viewBox branch.
+
+    A failing assert here means ``frontend/sld_component/dist`` is
+    stale — run ``npm run build`` in that directory.
+    """
+    bundle_path = os.path.join(
+        os.path.dirname(__file__), os.pardir,
+        "iidm_viewer", "frontend", "sld_component", "dist", "assets",
+        "sld-component.js",
+    )
+    with open(bundle_path, "r", encoding="utf-8") as fh:
+        contents = fh.read()
+    # Minified, but the property name and method names survive.
+    assert "preserveViewport" in contents
+    assert "getViewBox" in contents
+    assert "setViewBox" in contents
+
+
 def test_data_explorer_rejects_non_editable_attribute(qapp, loaded_window):
     """setData on a non-editable column must return False and not
     issue an edit_requested signal."""

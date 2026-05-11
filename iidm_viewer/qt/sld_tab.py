@@ -4,6 +4,19 @@ Generates the SVG via pypowsybl on the worker thread (per AGENTS.md §1)
 and hands it to ``frontend/sld_component/dist`` via
 :class:`PowsyblWebView`. Caches the (svg, metadata) pair per VL so
 returning to a previously-viewed VL is instant.
+
+Pan/zoom continuity: every render passes ``preserveViewport=True`` so
+the bundle's ``main.ts`` captures the current viewer's viewBox before
+the unavoidable tear-down inside ``SingleLineDiagramViewer.init`` and
+restores it on the new viewer. The Streamlit and NiceGUI hosts leave
+the flag at its default ``False`` and keep the library's auto-fit on
+every render.
+
+A previous attempt routed the optimisation through
+``SingleLineDiagramViewer.setSvgContent`` — but that method is a
+one-line property setter in the upstream library, so it can't drive
+the optimisation by itself. The viewBox round-trip is the only
+contract the library actually exposes for this.
 """
 from __future__ import annotations
 
@@ -86,4 +99,10 @@ class SldTab(QWidget):
             metadata=metadata,
             height=700,
             svgType="voltage-level",
+            # PySide6 desktop UX: keep pan/zoom continuous across VL
+            # transitions and same-VL re-renders (e.g. after a switch
+            # toggle or data edit). See module docstring for why this
+            # goes through getViewBox / setViewBox rather than the
+            # library's no-op setSvgContent.
+            preserveViewport=True,
         )
