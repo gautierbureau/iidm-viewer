@@ -96,6 +96,14 @@ def test_classify_minmax_inside_outside_edge():
     assert out.loc["G_out_p", "regulation"] == "PQ"
     assert out.loc["G_edge", "regulation"] == "PQ"
 
+    # lf_action flags only the PV-outside subset (those the LF will switch).
+    assert out.loc["G_in", "lf_action"] == ""
+    assert out.loc["G_out_q", "lf_action"] == "PV→PQ"
+    assert out.loc["G_out_p", "lf_action"] == ""  # outside but already PQ
+    assert out.loc["G_edge", "lf_action"] == ""   # only edge, not outside
+    switchers = out.index[out["lf_action"] == "PV→PQ"].tolist()
+    assert switchers == ["G_out_q"]
+
 
 def test_classify_regulation_unknown_when_no_target_q_and_off():
     gens = _make_gens_df([
