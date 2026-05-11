@@ -17,6 +17,15 @@ dependencies = [
 
 [project.scripts]
 iidm-viewer = "iidm_viewer.cli:main"
+iidm-viewer-pyside = "iidm_viewer.qt.cli:main"
+
+[project.optional-dependencies]
+# PySide6 desktop front-end (`iidm-viewer-pyside`). Kept optional so
+# the default install stays lean — pip install 'iidm-viewer[pyside]'
+# to opt in.
+pyside = [
+    "PySide6>=6.6",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["iidm_viewer"]
