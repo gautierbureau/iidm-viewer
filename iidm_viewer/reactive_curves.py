@@ -143,6 +143,11 @@ def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
     - ``distance``: signed Euclidean distance from ``(target_p, target_q)``
       to the polygon (positive outside, zero on edge, negative inside =
       headroom). Units: MVA (P in MW, Q in MVar, mixed).
+    - ``violation``: L∞ axial overshoot — ``max(0, p_lo - target_p,
+      target_p - p_hi, min_q_at_target_p - target_q, target_q -
+      max_q_at_target_p)``. Non-negative; complements ``distance`` by
+      reporting "how far past the worst-axis bound" without the diagonal
+      coupling.
     - ``status``: ``"inside"`` / ``"edge"`` / ``"outside"`` / ``"n/a"`` derived
       from ``distance`` and ``tolerance``.
     - ``regulation``: ``"PV"`` (voltage_regulator_on), ``"PQ"`` (off + target_q),
@@ -172,6 +177,22 @@ def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
 
     df["p_lo"] = df["p_lo"].fillna(df["min_p"])
     df["p_hi"] = df["p_hi"].fillna(df["max_p"])
+
+    # L∞ axial overshoot — non-negative; 0 when on / inside the bounding box
+    # of the polygon. Useful diagnostic: ``violation`` tells you how far the
+    # target exceeds the bounds on the worst axis, while ``distance`` (below)
+    # is the true Euclidean distance for ranking.
+    axial = pd.concat(
+        [
+            df["p_lo"] - df["target_p"],
+            df["target_p"] - df["p_hi"],
+            df["min_q_at_target_p"] - df["target_q"],
+            df["target_q"] - df["max_q_at_target_p"],
+        ],
+        axis=1,
+    )
+    max_axial = axial.max(axis=1)
+    df["violation"] = max_axial.where(max_axial > 0, 0.0)
 
     # Signed Euclidean distance from (target_p, target_q) to each gen's polygon.
     # Loop in Python: ~O(N_gens * N_vertices_per_polygon); curves have ≤ ~20
@@ -270,7 +291,7 @@ def _render_target_containment_summary(classified, gens_df):
             issues = issues.join(gens_df[extra], how="left")
 
         cols = extra + [
-            "status", "regulation", "lf_action", "distance",
+            "status", "regulation", "lf_action", "distance", "violation",
             "target_p", "target_q",
             "p_lo", "p_hi", "min_q_at_target_p", "max_q_at_target_p",
         ]
