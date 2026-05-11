@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 from iidm_viewer.caches import (
     _net_key,
     get_2wt_all,
+    get_bus_voltages,
     get_generators_all,
     get_reactive_curve_points,
 )
@@ -365,6 +366,47 @@ def _augment_gens_with_step_up_transformer(network, gens_df):
     )
 
 
+def _add_bus_voltage_columns(gens_df, bus_voltages):
+    """Pure helper: add ``v_bus`` and ``v_target_gap`` to ``gens_df``.
+
+    ``v_bus`` is the bus voltage (kV) at the gen's terminal bus from the
+    post-LF ``bus_voltages`` frame. ``v_target_gap = target_v - v_bus`` —
+    for a PV gen successfully regulating, the gap is ~0. A non-zero gap
+    is the load flow telling us the regulation failed:
+
+    - ``v_target_gap > 0``: bus settled below target_v. The LF wanted
+      more Q production than the gen could supply; clamped at max_q.
+    - ``v_target_gap < 0``: bus settled above target_v. The LF wanted
+      more Q absorption than allowed; clamped at min_q.
+
+    Required input columns: ``gens_df`` needs ``bus_id`` and ``target_v``;
+    ``bus_voltages`` needs ``bus_id`` and ``v_mag``. If any are missing
+    the function fills NaN columns rather than raising.
+    """
+    if "bus_id" not in gens_df.columns or "target_v" not in gens_df.columns:
+        return gens_df
+    if (bus_voltages.empty
+            or "v_mag" not in bus_voltages.columns
+            or "bus_id" not in bus_voltages.columns):
+        return gens_df.assign(
+            v_bus=pd.Series(float("nan"), index=gens_df.index, dtype="float64"),
+            v_target_gap=pd.Series(float("nan"), index=gens_df.index, dtype="float64"),
+        )
+    lookup = bus_voltages.set_index("bus_id")["v_mag"]
+    v_bus = gens_df["bus_id"].map(lookup)
+    return gens_df.assign(
+        v_bus=v_bus,
+        v_target_gap=gens_df["target_v"] - v_bus,
+    )
+
+
+def _augment_gens_with_bus_voltage(network, gens_df):
+    """Thin wrapper around ``_add_bus_voltage_columns`` that pulls the
+    post-LF bus voltages from the cached ``get_bus_voltages`` getter.
+    """
+    return _add_bus_voltage_columns(gens_df, get_bus_voltages(network))
+
+
 def _classify_targets_cached(network, gens_df, curves_df):
     """Cached wrapper around ``classify_targets``.
 
@@ -433,7 +475,9 @@ def _render_target_containment_summary(classified, gens_df):
             "regulated_element_id", "connected",
             "step_up_transformer_id", "step_up_transformer_connected",
         ) if c in gens_df.columns]
-        join_cols = extra + gen_attrs
+        v_attrs = [c for c in ("target_v", "v_bus", "v_target_gap")
+                   if c in gens_df.columns]
+        join_cols = extra + gen_attrs + v_attrs
         if join_cols:
             issues = issues.join(gens_df[join_cols], how="left")
 
@@ -441,6 +485,7 @@ def _render_target_containment_summary(classified, gens_df):
             "status", "regulation", "lf_action", "distance", "violation",
         ] + gen_attrs + [
             "target_p", "target_q",
+        ] + v_attrs + [
             "p_lo", "p_hi", "min_q_at_target_p", "max_q_at_target_p",
         ]
 
@@ -539,6 +584,7 @@ def render_reactive_curves(network, selected_vl):
     st.caption(f"{len(gen_ids)} generators with reactive limits")
 
     gens_df = _augment_gens_with_step_up_transformer(network, gens_df)
+    gens_df = _augment_gens_with_bus_voltage(network, gens_df)
 
     classified = _classify_targets_cached(network, gens_df, curves_df)
 
