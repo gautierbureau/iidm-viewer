@@ -106,6 +106,7 @@ class MainWindow(QMainWindow):
         self.state.selected_vl_changed.connect(self._on_selected_vl_changed)
         self.map_tab.substation_clicked.connect(self._on_map_substation_clicked)
         self.nad_tab.node_clicked.connect(self._on_nad_node_clicked)
+        self.sld_tab.feeder_clicked.connect(self._on_sld_feeder_clicked)
         self.data_tab.edit_applied.connect(self._on_data_edit_applied)
         self.data_tab.bulk_edit_applied.connect(self._on_data_bulk_edit_applied)
         self.data_tab.bulk_removed.connect(self._on_data_bulk_removed)
@@ -214,6 +215,38 @@ class MainWindow(QMainWindow):
                 self.sld_tab.show_voltage_level(self.state.selected_vl)
         self.statusBar().showMessage(
             f"{component}/{element_id}/{attribute}: {prev} → {new_value}"
+        )
+
+    def _on_sld_feeder_clicked(self, payload: dict) -> None:
+        """Killer interaction #3 — SLD feeder → Map substation.
+
+        The SLD bundle reports the equipment that lives at the end of
+        the clicked feeder bay; :func:`navigation.resolve_feeder_substation`
+        walks pypowsybl to find the substation "on the other side"
+        (or the local one for injections), and the Map tab flies to it.
+        """
+        from iidm_viewer.navigation import resolve_feeder_substation
+
+        if self.state.network is None:
+            return
+        equipment_id = payload.get("equipment_id")
+        equipment_type = payload.get("equipment_type")
+        current_vl = payload.get("current_vl_id") or self.state.selected_vl
+        if not equipment_id or not current_vl:
+            return
+        substation_id = resolve_feeder_substation(
+            self.state.network, str(current_vl), str(equipment_id), equipment_type,
+        )
+        if not substation_id:
+            self.statusBar().showMessage(
+                f"No substation known for {equipment_type or 'feeder'} {equipment_id}"
+            )
+            return
+        self.tabs.setCurrentWidget(self.map_tab)
+        self.map_tab.focus_substation(substation_id)
+        self.statusBar().showMessage(
+            f"Map: focused substation {substation_id} "
+            f"(via {equipment_type or 'feeder'} {equipment_id})"
         )
 
     def _on_nad_node_clicked(self, vl_id: str) -> None:

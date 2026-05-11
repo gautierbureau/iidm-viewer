@@ -13,8 +13,11 @@
  * Python contract (stable):
  *   render_interactive_sld(svg, metadata, height, key) ->
  *       None
- *       | {"type": "sld-vl-click",     "vl": "VLx",   "ts": <ms>}
- *       | {"type": "sld-breaker-click","breakerId": "SW1", "open": true, "ts": <ms>}
+ *       | {"type": "sld-vl-click",       "vl": "VLx",   "ts": <ms>}
+ *       | {"type": "sld-breaker-click",  "breakerId": "SW1", "open": true, "ts": <ms>}
+ *       | {"type": "sld-feeder-click",   "equipmentId": "L1",
+ *                                        "equipmentType": "LINE",
+ *                                        "x": <px>, "y": <px>, "ts": <ms>}
  *
  * "open" in sld-breaker-click is the *desired new state* (already toggled by
  * the library before the callback fires).
@@ -144,7 +147,23 @@ function render(args: RenderArgs): void {
         ts: Date.now(),
       });
     },
-    null,
+    // onFeederCallback: (equipmentId, equipmentType, svgId, x, y) => void
+    //
+    // Fires on a click on the equipment glyph at the end of a feeder
+    // bay (load, generator, line, transformer, …). ``equipmentType``
+    // is the pypowsybl enum string (LINE, TWO_WINDINGS_TRANSFORMER,
+    // HVDC_LINE, LOAD, …). The host uses it to resolve the
+    // "other side" substation and fly the Map tab to it.
+    (equipmentId: string, equipmentType: string | null, _svgId: string, x: number, y: number) => {
+      setComponentValue({
+        type: 'sld-feeder-click',
+        equipmentId,
+        equipmentType,
+        x,
+        y,
+        ts: Date.now(),
+      });
+    },
     null,
     '#009eff',
     null

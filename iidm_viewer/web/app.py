@@ -230,6 +230,58 @@ def _push_sld(vl_id: str) -> None:
         _pending_sld = args
 
 
+def _push_map_flyto(substation_id: str, zoom: float = 11) -> None:
+    """Tell the map iframe to fly to ``substation_id`` (if known)."""
+    import time
+    global _pending_map
+    args = {
+        "version": _map_data_version,
+        "height": 670,
+        "flyTo": {
+            "substationId": substation_id,
+            "zoom": zoom,
+            "ts": int(time.monotonic() * 1000),
+        },
+    }
+    if _map_ready:
+        _send_render("map", args)
+    else:
+        _pending_map = dict(_pending_map or {}, **args)
+
+
+def _handle_sld_feeder_click(value: dict, tabs, map_tab) -> None:
+    """Resolve the clicked feeder's "other side" substation and fly
+    the Map tab to it. Falls back to a status notification when the
+    substation can't be resolved (no geo data, unknown equipment, …).
+    """
+    from iidm_viewer.navigation import resolve_feeder_substation
+
+    if _state.network is None:
+        return
+    equipment_id = value.get("equipmentId")
+    equipment_type = value.get("equipmentType")
+    current_vl = _state.selected_vl
+    if not equipment_id or not current_vl:
+        return
+    substation_id = resolve_feeder_substation(
+        _state.network, str(current_vl), str(equipment_id), equipment_type,
+    )
+    if not substation_id:
+        ui.notify(
+            f"No substation known for {equipment_type or 'feeder'} "
+            f"{equipment_id}",
+            type="warning",
+        )
+        return
+    tabs.set_value(map_tab)
+    _push_map_flyto(substation_id)
+    ui.notify(
+        f"Map: focused substation {substation_id}",
+        type="positive",
+        timeout=1200,
+    )
+
+
 def _push_nad(vl_id: str, depth: int) -> None:
     global _pending_nad
     if not vl_id or _state.network is None:
@@ -919,6 +971,8 @@ def main_page() -> None:
             new_vl = value.get("vl")
             if new_vl:
                 _state.set_selected_vl(new_vl)
+        elif component == "sld" and value.get("type") == "sld-feeder-click":
+            _handle_sld_feeder_click(value, tabs, map_tab)
 
     ui.on("iidm-component-ready", _on_component_ready)
     ui.on("iidm-component-value", _on_component_value)

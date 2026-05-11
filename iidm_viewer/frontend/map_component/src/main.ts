@@ -50,6 +50,14 @@ import {
 
 type LinePosition = { id: string; coordinates: Coordinate[] };
 
+type FlyToRequest = {
+  substationId?: string;
+  lon?: number;
+  lat?: number;
+  zoom?: number;
+  ts?: number;
+};
+
 type RenderArgs = {
   substations?: MapSubstation[];
   substationPositions?: GeoDataSubstation[];
@@ -57,6 +65,12 @@ type RenderArgs = {
   linePositions?: LinePosition[];
   version?: number;
   height?: number;
+  // Optional "fly the camera to this substation / coordinate" hint.
+  // Hosts use it to implement cross-tab navigation (e.g. SLD-feeder
+  // click -> Map focuses the substation at the line's other end).
+  // The ``ts`` field is honoured for change-detection: every new
+  // request must carry a fresh ``ts`` (Date.now()) to fire again.
+  flyTo?: FlyToRequest;
 };
 
 const ROOT_ID = 'map';
@@ -88,6 +102,13 @@ let overlay: MapboxOverlay | null = null;
 let legendEl: HTMLDivElement | null = null;
 let tooltipEl: HTMLDivElement | null = null;
 let lastDataVersion = -1;
+// Cache of substation coordinates so subsequent ``flyTo({substationId})``
+// hits work without the host having to re-send the whole geometry.
+const substationCoords: Map<string, Coordinate> = new Map();
+// Last applied flyTo timestamp — every new request must carry a
+// fresh ``ts`` (Date.now()) to fire again.
+let lastFlyToTs = -1;
+const DEFAULT_FLY_ZOOM = 11;
 
 function sendParent(msg: Record<string, unknown>): void {
   // Streamlit drops any postMessage whose payload lacks the
@@ -226,6 +247,27 @@ function buildLayers(
   ];
 }
 
+function applyFlyTo(req: FlyToRequest | undefined): void {
+  if (!map || !req) return;
+  if (typeof req.ts === 'number' && req.ts === lastFlyToTs) return;
+  let lon: number | undefined = req.lon;
+  let lat: number | undefined = req.lat;
+  if ((lon === undefined || lat === undefined) && req.substationId) {
+    const cached = substationCoords.get(req.substationId);
+    if (cached) {
+      lon = cached.lon;
+      lat = cached.lat;
+    }
+  }
+  if (lon === undefined || lat === undefined) return;
+  const zoom = typeof req.zoom === 'number' ? req.zoom : DEFAULT_FLY_ZOOM;
+  // ``easeTo`` rather than ``flyTo`` keeps the animation short for
+  // map-tab return trips; ``flyTo`` is dramatic but slow for the
+  // back-and-forth cadence the cross-tab navigation produces.
+  map.easeTo({ center: [lon, lat], zoom, duration: 600 });
+  if (typeof req.ts === 'number') lastFlyToTs = req.ts;
+}
+
 function render(args: RenderArgs): void {
   const root = document.getElementById(ROOT_ID);
   if (!root) return;
@@ -249,7 +291,13 @@ function render(args: RenderArgs): void {
   network.updateLines(lines, true);
 
   const subPosMap = new Map<string, Coordinate>();
-  for (const p of substationPositions) subPosMap.set(p.id, p.coordinate);
+  for (const p of substationPositions) {
+    subPosMap.set(p.id, p.coordinate);
+    // Mirror into the module-level cache so subsequent ``flyTo``
+    // hits work even when the host sends a render without positions
+    // (the wrapper already does this when data is unchanged).
+    substationCoords.set(p.id, p.coordinate);
+  }
 
   const linePosMap = new Map<string, Coordinate[]>();
   for (const lp of linePositions) linePosMap.set(lp.id, lp.coordinates);
@@ -283,6 +331,9 @@ function render(args: RenderArgs): void {
     }
     // Whether or not we rebuilt, height must be reported every render.
     setFrameHeight(height);
+    // Honour the optional flyTo hint on every render so a no-op data
+    // refresh that *only* carries a flyTo still animates.
+    applyFlyTo(args.flyTo);
     return;
   }
 
@@ -298,6 +349,7 @@ function render(args: RenderArgs): void {
   });
 
   const bounds = computeBounds(substationPositions);
+  const initialFlyTo = args.flyTo;
   map.on('load', () => {
     if (!map) return;
     if (bounds) map.fitBounds(bounds, { padding: 40, duration: 0 });
@@ -308,6 +360,11 @@ function render(args: RenderArgs): void {
     });
 
     map.addControl(overlay as unknown as maplibregl.IControl);
+
+    // If the very first render carried a flyTo (e.g. the host
+    // restored state from a previous session), apply it after the
+    // initial fitBounds so the user lands at the requested spot.
+    applyFlyTo(initialFlyTo);
 
     // Diagnostics: check that the deck.gl overlay is properly set up.
     setTimeout(() => {

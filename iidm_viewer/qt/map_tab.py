@@ -79,6 +79,32 @@ class MapTab(QWidget):
         self._ready = True
         self._flush()
 
+    def focus_substation(self, substation_id: str, zoom: float = 11) -> None:
+        """Fly the map camera to ``substation_id`` if it has coordinates.
+
+        Posts a tiny render arg carrying only the flyTo hint; the
+        map bundle caches substation positions internally so passing
+        coordinates isn't required after the first full render.
+        """
+        if not substation_id:
+            return
+        import time
+        args = {
+            "version": self._version,
+            "height": 670,
+            "flyTo": {
+                "substationId": substation_id,
+                "zoom": zoom,
+                "ts": int(time.monotonic() * 1000),
+            },
+        }
+        if self._ready:
+            self._view.render_component(**args)
+        else:
+            # Merge into any pending payload so the first render
+            # already carries the flyTo hint.
+            self._pending = dict(self._pending or {}, **args)
+
     def _flush(self) -> None:
         if not self._ready or self._pending is None:
             return
