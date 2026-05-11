@@ -125,6 +125,13 @@ def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
     regulation[~regulator_on & has_target_q] = "PQ"
     df["regulation"] = regulation
 
+    # Generators the load flow will switch from PV to PQ: voltage-regulating
+    # AND target sits outside the capability polygon. Surfaced both as a
+    # column on the result and as a flag callers can filter on.
+    lf_action = pd.Series("", index=df.index, dtype="object")
+    lf_action[(status == "outside") & (regulation == "PV")] = "PV→PQ"
+    df["lf_action"] = lf_action
+
     return df
 
 
@@ -154,7 +161,8 @@ def _render_target_containment_summary(classified, gens_df):
         if n_outside_pv or n_outside_pq:
             st.caption(
                 f"Of the {n_outside} outside: {n_outside_pv} PV "
-                f"(will switch to PQ in load flow), {n_outside_pq} PQ, "
+                f"(will switch to PQ in load flow — see the **lf_action** "
+                f"column below), {n_outside_pq} PQ, "
                 f"{n_outside - n_outside_pv - n_outside_pq} other."
             )
 
@@ -163,9 +171,16 @@ def _render_target_containment_summary(classified, gens_df):
             st.success("All targets are inside their capability curves.")
             return
 
-        order = issues["status"].map({"outside": 0, "edge": 1})
+        # Sort priority: outside-PV (will switch) > outside-PQ/other > edge,
+        # then within each group by violation magnitude descending.
+        is_switcher = (
+            (issues["status"] == "outside") & (issues["lf_action"] == "PV→PQ")
+        )
+        sort_key = pd.Series(2, index=issues.index)
+        sort_key[issues["status"] == "outside"] = 1
+        sort_key[is_switcher] = 0
         issues = (
-            issues.assign(_order=order)
+            issues.assign(_order=sort_key)
             .sort_values(["_order", "violation"], ascending=[True, False])
             .drop(columns="_order")
         )
@@ -176,7 +191,8 @@ def _render_target_containment_summary(classified, gens_df):
             issues = issues.join(gens_df[extra], how="left")
 
         cols = extra + [
-            "status", "regulation", "violation", "target_p", "target_q",
+            "status", "regulation", "lf_action", "violation",
+            "target_p", "target_q",
             "p_lo", "p_hi", "min_q_at_target_p", "max_q_at_target_p",
         ]
         st.dataframe(issues[cols], use_container_width=True)
@@ -230,7 +246,6 @@ def render_reactive_curves(network, selected_vl):
     st.caption(f"{len(gen_ids)} generators with reactive limits")
 
     classified = classify_targets(gens_df, curves_df)
-    _render_target_containment_summary(classified, gens_df)
 
     selected_gen = st.selectbox(
         "Generator",
@@ -334,3 +349,5 @@ def render_reactive_curves(network, selected_vl):
         st.dataframe(points.reset_index(drop=True), use_container_width=True)
     else:
         st.caption(f"Min-max reactive limits for {selected_gen}")
+
+    _render_target_containment_summary(classified, gens_df)
