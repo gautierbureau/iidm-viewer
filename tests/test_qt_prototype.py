@@ -657,6 +657,83 @@ def test_sld_feeder_click_routes_to_map_substation(qapp, loaded_window):
     assert flyto["substationId"] == expected
 
 
+def test_run_loadflow_from_app_state_emits_signal(qapp, loaded_window):
+    """``AppState.run_loadflow`` should fire ``loadflow_completed``
+    with a converged result on IEEE14."""
+    captured = []
+    loaded_window.state.loadflow_completed.connect(captured.append)
+    result = loaded_window.state.run_loadflow()
+    qapp.processEvents()
+    assert result is not None
+    assert result.converged is True
+    assert captured and captured[0] is result
+
+
+def test_sidebar_run_loadflow_button_toggles_with_network(qapp):
+    """The sidebar's Run-LF button is disabled before a load and
+    enabled afterwards."""
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        assert window.sidebar._run_lf_btn.isEnabled() is False
+        xiidm = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), os.pardir, "test_ieee14.xiidm")
+        )
+        window.open_file(xiidm)
+        qapp.processEvents()
+        assert window.sidebar._run_lf_btn.isEnabled() is True
+    finally:
+        window.close()
+        qapp.processEvents()
+
+
+def test_data_explorer_apply_and_run_lf_triggers_loadflow(qapp, loaded_window):
+    """Hitting Apply & Run LF after a bulk edit emits both
+    bulk_edit_applied and loadflow_requested, and the MainWindow
+    handler runs an LF that converges."""
+    explorer = loaded_window.data_tab
+    explorer._combo.setCurrentText("Generators")
+    qapp.processEvents()
+
+    # Select first 2 proxy rows.
+    sel = explorer._table.selectionModel()
+    sel.clearSelection()
+    from PySide6.QtCore import QItemSelection, QItemSelectionModel
+    for r in range(2):
+        idx_top = explorer._proxy.index(r, 0)
+        idx_right = explorer._proxy.index(r, explorer._proxy.columnCount() - 1)
+        sel.select(
+            QItemSelection(idx_top, idx_right),
+            QItemSelectionModel.Select | QItemSelectionModel.Rows,
+        )
+    qapp.processEvents()
+    ids = explorer._selected_element_ids()
+    assert len(ids) == 2
+
+    # Capture LF completions.
+    completions = []
+    loaded_window.state.loadflow_completed.connect(completions.append)
+
+    explorer._bulk_attr.setCurrentText("target_p")
+    explorer._bulk_value.setText("60.0")
+    explorer._on_bulk_apply_lf()
+    qapp.processEvents()
+
+    assert completions, "Apply & Run LF should fire loadflow_completed"
+    assert completions[-1].converged is True
+
+    # Revert for test hygiene.
+    from iidm_viewer.component_registry import apply_cell_edit, get_dataframe
+    df0 = get_dataframe(loaded_window.state.network, "Generators")
+    # The reverts here just put the network back to *some* consistent
+    # value; the exact pre-LF target_p isn't recoverable but the
+    # change-log entry was already created before the LF ran.
+    log = loaded_window.state.change_log
+    reverted, _ = log.revert_all(loaded_window.state.network)
+    assert reverted >= 2
+
+
 def test_change_log_panel_repaints_on_record(qapp, loaded_window):
     """The panel's title and table reflect log mutations in real time
     via the on_changed bus.

@@ -13,11 +13,13 @@ from typing import Callable, Optional
 
 from iidm_viewer import network_loader
 from iidm_viewer.change_log import ChangeLog
+from iidm_viewer.loadflow import LoadFlowResult, run_ac
 from iidm_viewer.powsybl_worker import NetworkProxy
 
 
 _NetworkListener = Callable[[Optional[NetworkProxy]], None]
 _VlListener = Callable[[Optional[str]], None]
+_LoadFlowListener = Callable[[LoadFlowResult], None]
 
 
 class AppState:
@@ -28,6 +30,7 @@ class AppState:
         self._selected_vl: Optional[str] = None
         self._network_listeners: list[_NetworkListener] = []
         self._vl_listeners: list[_VlListener] = []
+        self._loadflow_listeners: list[_LoadFlowListener] = []
         # One ChangeLog per process. Reset on every network reload.
         self.change_log = ChangeLog()
 
@@ -50,6 +53,9 @@ class AppState:
 
     def on_selected_vl_changed(self, listener: _VlListener) -> None:
         self._vl_listeners.append(listener)
+
+    def on_loadflow_completed(self, listener: _LoadFlowListener) -> None:
+        self._loadflow_listeners.append(listener)
 
     # ------------------------------------------------------------------
     # Mutators
@@ -79,3 +85,19 @@ class AppState:
         self._selected_vl = new
         for listener in list(self._vl_listeners):
             listener(new)
+
+    def run_loadflow(
+        self,
+        generic_params: Optional[dict] = None,
+        provider_params: Optional[dict] = None,
+    ) -> Optional[LoadFlowResult]:
+        """Run AC load flow on the open network and broadcast the result.
+
+        Returns ``None`` when no network is loaded.
+        """
+        if self._network is None:
+            return None
+        result = run_ac(self._network, generic_params, provider_params)
+        for listener in list(self._loadflow_listeners):
+            listener(result)
+        return result

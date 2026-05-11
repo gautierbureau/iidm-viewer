@@ -15,6 +15,7 @@ from PySide6.QtCore import QObject, Signal
 
 from iidm_viewer import network_loader
 from iidm_viewer.change_log import ChangeLog
+from iidm_viewer.loadflow import LoadFlowResult, run_ac
 from iidm_viewer.powsybl_worker import NetworkProxy
 
 
@@ -23,6 +24,11 @@ class AppState(QObject):
 
     network_changed = Signal(object)        # NetworkProxy | None
     selected_vl_changed = Signal(str)       # vl_id (empty string when cleared)
+    # Emitted after each AC load-flow run. Carries the wrapper from
+    # :class:`iidm_viewer.loadflow.LoadFlowResult` — the host can
+    # inspect ``.status`` / ``.converged`` for the UI status routing,
+    # and stash ``.report_json`` for an optional logs dialog.
+    loadflow_completed = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -62,3 +68,21 @@ class AppState(QObject):
             return
         self._selected_vl = new
         self.selected_vl_changed.emit(new or "")
+
+    def run_loadflow(
+        self,
+        generic_params: Optional[dict] = None,
+        provider_params: Optional[dict] = None,
+    ) -> Optional[LoadFlowResult]:
+        """Run AC load flow on the open network.
+
+        Returns ``None`` when no network is loaded. The returned
+        :class:`LoadFlowResult` is also broadcast via
+        :pyattr:`loadflow_completed` so peripheral panels (diagram
+        caches, data-explorer refresh) can update.
+        """
+        if self._network is None:
+            return None
+        result = run_ac(self._network, generic_params, provider_params)
+        self.loadflow_completed.emit(result)
+        return result
