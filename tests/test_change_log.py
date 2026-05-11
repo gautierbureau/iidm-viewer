@@ -110,6 +110,55 @@ def test_changelog_entries_filter_by_component():
     assert len(log.entries()) == 2
 
 
+def test_changelog_record_removal_dedups_and_keeps_snapshot():
+    import pandas as pd
+
+    log = ChangeLog()
+    fired = [0]
+    log.on_changed(lambda: fired.__setitem__(0, fired[0] + 1))
+
+    snapshot = pd.DataFrame(
+        {"target_p": [1.0, 2.0]},
+        index=pd.Index(["G1", "G2"], name="id"),
+    )
+    log.record_removal("Generators", ["G1", "G2"], snapshot=snapshot)
+    assert len(log.removals()) == 2
+    assert fired[0] == 1
+    # Re-recording the same id is a no-op (and doesn't fire again).
+    log.record_removal("Generators", ["G1"])
+    assert len(log.removals()) == 2
+    assert fired[0] == 1
+    # Snapshot row attached when present.
+    g1 = next(r for r in log.removals() if r["element_id"] == "G1")
+    assert g1.get("snapshot", {}).get("target_p") == 1.0
+
+
+def test_changelog_len_counts_edits_plus_removals():
+    log = ChangeLog()
+    log.record("Generators", "G1", "target_p", 1.0, 2.0)
+    log.record_removal("Loads", ["L1"])
+    assert len(log.entries()) == 1
+    assert len(log.removals()) == 1
+    assert len(log) == 2
+
+
+def test_changelog_clear_wipes_removals_too():
+    log = ChangeLog()
+    log.record_removal("Loads", ["L1"])
+    assert len(log.removals()) == 1
+    log.clear()
+    assert len(log.removals()) == 0
+
+
+def test_changelog_clear_removals_only_keeps_edits():
+    log = ChangeLog()
+    log.record("Generators", "G1", "target_p", 1.0, 2.0)
+    log.record_removal("Loads", ["L1"])
+    log.clear_removals()
+    assert len(log.entries()) == 1
+    assert len(log.removals()) == 0
+
+
 def test_changelog_clear_fires_listener_only_when_non_empty():
     log = ChangeLog()
     fired = [0]

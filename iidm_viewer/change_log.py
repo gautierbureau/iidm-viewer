@@ -136,10 +136,20 @@ class ChangeLog:
     prototype hosts hold one of these instances and reset it on every
     network reload. Listeners can subscribe via :meth:`on_changed` to
     repaint a UI panel.
+
+    Tracks two parallel timelines:
+
+    * ``entries`` — edits (per cell or in bulk), revertable via the
+      shared :func:`revert_via_apply`.
+    * ``removals`` — destructive deletions, with an optional pandas
+      snapshot of the removed rows kept around so a future host can
+      offer "undo" via :func:`network.create_*`. The current
+      prototypes only display removals; revert is out of scope.
     """
 
     def __init__(self) -> None:
         self._entries: list[ChangeLogEntry] = []
+        self._removals: list[dict] = []  # {component, element_id, snapshot?}
         self._listeners: list[Callable[[], None]] = []
 
     # ------------------------------------------------------------------
@@ -152,7 +162,7 @@ class ChangeLog:
         return [e for e in self._entries if e.get("component") == component]
 
     def __len__(self) -> int:
-        return len(self._entries)
+        return len(self._entries) + len(self._removals)
 
     # ------------------------------------------------------------------
     # Write
@@ -189,9 +199,58 @@ class ChangeLog:
         self._fire()
 
     def clear(self) -> None:
-        if not self._entries:
+        if not self._entries and not self._removals:
             return
         self._entries.clear()
+        self._removals.clear()
+        self._fire()
+
+    # ------------------------------------------------------------------
+    # Removals
+    # ------------------------------------------------------------------
+    def record_removal(
+        self,
+        component: str,
+        element_ids,
+        snapshot=None,
+    ) -> None:
+        """Append removal records for ``element_ids``.
+
+        ``snapshot`` is an optional pandas DataFrame whose index
+        carries those ids; the per-id row is stashed in the entry so
+        a future host can offer "recreate" via the pypowsybl
+        ``create_*`` APIs. Pass ``None`` to skip the snapshot (the
+        cheap path the prototypes take).
+        """
+        if not element_ids:
+            return
+        existing = {(e.get("component"), str(e.get("element_id"))) for e in self._removals}
+        added = False
+        for eid in element_ids:
+            key = (component, str(eid))
+            if key in existing:
+                continue
+            entry: dict = {"component": component, "element_id": str(eid)}
+            if snapshot is not None and str(eid) in {str(x) for x in getattr(snapshot, "index", [])}:
+                try:
+                    entry["snapshot"] = snapshot.loc[str(eid)].to_dict()
+                except Exception:
+                    pass
+            self._removals.append(entry)
+            existing.add(key)
+            added = True
+        if added:
+            self._fire()
+
+    def removals(self, component: Optional[str] = None) -> list[dict]:
+        if component is None:
+            return list(self._removals)
+        return [r for r in self._removals if r.get("component") == component]
+
+    def clear_removals(self) -> None:
+        if not self._removals:
+            return
+        self._removals.clear()
         self._fire()
 
     # ------------------------------------------------------------------

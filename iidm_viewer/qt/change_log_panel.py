@@ -44,7 +44,9 @@ class _ChangeLogModel(QAbstractTableModel):
         self.endResetModel()
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
-        return 0 if parent.isValid() else len(self._log)
+        # The table shows edit entries only; removals are surfaced via
+        # the separate label below the table.
+        return 0 if parent.isValid() else len(self._log.entries())
 
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else len(_COLUMNS)
@@ -136,11 +138,20 @@ class ChangeLogPanel(QWidget):
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setMaximumHeight(180)
 
+        # A single-line label showing the removal log under the edits
+        # table — non-revertable for now, kept visible in red.
+        self._removals_label = QLabel("")
+        self._removals_label.setTextFormat(Qt.RichText)
+        self._removals_label.setStyleSheet("padding: 2px 4px;")
+        self._removals_label.setWordWrap(True)
+        self._removals_label.setVisible(False)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 4, 10, 4)
         layout.setSpacing(2)
         layout.addLayout(header)
         layout.addWidget(self._table)
+        layout.addWidget(self._removals_label)
 
         self._refresh_title()
         self._update_buttons()
@@ -165,18 +176,52 @@ class ChangeLogPanel(QWidget):
     def _on_log_changed(self) -> None:
         self._model.refresh()
         self._refresh_title()
+        self._refresh_removals()
         self._update_buttons()
 
     def _refresh_title(self) -> None:
-        n = len(self._log) if self._log is not None else 0
-        self._title.setText(f"Change Log ({n})")
+        if self._log is None:
+            self._title.setText("Change Log (0)")
+            return
+        n_edits = len(self._log.entries())
+        n_removals = len(self._log.removals())
+        if n_removals:
+            self._title.setText(f"Change Log ({n_edits} edits · {n_removals} removed)")
+        else:
+            self._title.setText(f"Change Log ({n_edits})")
+
+    def _refresh_removals(self) -> None:
+        if self._log is None:
+            self._removals_label.setVisible(False)
+            return
+        removals = self._log.removals()
+        if not removals:
+            self._removals_label.setVisible(False)
+            return
+        # Group by component, list a few ids per group.
+        from collections import defaultdict
+        by_comp: dict[str, list[str]] = defaultdict(list)
+        for r in removals:
+            by_comp[str(r.get("component", ""))].append(str(r.get("element_id", "")))
+        parts: list[str] = []
+        for component, ids in by_comp.items():
+            shown = ", ".join(ids[:5])
+            more = f" (+{len(ids) - 5} more)" if len(ids) > 5 else ""
+            parts.append(f"<b>{component}</b>: {shown}{more}")
+        self._removals_label.setText(
+            "<span style='color:#b30000;'>Removed — " + " · ".join(parts) + "</span>"
+        )
+        self._removals_label.setVisible(True)
 
     def _update_buttons(self) -> None:
-        has_entries = self._log is not None and len(self._log) > 0
+        has_edits = self._log is not None and len(self._log.entries()) > 0
+        has_anything = self._log is not None and len(self._log) > 0
         has_network = self._network is not None
-        self._revert_all.setEnabled(has_entries and has_network)
-        self._revert_selected.setEnabled(has_entries and has_network)
-        self._clear.setEnabled(has_entries)
+        # Revert only operates on edits.
+        self._revert_all.setEnabled(has_edits and has_network)
+        self._revert_selected.setEnabled(has_edits and has_network)
+        # Clear wipes both edits and removals.
+        self._clear.setEnabled(has_anything)
 
     # ------------------------------------------------------------------
     # Actions
