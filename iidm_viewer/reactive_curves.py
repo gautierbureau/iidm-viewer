@@ -1,3 +1,5 @@
+import math
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -63,17 +65,92 @@ def _render_target_v_sensitivity(gen_row, classified_row, gen_id, network):
     st.caption(" ".join(pieces))
 
 
+def _polygon_vertices(gen_id, gen_row, curves_df, has_curve):
+    """Return closed-polygon ``(polygon_p, polygon_q)`` vertex lists for a gen.
+
+    Curve generators: vertices follow the top boundary L→R then the bottom
+    boundary R→L using the curve points sorted by P. Min-max generators: a
+    four-vertex rectangle from ``[min_p, max_p] × [min_q, max_q]``. Returns
+    ``(None, None)`` when the required bounds are missing.
+    """
+    if has_curve:
+        points = curves_df.loc[gen_id].sort_values("p")
+        p_vals = points["p"].tolist()
+        min_q = points["min_q"].tolist()
+        max_q = points["max_q"].tolist()
+    else:
+        min_p = gen_row.get("min_p")
+        max_p = gen_row.get("max_p")
+        q_min = gen_row.get("min_q")
+        q_max = gen_row.get("max_q")
+        if any(pd.isna(v) for v in (min_p, max_p, q_min, q_max)):
+            return None, None
+        p_vals = [float(min_p), float(max_p)]
+        min_q = [float(q_min), float(q_min)]
+        max_q = [float(q_max), float(q_max)]
+
+    if len(p_vals) < 2:
+        return None, None
+
+    polygon_p = p_vals + list(reversed(p_vals))
+    polygon_q = max_q + list(reversed(min_q))
+    return polygon_p, polygon_q
+
+
+def _signed_distance_to_polygon(tp, tq, polygon_p, polygon_q):
+    """Signed Euclidean distance from ``(tp, tq)`` to a closed polygon.
+
+    Negative when the point is inside (magnitude = closest-edge headroom),
+    zero on the boundary, positive when outside.
+    """
+    n = len(polygon_p)
+    if n < 3:
+        return float("nan")
+
+    min_dist = math.inf
+    for i in range(n):
+        j = (i + 1) % n
+        x1, y1 = polygon_p[i], polygon_q[i]
+        x2, y2 = polygon_p[j], polygon_q[j]
+        dx, dy = x2 - x1, y2 - y1
+        length_sq = dx * dx + dy * dy
+        if length_sq < 1e-30:
+            d = math.hypot(tp - x1, tq - y1)
+        else:
+            t = max(0.0, min(1.0, ((tp - x1) * dx + (tq - y1) * dy) / length_sq))
+            d = math.hypot(tp - (x1 + t * dx), tq - (y1 + t * dy))
+        if d < min_dist:
+            min_dist = d
+
+    # Ray casting: shoot horizontally to +x and count crossings.
+    inside = False
+    for i in range(n):
+        j = (i + 1) % n
+        yi, yj = polygon_q[i], polygon_q[j]
+        if (yi > tq) != (yj > tq):
+            x_int = polygon_p[i] + (tq - yi) * (polygon_p[j] - polygon_p[i]) / (yj - yi)
+            if tp < x_int:
+                inside = not inside
+
+    return -min_dist if inside else min_dist
+
+
 def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
     """Classify (target_p, target_q) for each generator vs. its capability polygon.
 
-    The polygon is convex and piecewise-linear in P, so containment reduces to
-    target_p in [p_lo, p_hi] AND target_q in [min_q_at_target_p, max_q_at_target_p].
-    P bounds come from the curve's extreme points when present, else from min_p/max_p.
+    Returns the input frame augmented with:
 
-    Also tags each generator with a ``regulation`` column: ``"PV"`` when the
-    voltage regulator is on, ``"PQ"`` when it is off and a target_q is set,
-    ``"?"`` otherwise. PV generators outside their diagram will be switched to
-    PQ during a load flow, which is the most actionable subset of the report.
+    - ``distance``: signed Euclidean distance from ``(target_p, target_q)``
+      to the polygon (positive outside, zero on edge, negative inside =
+      headroom). Units: MVA (P in MW, Q in MVar, mixed).
+    - ``status``: ``"inside"`` / ``"edge"`` / ``"outside"`` / ``"n/a"`` derived
+      from ``distance`` and ``tolerance``.
+    - ``regulation``: ``"PV"`` (voltage_regulator_on), ``"PQ"`` (off + target_q),
+      ``"?"`` otherwise.
+    - ``lf_action``: ``"PV→PQ"`` for PV generators outside their diagram (the
+      ones the load flow will switch); empty string otherwise.
+    - ``p_lo`` / ``p_hi``: diagnostic P bounds (curve extremes when present,
+      else min_p / max_p).
     """
     needed = ["target_p", "target_q", "min_p", "max_p",
               "min_q_at_target_p", "max_q_at_target_p",
@@ -87,35 +164,39 @@ def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
             .rename(columns={"min": "p_lo", "max": "p_hi"})
         )
         df = df.join(curve_p_range, how="left")
+        curve_gen_ids_set = set(curves_df.index.get_level_values("id"))
     else:
         df["p_lo"] = float("nan")
         df["p_hi"] = float("nan")
+        curve_gen_ids_set = set()
 
     df["p_lo"] = df["p_lo"].fillna(df["min_p"])
     df["p_hi"] = df["p_hi"].fillna(df["max_p"])
 
-    valid = (
-        df["target_p"].notna() & df["target_q"].notna()
-        & df["p_lo"].notna() & df["p_hi"].notna()
-        & df["min_q_at_target_p"].notna() & df["max_q_at_target_p"].notna()
-    )
-
-    distances = pd.concat(
-        [
-            df["p_lo"] - df["target_p"],
-            df["target_p"] - df["p_hi"],
-            df["min_q_at_target_p"] - df["target_q"],
-            df["target_q"] - df["max_q_at_target_p"],
-        ],
-        axis=1,
-    )
-    max_signed = distances.max(axis=1)
-    df["violation"] = max_signed.where(max_signed > 0, 0.0)
+    # Signed Euclidean distance from (target_p, target_q) to each gen's polygon.
+    # Loop in Python: ~O(N_gens * N_vertices_per_polygon); curves have ≤ ~20
+    # points so the cost stays under a few ms even for a thousand generators.
+    distances = pd.Series(float("nan"), index=df.index, dtype="float64")
+    for gen_id in df.index:
+        tp = df.at[gen_id, "target_p"]
+        tq = df.at[gen_id, "target_q"]
+        if pd.isna(tp) or pd.isna(tq):
+            continue
+        has_curve = gen_id in curve_gen_ids_set
+        poly_p, poly_q = _polygon_vertices(
+            gen_id, gens_df.loc[gen_id], curves_df, has_curve
+        )
+        if poly_p is None:
+            continue
+        distances.at[gen_id] = _signed_distance_to_polygon(
+            float(tp), float(tq), poly_p, poly_q
+        )
+    df["distance"] = distances
 
     status = pd.Series("inside", index=df.index, dtype="object")
-    status[max_signed.abs() <= tolerance] = "edge"
-    status[max_signed > tolerance] = "outside"
-    status[~valid] = "n/a"
+    status[distances.abs() <= tolerance] = "edge"
+    status[distances > tolerance] = "outside"
+    status[distances.isna()] = "n/a"
     df["status"] = status
 
     regulator_on = df["voltage_regulator_on"].fillna(False).astype(bool)
@@ -125,9 +206,6 @@ def classify_targets(gens_df, curves_df, tolerance=_TARGET_TOLERANCE):
     regulation[~regulator_on & has_target_q] = "PQ"
     df["regulation"] = regulation
 
-    # Generators the load flow will switch from PV to PQ: voltage-regulating
-    # AND target sits outside the capability polygon. Surfaced both as a
-    # column on the result and as a flag callers can filter on.
     lf_action = pd.Series("", index=df.index, dtype="object")
     lf_action[(status == "outside") & (regulation == "PV")] = "PV→PQ"
     df["lf_action"] = lf_action
@@ -172,7 +250,8 @@ def _render_target_containment_summary(classified, gens_df):
             return
 
         # Sort priority: outside-PV (will switch) > outside-PQ/other > edge,
-        # then within each group by violation magnitude descending.
+        # then within each group by signed distance descending (farthest from
+        # the diagram first).
         is_switcher = (
             (issues["status"] == "outside") & (issues["lf_action"] == "PV→PQ")
         )
@@ -181,7 +260,7 @@ def _render_target_containment_summary(classified, gens_df):
         sort_key[is_switcher] = 0
         issues = (
             issues.assign(_order=sort_key)
-            .sort_values(["_order", "violation"], ascending=[True, False])
+            .sort_values(["_order", "distance"], ascending=[True, False])
             .drop(columns="_order")
         )
 
@@ -191,7 +270,7 @@ def _render_target_containment_summary(classified, gens_df):
             issues = issues.join(gens_df[extra], how="left")
 
         cols = extra + [
-            "status", "regulation", "lf_action", "violation",
+            "status", "regulation", "lf_action", "distance",
             "target_p", "target_q",
             "p_lo", "p_hi", "min_q_at_target_p", "max_q_at_target_p",
         ]
