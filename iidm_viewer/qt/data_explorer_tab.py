@@ -48,7 +48,9 @@ from PySide6.QtWidgets import (
 )
 
 from iidm_viewer.change_log import ChangeLog
+from iidm_viewer.component_creation import CREATABLE_COMPONENTS
 from iidm_viewer.qt.change_log_panel import ChangeLogPanel
+from iidm_viewer.qt.create_panel import CreateComponentPanel
 from iidm_viewer.component_registry import (
     COMPONENT_TYPES,
     DISCONNECTABLE_COMPONENTS,
@@ -375,10 +377,18 @@ class DataExplorerTab(QWidget):
         self._change_log_panel = ChangeLogPanel()
         self._change_log_panel.reverted.connect(self._on_log_reverted)
 
+        # Create-new-component panel: visible only when the current
+        # component is in CREATABLE_COMPONENTS and the network has
+        # node-breaker voltage levels. The form schema comes from the
+        # shared registry; the widget toolkit is Qt-specific.
+        self._create_panel = CreateComponentPanel()
+        self._create_panel.component_created.connect(self._on_component_created)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         layout.addLayout(controls)
+        layout.addWidget(self._create_panel)
         layout.addWidget(self._filters_panel)
         layout.addWidget(self._summary)
         layout.addWidget(self._table, 1)
@@ -391,6 +401,8 @@ class DataExplorerTab(QWidget):
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
         self._change_log_panel.set_network(network)
+        self._create_panel.set_network(network)
+        self._create_panel.set_component(self._combo.currentText())
         if network is None:
             self._model.set_dataframe(pd.DataFrame(), editable_cols=[])
             self._summary.setText("No network loaded.")
@@ -426,10 +438,23 @@ class DataExplorerTab(QWidget):
         # and the new component may not have the same columns.
         self._filter_specs.clear()
         self._update_vl_filter_visibility()
+        # Update the create panel to render the new component's form.
+        self._create_panel.set_component(label)
         self._refresh(label)
         # Rebuild the structured-filter widgets *after* refresh so the
         # widget specs come from the freshly-loaded frame.
         self._rebuild_filter_widgets(label)
+
+    def _on_component_created(self, component: str, element_id: str) -> None:
+        """Refresh the data grid + diagram caches after a new component
+        is created (topology changes: bay switches + the new feeder)."""
+        # Re-fetch the live frame to surface the new row.
+        if component == self._combo.currentText():
+            self._refresh(component)
+        # Diagram caches store SVGs that don't include the new element;
+        # surface this via the bulk_edit_applied path so MainWindow's
+        # existing topology-handler flushes them.
+        self.bulk_edit_applied.emit(component, [element_id], "connected", True, {})
 
     def _update_vl_filter_visibility(self) -> None:
         component = self._combo.currentText()
