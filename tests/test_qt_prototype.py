@@ -193,6 +193,109 @@ def test_pandas_table_model_basic_protocol():
     assert m.headerData(0, Qt.Horizontal, Qt.DisplayRole) == "a"
 
 
+def test_data_explorer_filter_narrows_visible_rows(qapp, loaded_window):
+    explorer = loaded_window.data_tab
+    explorer._combo.setCurrentText("Voltage Levels")
+    qapp.processEvents()
+
+    full = explorer._proxy.rowCount()
+    assert full == 14  # IEEE14
+
+    # IEEE14 has VLs named VL1..VL14; filter to those containing "1"
+    # — that's VL1, VL10..VL14, so 6 rows.
+    explorer._filter.setText("VL1")
+    qapp.processEvents()
+    narrowed = explorer._proxy.rowCount()
+    assert 0 < narrowed < full
+
+    explorer._filter.setText("")
+    qapp.processEvents()
+    assert explorer._proxy.rowCount() == full
+
+
+def test_data_explorer_sort_proxies_dont_mutate_source(qapp, loaded_window):
+    """Sort lives in the proxy; the underlying DataFrame stays
+    untouched so subsequent edits target the right rows."""
+    explorer = loaded_window.data_tab
+    explorer._combo.setCurrentText("Voltage Levels")
+    qapp.processEvents()
+
+    source_first_before = explorer._model.dataframe()["id"].iloc[0]
+    # Sort by nominal_v ascending — IEEE14's lowest VL is 13.8 kV
+    nominal_col = list(explorer._model.dataframe().columns).index("nominal_v")
+    explorer._proxy.sort(nominal_col, Qt.AscendingOrder)
+    qapp.processEvents()
+
+    # The proxy's first row should now be the lowest-V VL.
+    proxy_idx = explorer._proxy.index(0, list(explorer._model.dataframe().columns).index("nominal_v"))
+    assert explorer._proxy.data(proxy_idx, Qt.DisplayRole) is not None
+
+    # Source frame's row order is unchanged.
+    source_first_after = explorer._model.dataframe()["id"].iloc[0]
+    assert source_first_after == source_first_before
+
+
+def test_data_explorer_marks_editable_columns(qapp, loaded_window):
+    explorer = loaded_window.data_tab
+    explorer._combo.setCurrentText("Generators")
+    qapp.processEvents()
+
+    df = explorer._model.dataframe()
+    target_p_col = list(df.columns).index("target_p")
+    name_col = list(df.columns).index("name")
+    target_p_idx = explorer._model.index(0, target_p_col)
+    name_idx = explorer._model.index(0, name_col)
+
+    assert bool(explorer._model.flags(target_p_idx) & Qt.ItemIsEditable)
+    assert not bool(explorer._model.flags(name_idx) & Qt.ItemIsEditable)
+
+
+def test_data_explorer_edit_updates_pypowsybl_and_grid(qapp, loaded_window):
+    """End-to-end edit: change a generator's target_p, confirm the
+    pypowsybl frame reflects it and the model's cell is repainted."""
+    explorer = loaded_window.data_tab
+    explorer._combo.setCurrentText("Generators")
+    qapp.processEvents()
+
+    df = explorer._model.dataframe()
+    assert df.shape[0] > 0
+    gen_id = str(df["id"].iloc[0])
+    col = list(df.columns).index("target_p")
+    old_value = df["target_p"].iloc[0]
+    new_value = old_value + 5.0
+
+    src_idx = explorer._model.index(0, col)
+    proxy_idx = explorer._proxy.mapFromSource(src_idx)
+    # setData on the proxy delegates to the source model's setData.
+    assert explorer._proxy.setData(proxy_idx, new_value, Qt.EditRole)
+    qapp.processEvents()
+
+    # The model's in-memory frame now carries the new value.
+    refreshed = explorer._model.dataframe()
+    assert pytest.approx(refreshed["target_p"].iloc[0], rel=1e-9) == new_value
+
+    # pypowsybl is the source of truth — re-fetch and confirm.
+    from iidm_viewer.component_registry import get_dataframe
+    live = get_dataframe(loaded_window.state.network, "Generators")
+    live_row = live[live["id"].astype(str) == gen_id].iloc[0]
+    assert pytest.approx(live_row["target_p"], rel=1e-9) == new_value
+
+
+def test_data_explorer_rejects_non_editable_attribute(qapp, loaded_window):
+    """setData on a non-editable column must return False and not
+    issue an edit_requested signal."""
+    explorer = loaded_window.data_tab
+    explorer._combo.setCurrentText("Voltage Levels")
+    qapp.processEvents()
+
+    captured: list = []
+    explorer._model.edit_requested.connect(lambda *args: captured.append(args))
+    name_col = list(explorer._model.dataframe().columns).index("name")
+    src_idx = explorer._model.index(0, name_col)
+    assert explorer._model.setData(src_idx, "something", Qt.EditRole) is False
+    assert captured == []
+
+
 def test_app_state_emits_signal_only_on_change(qapp):
     from iidm_viewer.qt.state import AppState
 

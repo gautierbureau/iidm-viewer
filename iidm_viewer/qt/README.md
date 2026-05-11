@@ -3,13 +3,18 @@
 A second front-end that explores moving away from Streamlit's
 rerun-the-whole-script model. Ships four tabs — **Network Map**,
 **Network Area Diagram**, **Single Line Diagram** and
-**Data Explorer Components** — covering both the diagram interactions
-and a first read-only DataFrame viewer:
+**Data Explorer Components** — covering the diagram interactions
+and a native DataFrame viewer:
 
 * clicking a substation on the map navigates to its SLD;
 * clicking a node on the NAD navigates to its SLD;
 * the data tab renders any pypowsybl component DataFrame in a native
-  `QTableView` (no filtering / editing yet — that's next iteration).
+  `QTableView` with substring filter (across all columns), per-column
+  sort (header click), and inline editing of the editable attribute
+  set from `iidm_viewer.component_registry`. Edits dispatch through
+  the pypowsybl worker via `apply_cell_edit`; topology-affecting
+  attribute changes (`connected`, `open`, …) invalidate the NAD /
+  SLD caches so the next selection redraws fresh.
 
 Both jumps activate the SLD tab and render the target VL instantly,
 with no script rerun and no websocket round-trip.

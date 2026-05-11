@@ -45,30 +45,19 @@ app.add_static_files(_NAD_URL, _NAD_DIST)
 app.add_static_files(_SLD_URL, _SLD_DIST)
 
 
-# Component-types registry used by the Data Explorer tab. Mirrored
-# from ``network_info.COMPONENT_TYPES`` and from the PySide6 tab in
-# ``iidm_viewer.qt.data_explorer_tab``; kept local so the web path
-# doesn't pull either streamlit or PySide6 as a transitive import.
-COMPONENT_GETTERS: dict[str, str] = {
-    "Substations": "get_substations",
-    "Voltage Levels": "get_voltage_levels",
-    "Buses": "get_buses",
-    "Busbar Sections": "get_busbar_sections",
-    "Generators": "get_generators",
-    "Loads": "get_loads",
-    "Lines": "get_lines",
-    "2-Winding Transformers": "get_2_windings_transformers",
-    "3-Winding Transformers": "get_3_windings_transformers",
-    "Switches": "get_switches",
-    "Shunt Compensators": "get_shunt_compensators",
-    "Static VAR Compensators": "get_static_var_compensators",
-    "HVDC Lines": "get_hvdc_lines",
-    "VSC Converter Stations": "get_vsc_converter_stations",
-    "LCC Converter Stations": "get_lcc_converter_stations",
-    "Batteries": "get_batteries",
-    "Dangling Lines": "get_dangling_lines",
-    "Tie Lines": "get_tie_lines",
-}
+# Component-types registry used by the Data Explorer tab. Sourced from
+# ``iidm_viewer.component_registry`` (the framework-agnostic module
+# both Qt and NiceGUI prototypes share). Aliased for backwards
+# compatibility with earlier tests that imported ``COMPONENT_GETTERS``
+# from this module.
+from iidm_viewer.component_registry import (
+    COMPONENT_TYPES as COMPONENT_GETTERS,
+    TOPOLOGY_AFFECTING_ATTRIBUTES,
+    apply_cell_edit,
+    editable_attributes,
+    get_dataframe,
+    is_editable,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -149,14 +138,18 @@ def _generate_nad(network: NetworkProxy, vl_id: str, depth: int):
     return run(_do)
 
 
-def _fetch_dataframe(network: NetworkProxy, getter: str):
-    """Call ``network.<getter>()`` on the worker thread; reset index."""
+# ``_fetch_dataframe`` used to live here; it's been promoted to
+# ``iidm_viewer.component_registry.get_dataframe``. Keep a thin
+# shim — the old name takes a *getter method string* rather than a
+# component label, so existing tests that probe the worker path
+# don't have to change.
+def _fetch_dataframe(network: NetworkProxy, getter_name: str):
     import pandas as pd
 
     raw = object.__getattribute__(network, "_obj")
 
     def _do():
-        method = getattr(raw, getter, None)
+        method = getattr(raw, getter_name, None)
         if method is None:
             return pd.DataFrame()
         df = method()
@@ -296,16 +289,29 @@ def _push_nad(vl_id: str, depth: int) -> None:
 # ---------------------------------------------------------------------------
 # Data Explorer helpers
 # ---------------------------------------------------------------------------
-def _dataframe_to_aggrid_options(df) -> dict:
+def _dataframe_to_aggrid_options(df, editable_cols: Optional[list] = None) -> dict:
     """Build an ag-Grid options dict from a pandas DataFrame.
 
-    NaN -> em-dash for parity with the Streamlit / Qt prototypes.
-    Numeric columns get right alignment; everything else stays default.
+    * NaN → em-dash for parity with the Streamlit / Qt prototypes.
+    * Per-column sort (header click) and per-column filter (column
+      menu) are enabled via ``defaultColDef`` so every column gets
+      them without having to enumerate.
+    * The "id" column is pinned-left so it stays visible while
+      scrolling wide tables (lines, generators).
+    * Columns listed in ``editable_cols`` get ``editable: true`` so
+      ag-Grid surfaces an inline editor — the host listens for
+      ``cellValueChanged`` to commit the edit.
     """
     import math
 
     if df is None or df.empty:
-        return {"columnDefs": [], "rowData": []}
+        return {
+            "columnDefs": [],
+            "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }
+
+    editable_set = set(editable_cols or [])
 
     def _cell(v):
         if v is None:
@@ -319,25 +325,55 @@ def _dataframe_to_aggrid_options(df) -> dict:
     columns = [str(c) for c in df.columns]
     column_defs = []
     for c in columns:
-        is_numeric = str(df[c].dtype).startswith(("float", "int"))
-        defn: dict = {"headerName": c, "field": c, "sortable": True, "resizable": True}
+        dtype = df[c].dtype
+        kind = getattr(dtype, "kind", "")
+        is_numeric = kind in ("i", "u", "f")
+        is_bool = kind == "b"
+        defn: dict = {"headerName": c, "field": c}
+        if c == "id":
+            defn["pinned"] = "left"
         if is_numeric:
             defn["type"] = "numericColumn"
+            defn["filter"] = "agNumberColumnFilter"
+        elif is_bool:
+            defn["filter"] = True   # default (set / text)
+            defn["cellEditor"] = "agSelectCellEditor"
+            defn["cellEditorParams"] = {"values": [True, False]}
+        # else: defaults — sortable, text filter, resizable.
+        if c in editable_set:
+            defn["editable"] = True
+            defn["cellStyle"] = {"backgroundColor": "#fff7e0"}
         column_defs.append(defn)
 
     row_data = [
         {c: _cell(row[c]) for c in columns}
         for _, row in df.iterrows()
     ]
-    return {"columnDefs": column_defs, "rowData": row_data}
+    return {
+        "columnDefs": column_defs,
+        "rowData": row_data,
+        "defaultColDef": _DEFAULT_COL_DEF,
+    }
+
+
+# Apply sortable / resizable / floating-filter to every column once,
+# rather than repeating it on each column def.
+_DEFAULT_COL_DEF: dict = {
+    "sortable": True,
+    "resizable": True,
+    "filter": True,
+    "floatingFilter": True,
+}
 
 
 def _build_data_explorer():
     """Materialise the Data Explorer panel and return a refresh closure.
 
     The closure re-fetches the DataFrame for whatever component is
-    selected in the combo and pushes it into the ag-Grid. Calling it
-    is the only API the outer page needs.
+    selected in the combo and pushes it into the ag-Grid. Filter +
+    sort are handled inside ag-Grid (per-column floating filters,
+    default sort on header click). Edits are dispatched here via the
+    ``cellValueChanged`` event.
     """
     with ui.row().classes("q-pa-sm items-center w-full"):
         ui.label("Component:")
@@ -348,33 +384,81 @@ def _build_data_explorer():
         summary = ui.label("Load a network to inspect its components.") \
             .classes("text-caption q-ml-md")
 
-    grid = ui.aggrid({"columnDefs": [], "rowData": []}).classes("w-full") \
-        .style("height: 600px")
+    grid = ui.aggrid({
+        "columnDefs": [], "rowData": [],
+        "defaultColDef": _DEFAULT_COL_DEF,
+    }).classes("w-full").style("height: 600px")
 
     def refresh() -> None:
         label = select.value
         if _state.network is None or not label:
-            grid.options = {"columnDefs": [], "rowData": []}
+            grid.options = {
+                "columnDefs": [], "rowData": [],
+                "defaultColDef": _DEFAULT_COL_DEF,
+            }
             grid.update()
             summary.set_text("No network loaded.")
             return
-        getter = COMPONENT_GETTERS.get(label)
-        if getter is None:
-            return
         try:
-            df = _fetch_dataframe(_state.network, getter)
+            df = get_dataframe(_state.network, label)
         except Exception as exc:
-            grid.options = {"columnDefs": [], "rowData": []}
+            grid.options = {
+                "columnDefs": [], "rowData": [],
+                "defaultColDef": _DEFAULT_COL_DEF,
+            }
             grid.update()
             summary.set_text(f"{label}: failed — {exc}")
             return
-        grid.options = _dataframe_to_aggrid_options(df)
+        cols = [c for c in editable_attributes(label) if c in df.columns]
+        grid.options = _dataframe_to_aggrid_options(df, editable_cols=cols)
         grid.update()
+        editable_msg = " · editable: " + ", ".join(cols) if cols else ""
         if df.empty:
             summary.set_text(f"{label}: empty (no rows in this network)")
         else:
-            summary.set_text(f"{label}: {df.shape[0]} rows · {df.shape[1]} columns")
+            summary.set_text(
+                f"{label}: {df.shape[0]} rows · {df.shape[1]} columns{editable_msg}"
+            )
 
+    def on_cell_changed(e) -> None:
+        """ag-Grid emits ``cellValueChanged`` with ``data, colId, oldValue, newValue``."""
+        args = e.args or {}
+        col_id = args.get("colId") or (args.get("column") or {}).get("colId")
+        new_value = args.get("newValue")
+        old_value = args.get("oldValue")
+        row = args.get("data") or {}
+        element_id = row.get("id")
+        component = select.value
+        if not element_id or not col_id or _state.network is None:
+            return
+        if not is_editable(component, col_id):
+            return
+        try:
+            apply_cell_edit(_state.network, component, str(element_id), col_id, new_value)
+        except Exception as exc:
+            ui.notify(
+                f"Edit rejected — {component}/{element_id}/{col_id}: {exc}",
+                type="negative",
+            )
+            # Refresh to revert the failed edit (cheap; 1 worker call).
+            refresh()
+            return
+        ui.notify(
+            f"{component}/{element_id}/{col_id}: {old_value} → {new_value}",
+            type="positive",
+            timeout=1500,
+        )
+        # Topology-affecting edits invalidate the diagram caches so
+        # the next time the user opens the NAD / SLD tab they see
+        # the refreshed picture.
+        if col_id in TOPOLOGY_AFFECTING_ATTRIBUTES:
+            _nad_cache.clear()
+            _sld_cache.clear()
+            if _state.selected_vl:
+                _push_sld(_state.selected_vl)
+                _push_nad(_state.selected_vl, _nad_depth)
+
+    grid.on("cellValueChanged", on_cell_changed)
     select.on_value_change(lambda _e: refresh())
     return refresh
 

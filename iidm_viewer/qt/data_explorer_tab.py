@@ -1,127 +1,132 @@
-"""Data Explorer Components tab — read-only DataFrame viewer.
+"""Data Explorer Components tab — filterable, sortable, editable.
 
-Minimal first cut: a combo box to pick the component type, and a
-``QTableView`` showing the pandas DataFrame ``pypowsybl`` returns for
-that getter. No filtering, no editing — those are next-iteration
-features.
+Picks a component type, shows its DataFrame in a ``QTableView``, with:
 
-The PySide6 reason-to-exist: this tab in Streamlit (``data_explorer.py``,
-1384 LOC with ``st.data_editor``) is one of the slowest interactions
-because every cell change reruns the whole script. With a
-``QAbstractTableModel`` backed by pandas there is no rerun — only the
-two cells the user touched get repainted.
+* a top text box that filters rows across all columns (substring match);
+* per-column sort via the table-header click (``QSortFilterProxyModel``);
+* in-place editing of the columns listed in
+  :data:`iidm_viewer.component_registry.EDITABLE_COMPONENTS` — the edit
+  is applied on the pypowsybl worker thread and the row is updated in
+  place. Cells in non-editable columns reject the edit silently.
+
+The PySide6 reason-to-exist: Streamlit's ``st.data_editor`` reruns
+``app.py`` on every cell touch. Qt's model/view only repaints the
+two cells the edit affected. With a network of a few thousand
+generators, the difference is "snappy" vs. "freezes for a second".
 """
 from __future__ import annotations
 
 from typing import Optional
 
 import pandas as pd
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    QSortFilterProxyModel,
+    Qt,
+    Signal,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
+    QMessageBox,
     QTableView,
     QVBoxLayout,
     QWidget,
 )
 
-from iidm_viewer.powsybl_worker import NetworkProxy, run
-
-
-# Subset of ``network_info.COMPONENT_TYPES`` (kept local to avoid pulling
-# the Streamlit-importing module into the Qt path). Matches the Streamlit
-# tab's options 1:1.
-COMPONENT_GETTERS: dict[str, str] = {
-    "Substations": "get_substations",
-    "Voltage Levels": "get_voltage_levels",
-    "Buses": "get_buses",
-    "Busbar Sections": "get_busbar_sections",
-    "Generators": "get_generators",
-    "Loads": "get_loads",
-    "Lines": "get_lines",
-    "2-Winding Transformers": "get_2_windings_transformers",
-    "3-Winding Transformers": "get_3_windings_transformers",
-    "Switches": "get_switches",
-    "Shunt Compensators": "get_shunt_compensators",
-    "Static VAR Compensators": "get_static_var_compensators",
-    "HVDC Lines": "get_hvdc_lines",
-    "VSC Converter Stations": "get_vsc_converter_stations",
-    "LCC Converter Stations": "get_lcc_converter_stations",
-    "Batteries": "get_batteries",
-    "Dangling Lines": "get_dangling_lines",
-    "Tie Lines": "get_tie_lines",
-}
-
-
-def _fetch_dataframe(network: NetworkProxy, getter: str) -> pd.DataFrame:
-    """Call ``network.<getter>()`` on the pypowsybl worker thread.
-
-    Bypasses ``NetworkProxy.__getattr__`` so the whole call (resolve
-    method, invoke it, materialise the DataFrame) runs in a single
-    worker hop instead of two.
-    """
-    raw = object.__getattribute__(network, "_obj")
-
-    def _do() -> pd.DataFrame:
-        method = getattr(raw, getter, None)
-        if method is None:
-            return pd.DataFrame()
-        df = method()
-        # pypowsybl returns the equipment id as the index; surfacing it
-        # as a regular column makes the table read like the Streamlit one.
-        if df is not None and df.index.name:
-            df = df.reset_index()
-        return df if df is not None else pd.DataFrame()
-
-    return run(_do)
+from iidm_viewer.component_registry import (
+    COMPONENT_TYPES,
+    TOPOLOGY_AFFECTING_ATTRIBUTES,
+    apply_cell_edit,
+    editable_attributes,
+    get_dataframe,
+    is_editable,
+)
+from iidm_viewer.powsybl_worker import NetworkProxy
 
 
 class PandasTableModel(QAbstractTableModel):
-    """Read-only Qt model over a pandas DataFrame.
+    """Pandas-backed Qt model with optional inline-edit support.
 
-    Standard pattern (no third-party deps). Replacing the whole frame
-    via :meth:`set_dataframe` issues a single ``beginResetModel`` /
-    ``endResetModel`` cycle, which is cheap regardless of row count.
+    The model knows nothing about pypowsybl — it stores a DataFrame
+    and an "editable columns" allow-list. Edits inside that allow-list
+    fire :pyattr:`edit_requested`; the owning tab routes them to
+    :func:`apply_cell_edit` on the worker and calls
+    :meth:`commit_edit` (or :meth:`reject_edit`) when the call
+    returns.
     """
+
+    edit_requested = Signal(str, str, object, object)  # element_id, attribute, new_value, previous_value
 
     def __init__(self, df: Optional[pd.DataFrame] = None, parent=None) -> None:
         super().__init__(parent)
         self._df: pd.DataFrame = df if df is not None else pd.DataFrame()
+        self._editable_cols: set[str] = set()
+        self._id_col: Optional[str] = None
 
-    def set_dataframe(self, df: pd.DataFrame) -> None:
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_dataframe(
+        self,
+        df: pd.DataFrame,
+        editable_cols: Optional[list[str]] = None,
+    ) -> None:
         self.beginResetModel()
         self._df = df if df is not None else pd.DataFrame()
+        self._editable_cols = set(editable_cols or [])
+        # pypowsybl getters return the equipment id either as the
+        # index (when not reset) or as a column named "id" after
+        # ``reset_index()``. ``get_dataframe`` always resets, so "id"
+        # is what we look for.
+        self._id_col = "id" if "id" in self._df.columns else None
         self.endResetModel()
 
     def dataframe(self) -> pd.DataFrame:
         return self._df
 
+    def commit_edit(self, row: int, col: int, value) -> None:
+        """Mutate the in-memory DataFrame to reflect a successful edit."""
+        try:
+            self._df.iat[row, col] = value
+        except Exception:
+            return
+        idx = self.index(row, col)
+        self.dataChanged.emit(idx, idx, [Qt.DisplayRole, Qt.EditRole])
+
+    # ------------------------------------------------------------------
+    # QAbstractTableModel overrides
+    # ------------------------------------------------------------------
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
-        if parent.isValid():
-            return 0
-        return int(self._df.shape[0])
+        return 0 if parent.isValid() else int(self._df.shape[0])
 
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
-        if parent.isValid():
-            return 0
-        return int(self._df.shape[1])
+        return 0 if parent.isValid() else int(self._df.shape[1])
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
-        if not index.isValid() or role != Qt.DisplayRole:
+        if not index.isValid():
             return None
         row, col = index.row(), index.column()
         try:
             value = self._df.iat[row, col]
         except (IndexError, KeyError):
             return None
-        # NaN -> em-dash for parity with the Streamlit tables.
-        if isinstance(value, float) and pd.isna(value):
-            return "—"
-        if isinstance(value, float):
-            return format(value, ".4g")
-        return str(value)
+        if role == Qt.EditRole:
+            # Hand the editor the raw value (so type round-trips work).
+            if isinstance(value, float) and pd.isna(value):
+                return ""
+            return value if isinstance(value, (bool, int, float)) else str(value)
+        if role == Qt.DisplayRole:
+            if isinstance(value, float) and pd.isna(value):
+                return "—"
+            if isinstance(value, float):
+                return format(value, ".4g")
+            return str(value)
+        return None
 
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
         if role != Qt.DisplayRole:
@@ -131,32 +136,110 @@ class PandasTableModel(QAbstractTableModel):
                 return str(self._df.columns[section])
             except IndexError:
                 return None
-        # Vertical header: row number, 1-based for readability.
         return str(section + 1)
+
+    def flags(self, index: QModelIndex):
+        base = super().flags(index)
+        if not index.isValid():
+            return base
+        col_name = str(self._df.columns[index.column()])
+        if col_name in self._editable_cols:
+            return base | Qt.ItemIsEditable
+        return base
+
+    def setData(self, index: QModelIndex, value, role: int = Qt.EditRole) -> bool:
+        if role != Qt.EditRole or not index.isValid():
+            return False
+        col_name = str(self._df.columns[index.column()])
+        if col_name not in self._editable_cols:
+            return False
+        if self._id_col is None:
+            return False
+        try:
+            element_id = str(self._df.iat[index.row(), self._df.columns.get_loc(self._id_col)])
+            previous = self._df.iat[index.row(), index.column()]
+        except (IndexError, KeyError):
+            return False
+        # Fire-and-forget: the tab does the worker call and then either
+        # commits the edit (success) or shows an error and reverts (failure).
+        self.edit_requested.emit(element_id, col_name, value, previous)
+        return True
+
+
+class _MultiColumnFilterProxy(QSortFilterProxyModel):
+    """Substring filter across every column.
+
+    ``QSortFilterProxyModel`` with ``filterKeyColumn = -1`` only matches
+    the rightmost column on some Qt builds; doing the column loop here
+    is faster and behaves consistently.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._needle: str = ""
+
+    def set_needle(self, text: str) -> None:
+        self._needle = text.lower()
+        # PySide6 6.11 flags both ``invalidateFilter`` and
+        # ``invalidateRowsFilter`` as deprecated bindings; the
+        # underlying Qt C++ API has them as the supported way to
+        # ask the proxy to re-run :meth:`filterAcceptsRow`. Suppress
+        # the warning rather than chasing a moving target.
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            self.invalidateRowsFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
+        if not self._needle:
+            return True
+        model = self.sourceModel()
+        if model is None:
+            return True
+        cols = model.columnCount()
+        for c in range(cols):
+            idx = model.index(source_row, c, source_parent)
+            cell = model.data(idx, Qt.DisplayRole)
+            if cell is not None and self._needle in str(cell).lower():
+                return True
+        return False
 
 
 class DataExplorerTab(QWidget):
-    """Pick a component type, view its DataFrame."""
+    """Pick a component, filter, sort, edit."""
+
+    edit_applied = Signal(str, str, str, object, object)  # component, element_id, attribute, new, prev
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
 
         self._combo = QComboBox()
-        for label in COMPONENT_GETTERS:
+        for label in COMPONENT_TYPES:
             self._combo.addItem(label)
         self._combo.currentTextChanged.connect(self._on_component_changed)
+
+        self._filter = QLineEdit()
+        self._filter.setPlaceholderText("Filter rows (matches across all columns)…")
+        self._filter.setClearButtonEnabled(True)
+        self._filter.textChanged.connect(self._on_filter_changed)
 
         self._summary = QLabel("Load a network to inspect its components.")
         self._summary.setStyleSheet("padding: 6px 10px; color: #444;")
 
         self._model = PandasTableModel()
+        self._model.edit_requested.connect(self._on_edit_requested)
+        self._proxy = _MultiColumnFilterProxy(self)
+        self._proxy.setSourceModel(self._model)
+
         self._table = QTableView()
-        self._table.setModel(self._model)
+        self._table.setModel(self._proxy)
         self._table.setAlternatingRowColors(True)
-        self._table.setSortingEnabled(False)  # sorting would need a proxy model — skip for the MVP
+        self._table.setSortingEnabled(True)  # uses _proxy's sort
         self._table.setSelectionBehavior(QTableView.SelectRows)
-        self._table.setEditTriggers(QTableView.NoEditTriggers)
+        self._table.setEditTriggers(
+            QTableView.DoubleClicked | QTableView.EditKeyPressed | QTableView.AnyKeyPressed
+        )
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setDefaultSectionSize(22)
@@ -164,7 +247,9 @@ class DataExplorerTab(QWidget):
         controls = QHBoxLayout()
         controls.setContentsMargins(10, 6, 10, 0)
         controls.addWidget(QLabel("Component:"))
-        controls.addWidget(self._combo, 1)
+        controls.addWidget(self._combo)
+        controls.addSpacing(12)
+        controls.addWidget(self._filter, 1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -173,35 +258,103 @@ class DataExplorerTab(QWidget):
         layout.addWidget(self._summary)
         layout.addWidget(self._table, 1)
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
         if network is None:
-            self._model.set_dataframe(pd.DataFrame())
+            self._model.set_dataframe(pd.DataFrame(), editable_cols=[])
             self._summary.setText("No network loaded.")
             return
         self._refresh(self._combo.currentText())
 
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
     def _on_component_changed(self, label: str) -> None:
         if self._network is None or not label:
             return
+        # Clearing the filter on component switch avoids "empty grid"
+        # confusion when the new component doesn't match the old needle.
+        self._filter.blockSignals(True)
+        self._filter.clear()
+        self._filter.blockSignals(False)
+        self._proxy.set_needle("")
         self._refresh(label)
 
+    def _on_filter_changed(self, text: str) -> None:
+        self._proxy.set_needle(text)
+        # Update the row count in the summary so the user sees the filter take.
+        df = self._model.dataframe()
+        visible = self._proxy.rowCount()
+        editable_msg = (
+            " · editable: " + ", ".join(editable_attributes(self._combo.currentText()))
+            if is_editable(self._combo.currentText())
+            else ""
+        )
+        if not df.empty:
+            self._summary.setText(
+                f"{self._combo.currentText()}: {visible} / {df.shape[0]} rows "
+                f"· {df.shape[1]} columns{editable_msg}"
+            )
+
     def _refresh(self, label: str) -> None:
-        getter = COMPONENT_GETTERS.get(label)
-        if getter is None or self._network is None:
+        if self._network is None:
             return
         try:
-            df = _fetch_dataframe(self._network, getter)
-        except Exception as exc:  # pypowsybl getters can raise on absent extensions
-            self._model.set_dataframe(pd.DataFrame())
+            df = get_dataframe(self._network, label)
+        except Exception as exc:
+            self._model.set_dataframe(pd.DataFrame(), editable_cols=[])
             self._summary.setText(f"{label}: failed — {exc}")
             return
-        self._model.set_dataframe(df)
+        cols = editable_attributes(label)
+        # Keep only the columns the DataFrame actually has — some
+        # editable attributes may be absent on networks that don't
+        # carry their extensions (e.g. regulated_element_id).
+        cols = [c for c in cols if c in df.columns]
+        self._model.set_dataframe(df, editable_cols=cols)
         if df.empty:
             self._summary.setText(f"{label}: empty (no rows in this network)")
         else:
-            self._summary.setText(f"{label}: {df.shape[0]} rows · {df.shape[1]} columns")
-        # First-time column sizing — only on populated frames, otherwise
-        # ``resizeColumnsToContents`` walks zero cells.
+            editable_msg = " · editable: " + ", ".join(cols) if cols else ""
+            self._summary.setText(
+                f"{label}: {df.shape[0]} rows · {df.shape[1]} columns{editable_msg}"
+            )
         if not df.empty:
             self._table.resizeColumnsToContents()
+
+    def _on_edit_requested(self, element_id: str, attribute: str, new_value, previous) -> None:
+        component = self._combo.currentText()
+        if self._network is None or not is_editable(component, attribute):
+            return
+        try:
+            prev = apply_cell_edit(self._network, component, element_id, attribute, new_value)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Edit rejected",
+                f"{component}/{element_id}/{attribute}\n\n{exc}",
+            )
+            return
+        # Mutate the in-memory frame so the cell repaints with the
+        # accepted value (which may have been coerced — e.g. "true" -> True).
+        df = self._model.dataframe()
+        try:
+            row = df.index[df[self._model._id_col].astype(str) == element_id][0]
+            row_pos = df.index.get_loc(row)
+            col_pos = df.columns.get_loc(attribute)
+        except (KeyError, IndexError):
+            return
+        # Use the input value rather than re-reading from pypowsybl — one
+        # less worker hop. apply_cell_edit already coerced and applied;
+        # the only mismatch case is pypowsybl rejecting silently, which
+        # it doesn't (validation failures raise).
+        coerced = self._model.dataframe()[attribute].dtype
+        try:
+            from iidm_viewer.component_registry import _coerce
+            display_value = _coerce(new_value, coerced)
+        except Exception:
+            display_value = new_value
+        self._model.commit_edit(row_pos, col_pos, display_value)
+        self.edit_applied.emit(component, element_id, attribute, display_value, prev)

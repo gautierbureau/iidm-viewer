@@ -101,6 +101,7 @@ class MainWindow(QMainWindow):
         self.state.selected_vl_changed.connect(self._on_selected_vl_changed)
         self.map_tab.substation_clicked.connect(self._on_map_substation_clicked)
         self.nad_tab.node_clicked.connect(self._on_nad_node_clicked)
+        self.data_tab.edit_applied.connect(self._on_data_edit_applied)
 
     # ------------------------------------------------------------------
     # User actions
@@ -163,6 +164,26 @@ class MainWindow(QMainWindow):
         vl_id = vl_ids[0]
         self.tabs.setCurrentWidget(self.sld_tab)
         self.state.set_selected_vl(vl_id)
+
+    def _on_data_edit_applied(self, component: str, element_id: str, attribute: str, new_value, prev) -> None:
+        """Drop NAD / SLD caches when an edit can change diagram geometry.
+
+        Most edits (target_p, target_q, voltage setpoints) leave the
+        SVG topology unchanged, so the diagram caches stay valid.
+        Switch / breaker toggles and connection flips need a regen;
+        the cheap way to be correct is to wipe the caches and let the
+        next ``show_voltage_level`` redraw on demand.
+        """
+        from iidm_viewer.component_registry import TOPOLOGY_AFFECTING_ATTRIBUTES
+        if attribute in TOPOLOGY_AFFECTING_ATTRIBUTES:
+            self.nad_tab._cache.clear()
+            self.sld_tab._cache.clear()
+            if self.state.selected_vl:
+                self.nad_tab.show_voltage_level(self.state.selected_vl)
+                self.sld_tab.show_voltage_level(self.state.selected_vl)
+        self.statusBar().showMessage(
+            f"{component}/{element_id}/{attribute}: {prev} → {new_value}"
+        )
 
     def _on_nad_node_clicked(self, vl_id: str) -> None:
         """Killer interaction #2 — NAD → SLD.
