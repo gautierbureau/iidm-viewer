@@ -154,6 +154,9 @@ class MainWindow(QMainWindow):
 
     def _on_selected_vl_changed(self, vl_id: str) -> None:
         self.sidebar.set_vl(vl_id or None)
+        # Push the active VL into the data tab so its "Filter by VL"
+        # checkbox can use it.
+        self.data_tab.set_selected_vl(vl_id or None)
         if vl_id:
             # Both diagram tabs follow the selection; they cache by VL
             # so re-centering on tab focus is essentially free.

@@ -64,6 +64,14 @@ from iidm_viewer.component_registry import (
     is_editable,
     remove_elements,
 )
+from iidm_viewer.data_view import (
+    FILTERS,
+    VL_FILTERABLE,
+    dataframe_to_csv,
+    filter_by_voltage_level,
+    get_enriched_dataframe,
+    reorder_columns,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +343,12 @@ def _push_nad(vl_id: str, depth: int) -> None:
 # ---------------------------------------------------------------------------
 # Data Explorer helpers
 # ---------------------------------------------------------------------------
-def _dataframe_to_aggrid_options(df, editable_cols: Optional[list] = None) -> dict:
+def _dataframe_to_aggrid_options(
+    df,
+    editable_cols: Optional[list] = None,
+    *,
+    filterable_cols: Optional[list] = None,
+) -> dict:
     """Build an ag-Grid options dict from a pandas DataFrame.
 
     * NaN → em-dash for parity with the Streamlit / Qt prototypes.
@@ -358,6 +371,10 @@ def _dataframe_to_aggrid_options(df, editable_cols: Optional[list] = None) -> di
         }
 
     editable_set = set(editable_cols or [])
+    # When ``filterable_cols`` is provided, only those columns get an
+    # ag-Grid per-column filter — matches the Streamlit FILTERS whitelist.
+    # ``None`` means "filter every column" (the default Q'nice behaviour).
+    filterable_set = set(filterable_cols) if filterable_cols is not None else None
 
     def _cell(v):
         if v is None:
@@ -394,6 +411,11 @@ def _dataframe_to_aggrid_options(df, editable_cols: Optional[list] = None) -> di
         if c in editable_set:
             defn["editable"] = True
             defn["cellStyle"] = {"backgroundColor": "#fff7e0"}
+        # Whitelist filtering — narrow the per-column filter affordance
+        # to FILTERS[component] when a filterable_set is supplied.
+        if filterable_set is not None and c not in filterable_set and c != "id":
+            defn["filter"] = False
+            defn["floatingFilter"] = False
         column_defs.append(defn)
 
     row_data = [
@@ -437,8 +459,12 @@ def _build_data_explorer():
             options=list(COMPONENT_GETTERS),
             value="Substations",
         ).props("dense outlined").classes("w-64")
+        vl_filter = ui.checkbox("Filter by VL").classes("q-ml-md")
+        vl_filter.visible = False
+        ui.space()
+        download_btn = ui.button("Download CSV").props("flat")
         summary = ui.label("Load a network to inspect its components.") \
-            .classes("text-caption q-ml-md")
+            .classes("text-caption q-ml-md w-full")
 
     grid = ui.aggrid({
         "columnDefs": [], "rowData": [],
@@ -464,6 +490,10 @@ def _build_data_explorer():
         delete_button = ui.button("Delete").props("flat color=negative")
     bulk_row.set_visibility(False)
 
+    # Holds the most-recently-rendered DataFrame so the CSV button
+    # exports the exact view the user is looking at.
+    current_df = {"df": None}
+
     def refresh() -> None:
         label = select.value
         if _state.network is None or not label:
@@ -475,9 +505,11 @@ def _build_data_explorer():
             grid.update()
             summary.set_text("No network loaded.")
             bulk_row.set_visibility(False)
+            vl_filter.visible = False
+            current_df["df"] = None
             return
         try:
-            df = get_dataframe(_state.network, label)
+            df_full = get_enriched_dataframe(_state.network, label)
         except Exception as exc:
             grid.options = {
                 "columnDefs": [], "rowData": [],
@@ -488,12 +520,40 @@ def _build_data_explorer():
             summary.set_text(f"{label}: failed — {exc}")
             bulk_row.set_visibility(False)
             return
+        df = reorder_columns(df_full, label)
+        original_rows = df.shape[0]
+
+        # Filter-by-selected-VL: only meaningful when applicable.
+        vl_applicable = (
+            label in VL_FILTERABLE
+            and _state.selected_vl is not None
+        )
+        vl_filter.visible = vl_applicable
+        if vl_applicable:
+            vl_filter.text = f"Filter by VL: {_state.selected_vl}"
+            if vl_filter.value:
+                df = filter_by_voltage_level(df, _state.selected_vl)
+        elif vl_filter.value:
+            # Switched to a non-VL-filterable component; auto-uncheck.
+            vl_filter.value = False
+
         cols = [c for c in editable_attributes(label) if c in df.columns]
-        grid.options = _dataframe_to_aggrid_options(df, editable_cols=cols)
+        # ``FILTERS`` whitelist narrows ag-Grid's per-column filter
+        # affordance to the same set Streamlit's expander offers.
+        filterable_cols = [c for c in FILTERS.get(label, []) if c in df.columns]
+        grid.options = _dataframe_to_aggrid_options(
+            df, editable_cols=cols, filterable_cols=filterable_cols,
+        )
         grid.update()
+        current_df["df"] = df
         editable_msg = " · editable: " + ", ".join(cols) if cols else ""
-        if df.empty:
+        if df.empty and original_rows == 0:
             summary.set_text(f"{label}: empty (no rows in this network)")
+        elif df.shape[0] < original_rows:
+            summary.set_text(
+                f"{label}: {df.shape[0]} / {original_rows} rows · "
+                f"{df.shape[1]} columns{editable_msg}"
+            )
         else:
             summary.set_text(
                 f"{label}: {df.shape[0]} rows · {df.shape[1]} columns{editable_msg}"
@@ -668,6 +728,18 @@ def _build_data_explorer():
         ok = await confirm
         if not ok:
             return
+        # Snapshot the to-be-removed rows for the ChangeLog before the
+        # network forgets them.
+        try:
+            from iidm_viewer.data_view import get_enriched_dataframe
+            df_before = get_enriched_dataframe(_state.network, component)
+            snapshot_index = (
+                df_before.set_index("id", drop=False)
+                if "id" in df_before.columns
+                else df_before
+            )
+        except Exception:
+            snapshot_index = None
         try:
             removed = remove_elements(_state.network, component, ids)
         except Exception as exc:
@@ -676,16 +748,17 @@ def _build_data_explorer():
                 type="negative",
             )
             return
-        # Drop change-log entries for removed ids; they can't be reverted.
+        # Drop edit-log entries for removed ids (no longer revertable
+        # via apply_cell_edit) and record the removal so the panel can
+        # display it.
         removed_set = set(map(str, removed))
-        live = _state.change_log.entries(component)
-        for entry in live:
+        for entry in list(_state.change_log.entries(component)):
             if str(entry.get("element_id")) in removed_set:
                 try:
                     _state.change_log._entries.remove(entry)
                 except ValueError:
                     pass
-        _state.change_log._fire()
+        _state.change_log.record_removal(component, removed, snapshot=snapshot_index)
         # Deletion always changes topology -> flush diagram caches.
         _nad_cache.clear()
         _sld_cache.clear()
@@ -699,11 +772,29 @@ def _build_data_explorer():
         )
         refresh()
 
+    def on_csv_clicked() -> None:
+        df = current_df["df"]
+        if df is None or df.empty:
+            ui.notify("Nothing to export — load a network first.", type="info")
+            return
+        label = select.value or "data"
+        ui.download(
+            dataframe_to_csv(df),
+            filename=f"{label.lower().replace(' ', '_')}.csv",
+        )
+
+    download_btn.on_click(on_csv_clicked)
+    vl_filter.on_value_change(lambda _e: refresh())
     bulk_button.on_click(on_bulk_apply)
     disconnect_button.on_click(on_bulk_disconnect)
     delete_button.on_click(on_bulk_delete)
     grid.on("cellValueChanged", on_cell_changed)
     select.on_value_change(lambda _e: refresh())
+
+    # When the host's selected_vl changes (Map / NAD / SLD navigation),
+    # refresh the data tab so the VL-filter widget and its caption
+    # stay in sync with the active VL.
+    _state.on_selected_vl_changed(lambda _vl: refresh())
 
     # --- Change log panel -------------------------------------------------
     _build_change_log_panel(refresh)
@@ -739,6 +830,12 @@ def _build_change_log_panel(on_revert_refresh) -> None:
         revert_all_btn = ui.button("Revert all")
         clear_btn = ui.button("Clear").props("flat")
 
+    # Removal-log label sits between the title row and the edits grid.
+    # Always present so its visibility can flip without re-creating
+    # widgets; updated by ``repaint`` below.
+    removals_html = ui.html("").classes("w-full")
+    removals_html.visible = False
+
     log_grid = ui.aggrid({
         "columnDefs": [
             {"headerName": "Component", "field": "component", "sortable": True, "filter": True, "floatingFilter": True},
@@ -768,12 +865,33 @@ def _build_change_log_panel(on_revert_refresh) -> None:
         ]
         log_grid.options["rowData"] = rows
         log_grid.update()
-        n = len(log)
-        title.set_text(f"Change Log ({n})")
-        enabled = n > 0 and _state.network is not None
-        revert_all_btn.set_enabled(enabled)
-        revert_selected_btn.set_enabled(enabled)
-        clear_btn.set_enabled(n > 0)
+        n_edits = len(log.entries())
+        removals = log.removals()
+        if removals:
+            title.set_text(f"Change Log ({n_edits} edits · {len(removals)} removed)")
+            # Group removals by component for a compact red line.
+            from collections import defaultdict
+            by_comp: dict[str, list[str]] = defaultdict(list)
+            for r in removals:
+                by_comp[str(r.get("component", ""))].append(str(r.get("element_id", "")))
+            parts = []
+            for component, ids in by_comp.items():
+                shown = ", ".join(ids[:5])
+                more = f" (+{len(ids) - 5} more)" if len(ids) > 5 else ""
+                parts.append(f"<b>{component}</b>: {shown}{more}")
+            removals_html.content = (
+                "<div style='color:#b30000;padding:4px 8px;'>"
+                "Removed — " + " · ".join(parts) + "</div>"
+            )
+            removals_html.visible = True
+        else:
+            title.set_text(f"Change Log ({n_edits})")
+            removals_html.visible = False
+        has_edits = n_edits > 0 and _state.network is not None
+        has_anything = (n_edits + len(removals)) > 0
+        revert_all_btn.set_enabled(has_edits)
+        revert_selected_btn.set_enabled(has_edits)
+        clear_btn.set_enabled(has_anything)
 
     log.on_changed(repaint)
 

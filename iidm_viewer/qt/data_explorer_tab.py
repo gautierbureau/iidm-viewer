@@ -27,15 +27,22 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableView,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -55,6 +62,16 @@ from iidm_viewer.component_registry import (
     get_dataframe,
     is_editable,
     remove_elements,
+)
+from iidm_viewer.data_view import (
+    FILTERS,
+    VL_FILTERABLE,
+    apply_filter_specs,
+    compute_filter_widget_spec,
+    dataframe_to_csv,
+    filter_by_voltage_level,
+    get_enriched_dataframe,
+    reorder_columns,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy
 
@@ -226,6 +243,14 @@ class DataExplorerTab(QWidget):
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
         self._change_log: Optional[ChangeLog] = None
+        # The selected_vl coming from the MainWindow's AppState. Used
+        # by the "filter by selected VL" checkbox below.
+        self._selected_vl: Optional[str] = None
+        # Active structured-filter specs (column -> value) — fed into
+        # ``data_view.apply_filter_specs`` on every refresh.
+        self._filter_specs: dict[str, object] = {}
+        # Per-column filter widgets, rebuilt on every component change.
+        self._filter_widgets: dict[str, QWidget] = {}
 
         self._combo = QComboBox()
         for label in COMPONENT_TYPES:
@@ -236,6 +261,18 @@ class DataExplorerTab(QWidget):
         self._filter.setPlaceholderText("Filter rows (matches across all columns)…")
         self._filter.setClearButtonEnabled(True)
         self._filter.textChanged.connect(self._on_filter_changed)
+
+        # "Filter by VL" checkbox — only visible when the network has
+        # been loaded and the current component is VL-filterable.
+        self._vl_filter = QCheckBox()
+        self._vl_filter.setText("Filter by VL")
+        self._vl_filter.toggled.connect(lambda _v: self._refresh(self._combo.currentText()))
+        self._vl_filter.setVisible(False)
+
+        # CSV download — exports whatever the user is currently looking
+        # at (post enrichment, reorder, filters).
+        self._csv_btn = QPushButton("Download CSV")
+        self._csv_btn.clicked.connect(self._on_csv_clicked)
 
         self._summary = QLabel("Load a network to inspect its components.")
         self._summary.setStyleSheet("padding: 6px 10px; color: #444;")
@@ -265,8 +302,21 @@ class DataExplorerTab(QWidget):
         controls.setContentsMargins(10, 6, 10, 0)
         controls.addWidget(QLabel("Component:"))
         controls.addWidget(self._combo)
+        controls.addSpacing(8)
+        controls.addWidget(self._vl_filter)
         controls.addSpacing(12)
         controls.addWidget(self._filter, 1)
+        controls.addSpacing(8)
+        controls.addWidget(self._csv_btn)
+
+        # Structured filters live in a separate horizontal row that
+        # repopulates on every component change.
+        self._filters_panel = QFrame()
+        self._filters_panel.setFrameShape(QFrame.NoFrame)
+        self._filters_layout = QHBoxLayout(self._filters_panel)
+        self._filters_layout.setContentsMargins(10, 0, 10, 4)
+        self._filters_layout.setSpacing(8)
+        self._filters_panel.setVisible(False)
 
         # --- Bulk-edit panel ---------------------------------------------------
         # Disabled until N>=1 rows are selected and the current component
@@ -319,6 +369,7 @@ class DataExplorerTab(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         layout.addLayout(controls)
+        layout.addWidget(self._filters_panel)
         layout.addWidget(self._summary)
         layout.addWidget(self._table, 1)
         layout.addWidget(self._bulk_panel)
@@ -341,6 +392,14 @@ class DataExplorerTab(QWidget):
         self._change_log = change_log
         self._change_log_panel.set_change_log(change_log)
 
+    def set_selected_vl(self, vl_id: Optional[str]) -> None:
+        """Push the host's selected VL down so "Filter by VL" can use it."""
+        self._selected_vl = vl_id or None
+        self._update_vl_filter_visibility()
+        # Only re-fetch when the filter is on; otherwise no work needed.
+        if self._vl_filter.isChecked() and self._network is not None:
+            self._refresh(self._combo.currentText())
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -353,7 +412,164 @@ class DataExplorerTab(QWidget):
         self._filter.clear()
         self._filter.blockSignals(False)
         self._proxy.set_needle("")
+        # Drop the structured-filter specs — they're per-component
+        # and the new component may not have the same columns.
+        self._filter_specs.clear()
+        self._update_vl_filter_visibility()
         self._refresh(label)
+        # Rebuild the structured-filter widgets *after* refresh so the
+        # widget specs come from the freshly-loaded frame.
+        self._rebuild_filter_widgets(label)
+
+    def _update_vl_filter_visibility(self) -> None:
+        component = self._combo.currentText()
+        applicable = (
+            component in VL_FILTERABLE
+            and self._network is not None
+            and self._selected_vl is not None
+        )
+        self._vl_filter.setVisible(applicable)
+        if applicable and self._selected_vl:
+            self._vl_filter.setText(f"Filter by VL: {self._selected_vl}")
+        if not applicable and self._vl_filter.isChecked():
+            self._vl_filter.blockSignals(True)
+            self._vl_filter.setChecked(False)
+            self._vl_filter.blockSignals(False)
+
+    def _rebuild_filter_widgets(self, label: str) -> None:
+        """Reconstruct the structured-filter row for ``label``.
+
+        Builds one widget per column in ``FILTERS[label]`` that's
+        present in the source dataframe, with shape decided by
+        ``compute_filter_widget_spec``. Updates ``self._filter_specs``
+        on every change and re-fires ``_refresh``.
+        """
+        # Clear any existing widgets.
+        while self._filters_layout.count():
+            item = self._filters_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        self._filter_widgets.clear()
+
+        df_source = self._model.dataframe()
+        cols = [c for c in FILTERS.get(label, []) if c in df_source.columns]
+        if not cols:
+            self._filters_panel.setVisible(False)
+            return
+
+        self._filters_layout.addWidget(QLabel("Filters:"))
+        for col in cols:
+            self._add_filter_widget(col, df_source[col])
+        self._filters_layout.addStretch(1)
+        self._filters_panel.setVisible(True)
+
+    def _add_filter_widget(self, col: str, series) -> None:
+        shape = compute_filter_widget_spec(series)
+        kind = shape.get("kind")
+        if kind == "skip":
+            return
+
+        self._filters_layout.addWidget(QLabel(f"{col}:"))
+        if kind == "bool":
+            cb = QComboBox()
+            cb.addItems(["Any", "True", "False"])
+            def _on_change(v, col=col):
+                if v == "Any":
+                    self._filter_specs.pop(col, None)
+                else:
+                    self._filter_specs[col] = v
+                self._refresh(self._combo.currentText())
+            cb.currentTextChanged.connect(_on_change)
+            self._filters_layout.addWidget(cb)
+            self._filter_widgets[col] = cb
+            return
+
+        if kind == "range":
+            state = shape.get("state")
+            if state in ("empty", "constant"):
+                lbl = QLabel(f"({state})")
+                lbl.setStyleSheet("color: #888;")
+                self._filters_layout.addWidget(lbl)
+                return
+            lo, hi = shape["min"], shape["max"]
+            sp_lo = QDoubleSpinBox()
+            sp_lo.setRange(lo, hi)
+            sp_lo.setValue(lo)
+            sp_lo.setDecimals(3)
+            sp_hi = QDoubleSpinBox()
+            sp_hi.setRange(lo, hi)
+            sp_hi.setValue(hi)
+            sp_hi.setDecimals(3)
+            def _on_change(_v=None, col=col, sp_lo=sp_lo, sp_hi=sp_hi, lo=lo, hi=hi):
+                sel = (sp_lo.value(), sp_hi.value())
+                if sel == (lo, hi):
+                    self._filter_specs.pop(col, None)
+                else:
+                    self._filter_specs[col] = sel
+                self._refresh(self._combo.currentText())
+            sp_lo.valueChanged.connect(_on_change)
+            sp_hi.valueChanged.connect(_on_change)
+            self._filters_layout.addWidget(sp_lo)
+            self._filters_layout.addWidget(QLabel("–"))
+            self._filters_layout.addWidget(sp_hi)
+            self._filter_widgets[col] = (sp_lo, sp_hi)
+            return
+
+        if kind == "multiselect":
+            # QToolButton with a popup menu of checkable actions —
+            # equivalent UX to Streamlit's ``st.multiselect``.
+            tb = QToolButton()
+            tb.setText("any")
+            tb.setPopupMode(QToolButton.InstantPopup)
+            menu = QMenu(tb)
+            options = list(shape["options"])
+            def _update_label():
+                vals = self._filter_specs.get(col)
+                if not vals:
+                    tb.setText("any")
+                elif len(vals) <= 2:
+                    tb.setText(", ".join(map(str, vals)))
+                else:
+                    tb.setText(f"{len(vals)} selected")
+            for opt in options:
+                act = menu.addAction(str(opt))
+                act.setCheckable(True)
+                def _toggle(checked, opt=opt, col=col):
+                    vals = list(self._filter_specs.get(col, []))
+                    if checked and opt not in vals:
+                        vals.append(opt)
+                    elif not checked and opt in vals:
+                        vals.remove(opt)
+                    if vals:
+                        self._filter_specs[col] = vals
+                    else:
+                        self._filter_specs.pop(col, None)
+                    _update_label()
+                    self._refresh(self._combo.currentText())
+                act.toggled.connect(_toggle)
+            tb.setMenu(menu)
+            self._filters_layout.addWidget(tb)
+            self._filter_widgets[col] = tb
+            _update_label()
+            return
+
+    def _on_csv_clicked(self) -> None:
+        df = self._model.dataframe()
+        if df.empty:
+            return
+        component = self._combo.currentText() or "data"
+        default_name = f"{component.lower().replace(' ', '_')}.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Download CSV", default_name, "CSV files (*.csv);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "wb") as fh:
+                fh.write(dataframe_to_csv(df))
+        except Exception as exc:
+            QMessageBox.warning(self, "Save failed", str(exc))
 
     def _on_filter_changed(self, text: str) -> None:
         self._proxy.set_needle(text)
@@ -375,24 +591,48 @@ class DataExplorerTab(QWidget):
         if self._network is None:
             return
         try:
-            df = get_dataframe(self._network, label)
+            # ``get_enriched_dataframe`` joins voltage-level /
+            # substation columns onto the raw frame so the FILTERS
+            # whitelist can target country / nominal_v / nominal_v1
+            # / nominal_v2.
+            df_full = get_enriched_dataframe(self._network, label)
         except Exception as exc:
             self._model.set_dataframe(pd.DataFrame(), editable_cols=[])
             self._summary.setText(f"{label}: failed — {exc}")
             return
+        df = reorder_columns(df_full, label)
+        original_rows = df.shape[0]
+
+        # Filter by selected VL (when applicable and toggled).
+        if (
+            self._vl_filter.isChecked()
+            and label in VL_FILTERABLE
+            and self._selected_vl
+        ):
+            df = filter_by_voltage_level(df, self._selected_vl)
+
+        # Structured per-column filters.
+        df = apply_filter_specs(df, self._filter_specs)
+
         cols = editable_attributes(label)
         # Keep only the columns the DataFrame actually has — some
         # editable attributes may be absent on networks that don't
         # carry their extensions (e.g. regulated_element_id).
         cols = [c for c in cols if c in df.columns]
         self._model.set_dataframe(df, editable_cols=cols)
-        if df.empty:
+        if df.empty and original_rows == 0:
             self._summary.setText(f"{label}: empty (no rows in this network)")
         else:
             editable_msg = " · editable: " + ", ".join(cols) if cols else ""
-            self._summary.setText(
-                f"{label}: {df.shape[0]} rows · {df.shape[1]} columns{editable_msg}"
-            )
+            if df.shape[0] < original_rows:
+                self._summary.setText(
+                    f"{label}: {df.shape[0]} / {original_rows} rows · "
+                    f"{df.shape[1]} columns{editable_msg}"
+                )
+            else:
+                self._summary.setText(
+                    f"{label}: {df.shape[0]} rows · {df.shape[1]} columns{editable_msg}"
+                )
         if not df.empty:
             self._table.resizeColumnsToContents()
         # The set of editable attributes is component-specific; refresh
@@ -532,6 +772,15 @@ class DataExplorerTab(QWidget):
         )
         if confirm != QMessageBox.Yes:
             return
+        # Snapshot the to-be-removed rows so the ChangeLog can stash
+        # them — useful for a future "recreate" undo and for visual
+        # display in the panel.
+        df = self._model.dataframe()
+        snapshot = (
+            df.set_index(self._model._id_col, drop=False)
+            if self._model._id_col and self._model._id_col in df.columns
+            else None
+        )
         try:
             removed = remove_elements(self._network, component, ids)
         except Exception as exc:
@@ -541,8 +790,9 @@ class DataExplorerTab(QWidget):
                 f"{component}/{len(ids)} rows\n\n{exc}",
             )
             return
-        # Drop any change-log entries for the removed ids — they can
-        # no longer be reverted via apply_cell_edit anyway.
+        # Drop any edit-log entries for removed ids (no longer
+        # revertable via apply_cell_edit) and record the removal so
+        # the panel can display it.
         if self._change_log is not None:
             for entry in list(self._change_log.entries(component)):
                 if str(entry.get("element_id")) in set(map(str, removed)):
@@ -550,8 +800,7 @@ class DataExplorerTab(QWidget):
                         self._change_log._entries.remove(entry)
                     except ValueError:
                         pass
-            # Manually fire so the panel repaints.
-            self._change_log._fire()
+            self._change_log.record_removal(component, removed, snapshot=snapshot)
         # Refetch the live frame.
         self._refresh(component)
         self.bulk_removed.emit(component, removed)
