@@ -512,151 +512,26 @@ def filter_voltage_levels(vls_df, text):
 
 
 # --- Tap changers (ratio + phase) on existing 2-winding transformers ---
+#
+# Registry + validator + worker-routed dispatcher live in the shared
+# ``iidm_viewer.component_creation`` module. The Streamlit wrapper adds the
+# cache invalidation that every topology-affecting mutation needs.
 
-PTC_REGULATION_MODES = ["CURRENT_LIMITER", "ACTIVE_POWER_CONTROL"]
-TRANSFORMER_SIDES = ["ONE", "TWO"]
-
-# Ratio/Phase tap changer creation spec. Unlike injections, tap changers are
-# attached to an *existing* transformer — no bay allocation. They need 2
-# dataframes: one for the tap changer attributes, one for the per-tap steps.
-CREATABLE_TAP_CHANGERS: dict[str, dict] = {
-    "Ratio": {
-        "create_method": "create_ratio_tap_changers",
-        "main_fields": [
-            {"name": "tap", "label": "Current tap",
-             "kind": "int", "required": True, "default": 0, "min_value": 0},
-            {"name": "low_tap", "label": "Lowest tap number",
-             "kind": "int", "required": True, "default": 0, "min_value": 0},
-            {"name": "oltc", "label": "On-load tap changing (OLTC)",
-             "kind": "bool", "required": True, "default": False,
-             "help": "Must be true to enable voltage regulation."},
-            {"name": "regulating", "label": "Regulating", "kind": "bool",
-             "required": True, "default": False},
-            {"name": "target_v", "label": "target_v (kV, 0 = unset)",
-             "kind": "float", "required": False, "default": 0.0, "min_value": 0.0},
-            {"name": "target_deadband", "label": "target_deadband (kV, 0 = unset)",
-             "kind": "float", "required": False, "default": 0.0, "min_value": 0.0},
-            {"name": "regulated_side", "label": "Regulated side", "kind": "select",
-             "required": False, "default": "ONE", "options": TRANSFORMER_SIDES},
-        ],
-        "step_columns": ["r", "x", "g", "b", "rho"],
-        "step_defaults": {"r": 0.0, "x": 0.0, "g": 0.0, "b": 0.0, "rho": 1.0},
-    },
-    "Phase": {
-        "create_method": "create_phase_tap_changers",
-        "main_fields": [
-            {"name": "tap", "label": "Current tap",
-             "kind": "int", "required": True, "default": 0, "min_value": 0},
-            {"name": "low_tap", "label": "Lowest tap number",
-             "kind": "int", "required": True, "default": 0, "min_value": 0},
-            {"name": "regulation_mode", "label": "Regulation mode",
-             "kind": "select", "required": True, "default": "CURRENT_LIMITER",
-             "options": PTC_REGULATION_MODES},
-            {"name": "regulating", "label": "Regulating", "kind": "bool",
-             "required": True, "default": False},
-            {"name": "target_deadband", "label": "target_deadband (0 = unset)",
-             "kind": "float", "required": False, "default": 0.0, "min_value": 0.0},
-            {"name": "regulated_side", "label": "Regulated side", "kind": "select",
-             "required": False, "default": "ONE", "options": TRANSFORMER_SIDES},
-        ],
-        "step_columns": ["r", "x", "g", "b", "rho", "alpha"],
-        "step_defaults": {"r": 0.0, "x": 0.0, "g": 0.0, "b": 0.0, "rho": 1.0, "alpha": 0.0},
-    },
-}
-
-
-def list_two_winding_transformers(network):
-    """Return 2WT ids sorted alphabetically (empty list if none)."""
-    try:
-        twts = network.get_2_windings_transformers(attributes=["name"])
-    except Exception:
-        return []
-    return sorted(twts.index.tolist())
-
-
-def validate_create_tap_changer_fields(
-    kind: str, transformer_id: str, main_fields: dict, steps: list[dict]
-) -> list[str]:
-    """Validate a tap-changer creation payload.
-
-    Checks the transformer id, main fields (required + cross-field rules)
-    and that at least one step is provided and spans the current ``tap``
-    position. Returns a list of human-readable errors.
-    """
-    spec = CREATABLE_TAP_CHANGERS.get(kind)
-    if not spec:
-        return [f"{kind!r} tap changer is not creatable"]
-    errors = []
-    if not transformer_id:
-        errors.append("Target 2-winding transformer is required.")
-    for f in spec["main_fields"]:
-        v = main_fields.get(f["name"])
-        if f["required"] and v is None:
-            errors.append(f"{f['label']} is required.")
-    if not steps:
-        errors.append("At least one tap step is required.")
-    if steps:
-        low = main_fields.get("low_tap", 0) or 0
-        tap = main_fields.get("tap", 0) or 0
-        if tap < low or tap >= low + len(steps):
-            errors.append(
-                f"Current tap {tap} must be between {low} and "
-                f"{low + len(steps) - 1} (inclusive)."
-            )
-    if main_fields.get("regulating"):
-        if kind == "Ratio":
-            if not main_fields.get("oltc"):
-                errors.append("OLTC must be enabled to set regulating=True on a ratio tap changer.")
-            if not main_fields.get("target_v") or main_fields["target_v"] <= 0:
-                errors.append("target_v must be > 0 when the ratio tap changer is regulating.")
-    return errors
+from iidm_viewer.component_creation import (
+    CREATABLE_TAP_CHANGERS,
+    PTC_REGULATION_MODES,
+    TRANSFORMER_SIDES,
+    list_transformers_without_tap_changer,
+    list_two_winding_transformers,
+    validate_create_tap_changer_fields,
+)
 
 
 def create_tap_changer(
     network, kind: str, transformer_id: str, main_fields: dict, steps: list[dict]
 ):
-    """Create a ratio or phase tap changer on an existing 2-winding transformer.
-
-    Runs validation on the main thread then dispatches the two dataframes
-    (tap-changer attributes + per-step data) to pypowsybl via the worker.
-    ``steps`` is a list of dicts matching ``CREATABLE_TAP_CHANGERS[kind]``'s
-    ``step_columns``; one row is emitted per entry.
-    """
-    if kind not in CREATABLE_TAP_CHANGERS:
-        raise ValueError(f"{kind!r} tap changer is not creatable")
-
-    errors = validate_create_tap_changer_fields(
-        kind, transformer_id, main_fields, steps
-    )
-    if errors:
-        raise ValueError("; ".join(errors))
-
-    spec = CREATABLE_TAP_CHANGERS[kind]
-    # Drop zero-sentinel target_v / target_deadband so pypowsybl sees them as unset.
-    main_row = {
-        k: v for k, v in main_fields.items()
-        if v is not None and v != "" and not (
-            k in ("target_v", "target_deadband") and v == 0.0
-        )
-    }
-    main_row["id"] = transformer_id
-    main_df = pd.DataFrame([main_row]).set_index("id")
-
-    step_rows = []
-    for step in steps:
-        row = {"id": transformer_id}
-        for col in spec["step_columns"]:
-            row[col] = step.get(col, spec["step_defaults"][col])
-        step_rows.append(row)
-    steps_df = pd.DataFrame(step_rows).set_index("id")
-
-    raw = object.__getattribute__(network, "_obj")
-    method_name = spec["create_method"]
-
-    def _do_create():
-        getattr(raw, method_name)(main_df, steps_df)
-
-    run(_do_create)
+    from iidm_viewer.component_creation import create_tap_changer as _shared
+    _shared(network, kind, transformer_id, main_fields, steps)
     invalidate_on_topology_change(affects_geography=True)
     script_recorder.record_create_tap_changer(
         kind,

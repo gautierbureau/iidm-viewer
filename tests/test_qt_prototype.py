@@ -1025,6 +1025,109 @@ def test_hvdc_panel_hides_for_non_hvdc_component(qapp):
     assert panel.isVisible() is True
 
 
+def test_tap_changer_panel_hides_when_no_eligible_transformer(qapp):
+    """The tap-changer panel hides when no 2WT is missing the chosen kind."""
+    from iidm_viewer.qt.create_panel import CreateTapChangerPanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    # Four-sub demo: the single 2WT already has both ratio + phase tap changers.
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateTapChangerPanel()
+    panel.set_network(network)
+    panel.set_component("2-Winding Transformers")
+    qapp.processEvents()
+    assert panel.isVisible() is False
+
+
+def test_tap_changer_panel_creates_ratio_on_fresh_2wt(qapp):
+    """End-to-end Ratio tap changer creation via the Qt panel."""
+    from iidm_viewer.qt.create_panel import CreateTapChangerPanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        n = pn.create_empty(network_id="x")
+        n.create_substations(id="S1")
+        n.create_voltage_levels(id="VL1", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=400.0)
+        n.create_voltage_levels(id="VL2", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=225.0)
+        n.create_busbar_sections(id="BBS1", voltage_level_id="VL1", node=0)
+        n.create_busbar_sections(id="BBS2", voltage_level_id="VL2", node=0)
+        n.create_2_windings_transformers(
+            id="T1", voltage_level1_id="VL1", voltage_level2_id="VL2",
+            node1=1, node2=1, rated_u1=400.0, rated_u2=225.0,
+            r=0.1, x=10.0, g=0.0, b=0.0,
+        )
+        return n
+
+    network = NetworkProxy(run(_make))
+    panel = CreateTapChangerPanel()
+    panel.set_network(network)
+    panel.set_component("2-Winding Transformers")
+    qapp.processEvents()
+    # T1 has no tap changer yet — panel should be visible.
+    assert panel.isVisible() is True
+    assert panel._twt_combo.currentText() == "T1"
+    # Default kind is Ratio; defaults already populate the steps table.
+    seen: list = []
+    panel.component_created.connect(lambda c, eid: seen.append((c, eid)))
+    panel._on_create_clicked()
+    qapp.processEvents()
+
+    assert "T1" in network.get_ratio_tap_changers().index
+    assert seen == [("Tap Changers", "T1")]
+    # After creation, T1 should no longer be a target for a Ratio tap changer.
+    qapp.processEvents()
+    assert panel.isVisible() is False
+
+
+def test_tap_changer_panel_hides_for_non_twt_component(qapp):
+    """The tap-changer panel only renders for 2-Winding Transformers."""
+    from iidm_viewer.qt.create_panel import CreateTapChangerPanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        n = pn.create_empty(network_id="x")
+        n.create_substations(id="S1")
+        n.create_voltage_levels(id="VL1", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=400.0)
+        n.create_voltage_levels(id="VL2", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=225.0)
+        n.create_busbar_sections(id="BBS1", voltage_level_id="VL1", node=0)
+        n.create_busbar_sections(id="BBS2", voltage_level_id="VL2", node=0)
+        n.create_2_windings_transformers(
+            id="T1", voltage_level1_id="VL1", voltage_level2_id="VL2",
+            node1=1, node2=1, rated_u1=400.0, rated_u2=225.0,
+            r=0.1, x=10.0, g=0.0, b=0.0,
+        )
+        return n
+
+    network = NetworkProxy(run(_make))
+    panel = CreateTapChangerPanel()
+    panel.set_network(network)
+    panel.set_component("Generators")
+    qapp.processEvents()
+    assert panel.isVisible() is False
+    panel.set_component("2-Winding Transformers")
+    qapp.processEvents()
+    assert panel.isVisible() is True
+
+
 def test_change_log_panel_repaints_on_record(qapp, loaded_window):
     """The panel's title and table reflect log mutations in real time
     via the on_changed bus.

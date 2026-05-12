@@ -69,6 +69,7 @@ from iidm_viewer.component_creation import (
     CREATABLE_COMPONENTS,
     CREATABLE_CONTAINERS,
     CREATABLE_HVDC_LINES,
+    CREATABLE_TAP_CHANGERS,
     LOCATOR_FIELDS,
     branch_side_locator_fields,
     coerce_field_values,
@@ -76,10 +77,12 @@ from iidm_viewer.component_creation import (
     create_component_bay,
     create_container,
     create_hvdc_line,
+    create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
     list_substations_df,
+    list_transformers_without_tap_changer,
     next_free_node,
 )
 from iidm_viewer.data_view import (
@@ -1184,6 +1187,203 @@ def _refresh_create_hvdc_panel(state: dict, component: str) -> None:
     expansion.visible = True
 
 
+def _build_create_tap_changer_panel_widgets(state: dict, refresh_after_create) -> None:
+    """Materialise the "Create a tap changer on an existing 2WT" expansion.
+
+    A kind picker (Ratio / Phase), a target-transformer picker (filtered
+    to ones that don't already have that kind of tap changer), the main
+    fields from :data:`CREATABLE_TAP_CHANGERS` and an editable steps
+    table. Auto-hides when the active component isn't
+    "2-Winding Transformers" or no transformer accepts a new tap changer.
+    """
+    expansion = ui.expansion(
+        "Create a tap changer on a 2-winding transformer", icon="tune",
+    ).classes("w-full")
+    expansion.visible = False
+    state["expansion"] = expansion
+    with expansion:
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            ui.label("Kind:")
+            kind_select = ui.select(
+                options=list(CREATABLE_TAP_CHANGERS), value="Ratio",
+            ).props("dense outlined").classes("w-32")
+            ui.label("Target 2WT:")
+            twt_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-64")
+        fields_container = ui.row().classes("items-start w-full q-pa-sm flex-wrap")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            ui.label("Number of steps:")
+            steps_count = ui.number(value=3, min=1, max=50, step=1, format="%d") \
+                .props("dense outlined").classes("w-24")
+        steps_container = ui.column().classes("w-full q-pa-sm")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            create_btn = ui.button("Create tap changer", icon="add_circle")
+            status_label = ui.label("").classes("text-caption q-ml-md")
+
+    state["kind_select"] = kind_select
+    state["twt_select"] = twt_select
+    state["fields_container"] = fields_container
+    state["steps_count"] = steps_count
+    state["steps_container"] = steps_container
+    state["status_label"] = status_label
+    state["create_btn"] = create_btn
+    state["field_widgets"] = {}
+    state["step_widgets"] = []  # list[dict[col -> ui.number]]
+
+    def _rebuild_steps() -> None:
+        kind = state["kind_select"].value
+        spec = CREATABLE_TAP_CHANGERS.get(kind)
+        if spec is None:
+            return
+        cols = spec["step_columns"]
+        defaults = spec["step_defaults"]
+        n = int(state["steps_count"].value or 0)
+        if n < 1:
+            n = 1
+        steps_container.clear()
+        state["step_widgets"] = []
+        with steps_container:
+            with ui.row().classes("items-center text-caption"):
+                ui.label("step").classes("w-12")
+                for col in cols:
+                    ui.label(col).classes("w-20 text-center")
+            for r in range(n):
+                with ui.row().classes("items-center"):
+                    ui.label(str(r)).classes("w-12 text-caption")
+                    row_widgets: dict = {}
+                    for col in cols:
+                        w = ui.number(
+                            value=float(defaults[col]), format="%.4f",
+                        ).props("dense outlined").classes("w-20")
+                        row_widgets[col] = w
+                    state["step_widgets"].append(row_widgets)
+
+    state["rebuild_steps"] = _rebuild_steps
+    steps_count.on("update:model-value", lambda *_: _rebuild_steps())
+    kind_select.on("update:model-value", lambda *_: (
+        _refresh_create_tap_changer_panel(state, state.get("current_component", "")),
+    ))
+
+    def _on_create_click() -> None:
+        if _state.network is None or state.get("current_component") != "2-Winding Transformers":
+            return
+        kind = state["kind_select"].value
+        spec = CREATABLE_TAP_CHANGERS.get(kind)
+        if spec is None:
+            return
+        transformer_id = state["twt_select"].value
+        if not transformer_id:
+            status_label.set_text("Pick a target transformer first.")
+            return
+        raw = {
+            f["name"]: _read_create_widget(state, f)
+            for f in spec["main_fields"]
+        }
+        main_fields = coerce_field_values(spec["main_fields"], raw)
+        steps: list[dict] = []
+        for row in state["step_widgets"]:
+            step = {}
+            for col, widget in row.items():
+                try:
+                    step[col] = float(widget.value)
+                except (TypeError, ValueError):
+                    step[col] = spec["step_defaults"][col]
+            steps.append(step)
+        try:
+            create_tap_changer(
+                _state.network, kind, str(transformer_id), main_fields, steps,
+            )
+        except Exception as exc:
+            status_label.set_text(f"Create failed — {exc}")
+            ui.notify(f"Create failed: {exc}", type="negative")
+            return
+        status_label.set_text(
+            f"Created {kind.lower()} tap changer on {transformer_id!r} "
+            f"({len(steps)} steps)."
+        )
+        ui.notify(
+            f"Created {kind.lower()} tap changer on {transformer_id!r}",
+            type="positive", timeout=1500,
+        )
+        refresh_after_create()
+
+    create_btn.on_click(_on_create_click)
+
+
+def _refresh_create_tap_changer_panel(state: dict, component: str) -> None:
+    """Repopulate the tap-changer creation panel for ``component``.
+
+    Hides the expansion when the active component isn't
+    "2-Winding Transformers" or no transformer is missing the chosen kind.
+    """
+    expansion = state.get("expansion")
+    if expansion is None:
+        return
+    state["current_component"] = component
+    if component != "2-Winding Transformers" or _state.network is None:
+        expansion.visible = False
+        return
+
+    kind = state["kind_select"].value or "Ratio"
+    available = list_transformers_without_tap_changer(_state.network, kind)
+    if not available:
+        expansion.visible = False
+        return
+
+    state["twt_select"].options = available
+    if state["twt_select"].value not in available:
+        state["twt_select"].value = available[0]
+    state["twt_select"].update()
+
+    spec = CREATABLE_TAP_CHANGERS[kind]
+    container = state["fields_container"]
+    container.clear()
+    state["field_widgets"] = {}
+    with container:
+        for f in spec["main_fields"]:
+            label_text = f["label"] + (" *" if f.get("required") else "")
+            help_text = f.get("help") or ""
+            with ui.column().classes("q-mr-md q-mb-md"):
+                ui.label(label_text).classes("text-caption")
+                kind_f = f["kind"]
+                default = f.get("default")
+                if kind_f == "text":
+                    w = ui.input(value=str(default or "")) \
+                        .props("dense outlined")
+                elif kind_f == "float":
+                    w = ui.number(
+                        value=float(default or 0.0),
+                        min=f.get("min_value"),
+                        format="%.6f",
+                    ).props("dense outlined")
+                elif kind_f == "int":
+                    w = ui.number(
+                        value=int(default or 0),
+                        min=f.get("min_value"),
+                        step=int(f.get("step", 1)),
+                        format="%d",
+                    ).props("dense outlined")
+                elif kind_f == "bool":
+                    w = ui.switch(value=bool(default))
+                elif kind_f == "select":
+                    options_list = list(f.get("options", []))
+                    w = ui.select(
+                        options=options_list,
+                        value=default if default in options_list else (
+                            options_list[0] if options_list else None
+                        ),
+                    ).props("dense outlined").classes("w-56")
+                else:
+                    continue
+                if help_text:
+                    w.tooltip(help_text)
+                state["field_widgets"][f["name"]] = w
+
+    state["rebuild_steps"]()
+    state["status_label"].set_text("")
+    expansion.visible = True
+
+
 def _build_data_explorer():
     """Materialise the Data Explorer panel and return a refresh closure.
 
@@ -1250,6 +1450,20 @@ def _build_data_explorer():
     }
     _build_create_hvdc_panel_widgets(
         hvdc_create_state, refresh_after_create=lambda: refresh(),
+    )
+
+    tap_changer_create_state: dict = {
+        "kind_select": None, "twt_select": None,
+        "fields_container": None, "steps_count": None,
+        "steps_container": None, "field_widgets": {},
+        "step_widgets": [],
+        "status_label": None,
+        "expansion": None,
+        "rebuild_steps": None,
+        "current_component": "",
+    }
+    _build_create_tap_changer_panel_widgets(
+        tap_changer_create_state, refresh_after_create=lambda: refresh(),
     )
 
     grid = ui.aggrid({
@@ -1359,6 +1573,7 @@ def _build_data_explorer():
         _refresh_create_branch_panel(branch_create_state, label)
         _refresh_create_container_panel(container_create_state, label)
         _refresh_create_hvdc_panel(hvdc_create_state, label)
+        _refresh_create_tap_changer_panel(tap_changer_create_state, label)
         is_disconnectable = label in DISCONNECTABLE_COMPONENTS
         is_removable = label in REMOVABLE_COMPONENTS
         bulk_row.set_visibility(bool(cols) or is_disconnectable or is_removable)
