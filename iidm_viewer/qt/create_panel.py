@@ -46,6 +46,8 @@ from iidm_viewer.component_creation import (
     CREATABLE_HVDC_LINES,
     CREATABLE_TAP_CHANGERS,
     LOCATOR_FIELDS,
+    REACTIVE_LIMITS_MODES,
+    REACTIVE_LIMITS_TARGETS,
     branch_side_locator_fields,
     coerce_field_values,
     create_branch_bay,
@@ -53,11 +55,13 @@ from iidm_viewer.component_creation import (
     create_container,
     create_coupling_device,
     create_hvdc_line,
+    create_reactive_limits,
     create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
     list_node_breaker_vls_with_multi_bbs,
+    list_reactive_limit_candidates,
     list_substations_df,
     list_transformers_without_tap_changer,
     next_free_node,
@@ -1396,3 +1400,215 @@ class CreateCouplingDevicePanel(QWidget):
         self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
         vl_id = str(self._vl_combo.currentData() or "")
         self.component_created.emit("Coupling Devices", vl_id)
+
+
+# ---------------------------------------------------------------------------
+# Reactive-limits panel (min/max or per-P curve on gens / batteries / VSCs)
+# ---------------------------------------------------------------------------
+class CreateReactiveLimitsPanel(QWidget):
+    """Sub-form to attach reactive limits to a Generator / Battery / VSC.
+
+    Auto-hides unless the active component is one of
+    :data:`REACTIVE_LIMITS_TARGETS` and the network carries at least one
+    candidate element.
+
+    Layout:
+      * Target picker (filtered by the active component).
+      * Mode picker (min/max or curve).
+      * min/max view: two QDoubleSpinBox.
+      * Curve view: "Number of points" spinner driving an editable
+        QTableWidget with p / min_q / max_q columns.
+      * Save button + status label.
+    """
+
+    component_created = Signal(str, str)  # (component, element_id)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+
+        self._group = QGroupBox("Attach reactive limits")
+        self._group.setCheckable(True)
+        self._group.setChecked(True)
+        self._group.toggled.connect(self._on_toggled)
+
+        # Target + mode pickers
+        self._target_combo = QComboBox()
+        self._target_combo.setMinimumWidth(220)
+        self._mode_combo = QComboBox()
+        for m in REACTIVE_LIMITS_MODES:
+            self._mode_combo.addItem("min/max" if m == "minmax" else "curve", userData=m)
+        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        row_pickers = QHBoxLayout()
+        row_pickers.addWidget(QLabel("Target"))
+        row_pickers.addWidget(self._target_combo, 1)
+        row_pickers.addSpacing(12)
+        row_pickers.addWidget(QLabel("Mode"))
+        row_pickers.addWidget(self._mode_combo)
+
+        # min/max view (two spinboxes side-by-side)
+        self._minmax_widget = QWidget()
+        self._min_q = QDoubleSpinBox()
+        self._min_q.setDecimals(3); self._min_q.setRange(-1e9, 1e9); self._min_q.setValue(-100.0)
+        self._max_q = QDoubleSpinBox()
+        self._max_q.setDecimals(3); self._max_q.setRange(-1e9, 1e9); self._max_q.setValue(100.0)
+        minmax_layout = QHBoxLayout(self._minmax_widget)
+        minmax_layout.setContentsMargins(0, 0, 0, 0)
+        minmax_layout.addWidget(QLabel("min_q (MVar)"))
+        minmax_layout.addWidget(self._min_q, 1)
+        minmax_layout.addSpacing(12)
+        minmax_layout.addWidget(QLabel("max_q (MVar)"))
+        minmax_layout.addWidget(self._max_q, 1)
+
+        # Curve view: count spinner + editable table
+        self._curve_widget = QWidget()
+        self._point_count = QSpinBox()
+        self._point_count.setRange(2, 50)
+        self._point_count.setValue(2)
+        self._point_count.valueChanged.connect(self._resize_points_table)
+        self._points_table = QTableWidget(0, 3)
+        self._points_table.setHorizontalHeaderLabels(["p", "min_q", "max_q"])
+        self._points_table.setMinimumHeight(120)
+        self._points_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        curve_layout = QVBoxLayout(self._curve_widget)
+        curve_layout.setContentsMargins(0, 0, 0, 0)
+        row_count = QHBoxLayout()
+        row_count.addWidget(QLabel("Number of points"))
+        row_count.addWidget(self._point_count)
+        row_count.addStretch(1)
+        curve_layout.addLayout(row_count)
+        curve_layout.addWidget(self._points_table)
+
+        self._create_btn = QPushButton("Save reactive limits")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        row_action = QHBoxLayout()
+        row_action.addWidget(self._create_btn)
+        row_action.addWidget(self._status, 1)
+
+        inner = QVBoxLayout()
+        inner.addLayout(row_pickers)
+        inner.addWidget(self._minmax_widget)
+        inner.addWidget(self._curve_widget)
+        inner.addLayout(row_action)
+        self._group.setLayout(inner)
+
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+        self.setLayout(outer)
+        self.setVisible(False)
+
+        # Seed curve defaults so the table shows two sensible rows from the start.
+        self._seed_points_defaults()
+        self._apply_mode_visibility()
+
+    # -- Public API ------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._refresh_for_current()
+        self._status.setText("")
+
+    # -- Internals -------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._minmax_widget.setVisible(checked and self._current_mode() == "minmax")
+        self._curve_widget.setVisible(checked and self._current_mode() == "curve")
+
+    def _current_mode(self) -> str:
+        return str(self._mode_combo.currentData() or "minmax")
+
+    def _on_mode_changed(self, _idx: int) -> None:
+        self._apply_mode_visibility()
+
+    def _apply_mode_visibility(self) -> None:
+        mode = self._current_mode()
+        self._minmax_widget.setVisible(mode == "minmax")
+        self._curve_widget.setVisible(mode == "curve")
+
+    def _refresh_for_current(self) -> None:
+        show = (
+            self._network is not None
+            and self._component in REACTIVE_LIMITS_TARGETS
+        )
+        ids = list_reactive_limit_candidates(
+            self._network, self._component
+        ) if show else []
+        self.setVisible(bool(show and ids))
+        if not (show and ids):
+            return
+        self._target_combo.blockSignals(True)
+        self._target_combo.clear()
+        for eid in ids:
+            self._target_combo.addItem(eid)
+        self._target_combo.blockSignals(False)
+
+    def _seed_points_defaults(self) -> None:
+        self._points_table.blockSignals(True)
+        self._points_table.setRowCount(2)
+        defaults = [(0.0, -100.0, 100.0), (100.0, -80.0, 80.0)]
+        for r, (p, mn, mx) in enumerate(defaults):
+            self._points_table.setItem(r, 0, QTableWidgetItem(str(p)))
+            self._points_table.setItem(r, 1, QTableWidgetItem(str(mn)))
+            self._points_table.setItem(r, 2, QTableWidgetItem(str(mx)))
+        self._points_table.blockSignals(False)
+
+    def _resize_points_table(self, _n: int) -> None:
+        n_rows = self._point_count.value()
+        prev = self._points_table.rowCount()
+        self._points_table.setRowCount(n_rows)
+        # Newly-added rows seed with linearly-spaced p (last + 100) and
+        # the previous row's q-band so the user can edit from a sensible start.
+        if n_rows > prev:
+            try:
+                last_p = float(self._points_table.item(prev - 1, 0).text())
+                last_min = float(self._points_table.item(prev - 1, 1).text())
+                last_max = float(self._points_table.item(prev - 1, 2).text())
+            except (AttributeError, ValueError):
+                last_p, last_min, last_max = 0.0, -100.0, 100.0
+            for r in range(prev, n_rows):
+                self._points_table.setItem(r, 0, QTableWidgetItem(str(last_p + 100.0 * (r - prev + 1))))
+                self._points_table.setItem(r, 1, QTableWidgetItem(str(last_min)))
+                self._points_table.setItem(r, 2, QTableWidgetItem(str(last_max)))
+
+    def _collect_payload(self) -> list[dict]:
+        if self._current_mode() == "minmax":
+            return [{"min_q": self._min_q.value(), "max_q": self._max_q.value()}]
+        rows: list[dict] = []
+        for r in range(self._points_table.rowCount()):
+            try:
+                p = float(self._points_table.item(r, 0).text())
+                mn = float(self._points_table.item(r, 1).text())
+                mx = float(self._points_table.item(r, 2).text())
+            except (AttributeError, ValueError):
+                continue
+            rows.append({"p": p, "min_q": mn, "max_q": mx})
+        return rows
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component not in REACTIVE_LIMITS_TARGETS:
+            return
+        target_id = self._target_combo.currentText()
+        if not target_id:
+            self._status.setText("Pick a target first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        try:
+            create_reactive_limits(
+                self._network, target_id, self._current_mode(), self._collect_payload(),
+            )
+        except Exception as exc:
+            self._status.setText(f"Save failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        label = "min/max" if self._current_mode() == "minmax" else "curve"
+        self._status.setText(f"Saved {label} reactive limits on {target_id!r}.")
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit(self._component or "", target_id)

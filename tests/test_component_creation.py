@@ -12,6 +12,8 @@ from iidm_viewer.component_creation import (
     CREATABLE_TAP_CHANGERS,
     LOCATOR_FIELDS,
     PTC_REGULATION_MODES,
+    REACTIVE_LIMITS_MODES,
+    REACTIVE_LIMITS_TARGETS,
     TOPOLOGY_KINDS,
     TRANSFORMER_SIDES,
     _SHUNT_LINEAR_FIELDS,
@@ -23,11 +25,13 @@ from iidm_viewer.component_creation import (
     create_container,
     create_coupling_device,
     create_hvdc_line,
+    create_reactive_limits,
     create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
     list_node_breaker_vls_with_multi_bbs,
+    list_reactive_limit_candidates,
     list_substations_df,
     list_transformers_without_tap_changer,
     list_two_winding_transformers,
@@ -37,6 +41,7 @@ from iidm_viewer.component_creation import (
     validate_create_coupling_device_fields,
     validate_create_fields,
     validate_create_hvdc_line_fields,
+    validate_create_reactive_limits_fields,
     validate_create_tap_changer_fields,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy, run
@@ -801,4 +806,131 @@ def test_create_coupling_device_raises_on_invalid(node_breaker_network):
     with pytest.raises(ValueError, match="same voltage level"):
         create_coupling_device(
             node_breaker_network, "S1VL2_BBS1", "S2VL1_BBS",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Reactive limits (min/max or per-P curve)
+# ---------------------------------------------------------------------------
+def test_reactive_limits_constants():
+    assert REACTIVE_LIMITS_MODES == ["minmax", "curve"]
+    assert set(REACTIVE_LIMITS_TARGETS) == {
+        "Generators", "Batteries", "VSC Converter Stations",
+    }
+
+
+def test_reactive_limits_re_exported_from_streamlit_state():
+    pytest.importorskip("streamlit")
+    from iidm_viewer.state import (
+        REACTIVE_LIMITS_MODES as ST_MODES,
+        REACTIVE_LIMITS_TARGETS as ST_TARGETS,
+    )
+    assert ST_MODES is REACTIVE_LIMITS_MODES
+    assert ST_TARGETS is REACTIVE_LIMITS_TARGETS
+
+
+def test_list_reactive_limit_candidates_for_generators(node_breaker_network):
+    ids = list_reactive_limit_candidates(node_breaker_network, "Generators")
+    assert {"GH1", "GH2", "GH3", "GTH1", "GTH2"} <= set(ids)
+
+
+def test_list_reactive_limit_candidates_for_unknown_component(node_breaker_network):
+    assert list_reactive_limit_candidates(node_breaker_network, "Mystery") == []
+
+
+def test_validate_create_reactive_limits_rejects_unknown_mode():
+    errors = validate_create_reactive_limits_fields("bogus", "GH1", [{"min_q": 0, "max_q": 1}])
+    assert any("Unknown reactive-limits mode" in e for e in errors)
+
+
+def test_validate_create_reactive_limits_requires_element_id():
+    errors = validate_create_reactive_limits_fields("minmax", "", [{"min_q": 0, "max_q": 1}])
+    assert any("Target element id is required" in e for e in errors)
+
+
+def test_validate_create_reactive_limits_minmax_requires_both():
+    errors = validate_create_reactive_limits_fields("minmax", "GH1", [{"min_q": None, "max_q": 1.0}])
+    assert any("min_q and max_q are required" in e for e in errors)
+
+
+def test_validate_create_reactive_limits_minmax_orders_q():
+    errors = validate_create_reactive_limits_fields("minmax", "GH1", [{"min_q": 100.0, "max_q": -50.0}])
+    assert any("max_q must be >= min_q" in e for e in errors)
+
+
+def test_validate_create_reactive_limits_curve_requires_two_distinct_p():
+    errors = validate_create_reactive_limits_fields(
+        "curve", "GH1",
+        [{"p": 0.0, "min_q": -10, "max_q": 10},
+         {"p": 0.0, "min_q": -10, "max_q": 10}],
+    )
+    assert any("at least 2 distinct p" in e for e in errors)
+
+
+def test_validate_create_reactive_limits_curve_orders_q():
+    errors = validate_create_reactive_limits_fields(
+        "curve", "GH1",
+        [{"p": 0.0, "min_q": 10, "max_q": -10},
+         {"p": 100.0, "min_q": -10, "max_q": 10}],
+    )
+    assert any("max_q must be >= min_q at every" in e for e in errors)
+
+
+def test_validate_create_reactive_limits_accepts_valid_minmax():
+    assert validate_create_reactive_limits_fields(
+        "minmax", "GH1", [{"min_q": -50.0, "max_q": 50.0}],
+    ) == []
+
+
+def test_validate_create_reactive_limits_accepts_valid_curve():
+    assert validate_create_reactive_limits_fields(
+        "curve", "GH1",
+        [{"p": 0.0, "min_q": -100, "max_q": 100},
+         {"p": 100.0, "min_q": -80, "max_q": 80}],
+    ) == []
+
+
+def test_create_reactive_limits_minmax_end_to_end():
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    create_reactive_limits(
+        network, "GH1", "minmax",
+        [{"min_q": -42.0, "max_q": 42.0}],
+    )
+    gens = network.get_generators(all_attributes=True)
+    assert gens.at["GH1", "min_q"] == -42.0
+    assert gens.at["GH1", "max_q"] == 42.0
+    assert gens.at["GH1", "reactive_limits_kind"] == "MIN_MAX"
+
+
+def test_create_reactive_limits_curve_end_to_end():
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    create_reactive_limits(
+        network, "GH1", "curve",
+        [{"p": 0.0, "min_q": -90.0, "max_q": 90.0},
+         {"p": 100.0, "min_q": -70.0, "max_q": 70.0}],
+    )
+    pts = network.get_reactive_capability_curve_points()
+    assert "GH1" in pts.index.get_level_values(0)
+    gens = network.get_generators(all_attributes=True)
+    assert gens.at["GH1", "reactive_limits_kind"] == "CURVE"
+
+
+def test_create_reactive_limits_raises_on_invalid():
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    with pytest.raises(ValueError, match="max_q must be >= min_q"):
+        create_reactive_limits(
+            network, "GH1", "minmax",
+            [{"min_q": 100.0, "max_q": -50.0}],
         )

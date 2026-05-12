@@ -1218,6 +1218,101 @@ def test_coupling_panel_hides_for_non_switch_component(qapp):
     assert panel.isVisible() is True
 
 
+def test_reactive_limits_panel_hides_for_non_target_component(qapp):
+    """The reactive-limits panel hides for components not in
+    :data:`REACTIVE_LIMITS_TARGETS`."""
+    from iidm_viewer.qt.create_panel import CreateReactiveLimitsPanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateReactiveLimitsPanel()
+    panel.set_network(network)
+    panel.set_component("Lines")
+    qapp.processEvents()
+    assert panel.isVisible() is False
+    panel.set_component("Generators")
+    qapp.processEvents()
+    assert panel.isVisible() is True
+
+
+def test_reactive_limits_panel_minmax_creates_minmax(qapp):
+    """End-to-end min/max reactive-limits creation via the Qt panel."""
+    from iidm_viewer.qt.create_panel import CreateReactiveLimitsPanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateReactiveLimitsPanel()
+    panel.set_network(network)
+    panel.set_component("Generators")
+    qapp.processEvents()
+    # Mode defaults to min/max; the candidate combo carries every gen.
+    assert panel.isVisible() is True
+    panel._target_combo.setCurrentText("GH1")
+    panel._min_q.setValue(-33.0)
+    panel._max_q.setValue(33.0)
+    seen: list = []
+    panel.component_created.connect(lambda c, eid: seen.append((c, eid)))
+    panel._on_create_clicked()
+    qapp.processEvents()
+    gens = network.get_generators(all_attributes=True)
+    assert gens.at["GH1", "min_q"] == -33.0
+    assert gens.at["GH1", "max_q"] == 33.0
+    assert gens.at["GH1", "reactive_limits_kind"] == "MIN_MAX"
+    assert seen == [("Generators", "GH1")]
+
+
+def test_reactive_limits_panel_curve_creates_curve(qapp):
+    """End-to-end curve reactive-limits creation via the Qt panel."""
+    from iidm_viewer.qt.create_panel import CreateReactiveLimitsPanel
+    from PySide6.QtWidgets import QTableWidgetItem
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateReactiveLimitsPanel()
+    panel.set_network(network)
+    panel.set_component("Generators")
+    qapp.processEvents()
+    panel._target_combo.setCurrentText("GH1")
+    # Switch to curve mode; the table is pre-seeded with 2 rows.
+    for i in range(panel._mode_combo.count()):
+        if panel._mode_combo.itemData(i) == "curve":
+            panel._mode_combo.setCurrentIndex(i)
+            break
+    qapp.processEvents()
+    # Overwrite the two default rows so we can spot the new curve.
+    panel._points_table.setItem(0, 0, QTableWidgetItem("0.0"))
+    panel._points_table.setItem(0, 1, QTableWidgetItem("-50.0"))
+    panel._points_table.setItem(0, 2, QTableWidgetItem("50.0"))
+    panel._points_table.setItem(1, 0, QTableWidgetItem("100.0"))
+    panel._points_table.setItem(1, 1, QTableWidgetItem("-40.0"))
+    panel._points_table.setItem(1, 2, QTableWidgetItem("40.0"))
+    panel._on_create_clicked()
+    qapp.processEvents()
+    gens = network.get_generators(all_attributes=True)
+    assert gens.at["GH1", "reactive_limits_kind"] == "CURVE"
+
+
 def test_change_log_panel_repaints_on_record(qapp, loaded_window):
     """The panel's title and table reflect log mutations in real time
     via the on_changed bus.
