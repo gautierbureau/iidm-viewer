@@ -1610,6 +1610,113 @@ def test_lf_report_dialog_handles_malformed_json(qapp):
     assert "Failed to parse report" in dlg._empty_label.text()
 
 
+def test_load_options_dialog_round_trips_format_and_post_processors(qapp):
+    """End-to-end LoadOptionsDialog: pass current overrides, switch
+    format to XIIDM (which has configurable params), pick a
+    post-processor, and confirm the result fields are populated on
+    Save."""
+    from iidm_viewer.qt.load_options_dialog import AUTO_DETECT, LoadOptionsDialog
+
+    dlg = LoadOptionsDialog(
+        formats=["XIIDM", "UCTE"],
+        post_processors=["replaceTieLinesByLines"],
+        current_format=None,
+        current_params={},
+        current_post_processors=[],
+    )
+    qapp.processEvents()
+    # Default selection is Auto-detect.
+    assert dlg._fmt_combo.currentText() == AUTO_DETECT
+
+    dlg._fmt_combo.setCurrentText("XIIDM")
+    qapp.processEvents()
+    # The post-processor checkbox must be present.
+    assert "replaceTieLinesByLines" in dlg._post_processor_boxes
+    dlg._post_processor_boxes["replaceTieLinesByLines"].setChecked(True)
+
+    dlg._on_save_clicked()
+    assert dlg.format == "XIIDM"
+    assert dlg.post_processors == ["replaceTieLinesByLines"]
+    # Params may be empty when the user didn't tweak any widget — we
+    # don't assert content here, just the dict type.
+    assert isinstance(dlg.params, dict)
+
+
+def test_load_options_dialog_auto_detect_means_no_format(qapp):
+    """Picking Auto-detect produces ``format=None`` so the host knows
+    to fall back to pypowsybl's extension-based detection."""
+    from iidm_viewer.qt.load_options_dialog import LoadOptionsDialog
+
+    dlg = LoadOptionsDialog(
+        formats=["XIIDM", "UCTE"],
+        post_processors=[],
+        current_format="XIIDM",
+        current_params={"iidm.import.xml.throw-exception-if-extension-not-found": "true"},
+        current_post_processors=[],
+    )
+    qapp.processEvents()
+    dlg._fmt_combo.setCurrentText("Auto-detect")
+    dlg._on_save_clicked()
+    assert dlg.format is None
+    assert dlg.params == {}
+
+
+def test_save_network_dialog_carries_parameters(qapp):
+    """The Save dialog should attach an empty (or non-empty) parameters
+    dict after Save — the host then forwards it to ``export_network``."""
+    from iidm_viewer.qt.save_network_dialog import SaveNetworkDialog
+
+    dlg = SaveNetworkDialog(["UCTE", "XIIDM"])
+    qapp.processEvents()
+    # Default selection is XIIDM.
+    assert dlg._combo.currentText() == "XIIDM"
+    dlg._on_save_clicked()
+    assert dlg.selected_format == "XIIDM"
+    assert isinstance(dlg.parameters, dict)
+
+
+def test_app_state_threads_import_params_into_load_network(qapp, monkeypatch):
+    """``AppState.load_network_from_path`` must forward
+    ``import_params`` + ``import_post_processors`` so the
+    LoadOptionsDialog round-trip actually affects the next file load."""
+    from iidm_viewer import network_loader
+    from iidm_viewer.qt.state import AppState
+
+    state = AppState()
+    state.import_params = {"iidm.import.xml.throw-exception-if-extension-not-found": "true"}
+    state.import_post_processors = ["replaceTieLinesByLines"]
+
+    captured: dict = {}
+
+    def fake_load_from_path(path, *, parameters=None, post_processors=None):
+        captured["path"] = path
+        captured["parameters"] = parameters
+        captured["post_processors"] = post_processors
+        # Return a minimal proxy so the rest of load_network_from_path
+        # doesn't blow up on the default-VL pick.
+        class _StubNet:
+            def get_voltage_levels(self):
+                import pandas as pd
+                return pd.DataFrame()
+        return _StubNet()
+
+    monkeypatch.setattr(
+        "iidm_viewer.qt.state.network_loader.load_from_path",
+        fake_load_from_path,
+    )
+
+    # ``pick_default_vl`` reads ``_obj``; stub it too.
+    monkeypatch.setattr(
+        "iidm_viewer.qt.state.network_loader.pick_default_vl",
+        lambda net: None,
+    )
+
+    state.load_network_from_path("/fake/path.xiidm")
+    assert captured["path"] == "/fake/path.xiidm"
+    assert captured["parameters"] == state.import_params
+    assert captured["post_processors"] == state.import_post_processors
+
+
 def test_save_network_dialog_picks_xiidm_by_default(qapp):
     """The Save-network format picker should default to XIIDM when
     that format is offered — matches Streamlit's typical use."""

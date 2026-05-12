@@ -552,6 +552,60 @@ def test_view_logs_dialog_helper_uses_shared_parser_and_gates_empty_input():
     assert "_rebuild_tree" in src
 
 
+def test_load_options_dialog_uses_shared_helpers():
+    """``_open_load_options_dialog`` must funnel everything through
+    the shared io_options + render_params_form helpers — guards against
+    a future refactor reintroducing inline parsing."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._open_load_options_dialog)
+    for token in (
+        "get_import_formats",
+        "get_import_post_processors",
+        "get_format_parameters",
+        "filter_changed_params",
+        "_render_params_form",
+        "_state.import_format",
+        "_state.import_params",
+        "_state.import_post_processors",
+    ):
+        assert token in src, f"NiceGUI load-options dialog should reference {token}"
+
+
+def test_import_options_button_lives_in_left_drawer():
+    """The drawer must carry the "Import options…" button so users can
+    set format / params / post-processors before uploading a file."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    drawer_start = src.index("ui.left_drawer(")
+    drawer_end = src.index("with ui.tabs(", drawer_start)
+    drawer_src = src[drawer_start:drawer_end]
+    assert "Import options" in drawer_src
+    assert "_open_load_options_dialog" in drawer_src
+
+
+def test_upload_handler_forwards_import_params():
+    """The upload handler must thread ``_state.import_params`` and
+    ``_state.import_post_processors`` into ``load_from_path`` so the
+    LoadOptionsDialog actually affects the next upload."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    handler_start = src.index("async def handle_upload(e):")
+    handler_end = src.index(
+        "file_lbl.set_text(os.path.basename(name))", handler_start,
+    )
+    handler_src = src[handler_start:handler_end]
+    assert "_state.import_params" in handler_src
+    assert "_state.import_post_processors" in handler_src
+    assert "parameters=" in handler_src
+    assert "post_processors=" in handler_src
+
+
 def test_save_network_dialog_uses_shared_helpers():
     """The "Save network" modal must funnel through the shared
     :func:`network_loader.export_network` and

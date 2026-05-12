@@ -43,6 +43,13 @@ class AppState(QObject):
         # "use pypowsybl's defaults" and are the initial state.
         self.lf_generic_params: dict = {}
         self.lf_provider_params: dict = {}
+        # Persisted import-side overrides — set by the LoadOptionsDialog
+        # and threaded through :meth:`load_network_from_path` so the
+        # next file load applies them. ``import_format`` is the explicit
+        # format override (``None`` means "auto-detect from extension").
+        self.import_format: Optional[str] = None
+        self.import_params: dict = {}
+        self.import_post_processors: list = []
         # One ChangeLog per process. Reset on every network reload so
         # entries don't leak between unrelated networks.
         self.change_log = ChangeLog()
@@ -65,9 +72,16 @@ class AppState(QObject):
         """Load a network and auto-select the highest-nominal-V VL.
 
         Both the load and the default-VL pick run on the pypowsybl
-        worker thread via :mod:`iidm_viewer.network_loader`.
+        worker thread via :mod:`iidm_viewer.network_loader`. The
+        ``import_params`` / ``import_post_processors`` AppState fields
+        (set by the LoadOptionsDialog) are threaded through so the
+        next load applies them automatically.
         """
-        network = network_loader.load_from_path(path)
+        network = network_loader.load_from_path(
+            path,
+            parameters=self.import_params or None,
+            post_processors=self.import_post_processors or None,
+        )
         default_vl = network_loader.pick_default_vl(network)
         self._network = network
         self._selected_vl = None  # cleared first so set_selected_vl emits below

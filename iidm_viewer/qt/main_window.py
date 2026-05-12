@@ -44,7 +44,7 @@ from iidm_viewer.qt.state import AppState
 class _Sidebar(QWidget):
     def __init__(
         self, on_load, on_run_loadflow, on_vl_selected, on_view_logs,
-        on_lf_parameters, on_save_network, parent=None,
+        on_lf_parameters, on_save_network, on_import_options, parent=None,
     ) -> None:
         super().__init__(parent)
         self.setFixedWidth(240)
@@ -55,6 +55,13 @@ class _Sidebar(QWidget):
 
         self._load_btn = QPushButton("Load network…")
         self._load_btn.clicked.connect(on_load)
+
+        # "Import options…" opens the LoadOptionsDialog — sets the
+        # format / params / post-processors used on the next file
+        # load. Always enabled (the dialog itself is fine before any
+        # network is loaded).
+        self._import_opts_btn = QPushButton("Import options…")
+        self._import_opts_btn.clicked.connect(on_import_options)
 
         # "Save network" exports the current network through pypowsybl
         # and writes the result to a path the user picks. Disabled
@@ -108,6 +115,7 @@ class _Sidebar(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.addWidget(title)
         layout.addWidget(self._load_btn)
+        layout.addWidget(self._import_opts_btn)
         layout.addWidget(self._save_btn)
         layout.addWidget(self._file_lbl)
         layout.addWidget(vl_filter_lbl)
@@ -243,6 +251,7 @@ class MainWindow(QMainWindow):
             self._on_view_logs_clicked,
             self._on_lf_parameters_clicked,
             self._on_save_network_clicked,
+            self._on_import_options_clicked,
         )
 
         central = QWidget()
@@ -326,6 +335,49 @@ class MainWindow(QMainWindow):
         dlg = LFReportDialog(report_json, self)
         dlg.exec()
 
+    def _on_import_options_clicked(self) -> None:
+        """Mirror Streamlit's "Import options…" dialog.
+
+        Opens :class:`LoadOptionsDialog` with the AppState-cached
+        format / params / post-processors as initial values; on Save
+        writes them back so the next ``load_network_from_path`` picks
+        them up.
+        """
+        from iidm_viewer.io_options_schema import (
+            get_import_formats,
+            get_import_post_processors,
+        )
+        from iidm_viewer.qt.load_options_dialog import LoadOptionsDialog
+        try:
+            formats = get_import_formats()
+        except Exception as exc:
+            QMessageBox.critical(self, "Import options", f"Failed to list formats: {exc}")
+            return
+        try:
+            post_processors = get_import_post_processors()
+        except Exception:
+            post_processors = []
+        dlg = LoadOptionsDialog(
+            formats=formats,
+            post_processors=post_processors,
+            current_format=self.state.import_format,
+            current_params=self.state.import_params,
+            current_post_processors=self.state.import_post_processors,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.state.import_format = dlg.format
+        self.state.import_params = dlg.params
+        self.state.import_post_processors = dlg.post_processors
+        n_params = len(dlg.params)
+        n_pp = len(dlg.post_processors)
+        fmt_label = dlg.format or "auto-detect"
+        self.statusBar().showMessage(
+            f"Import options updated — format: {fmt_label}, "
+            f"{n_params} param override(s), {n_pp} post-processor(s).",
+        )
+
     def _on_save_network_clicked(self) -> None:
         """Mirror Streamlit's "Save network" dialog.
 
@@ -372,7 +424,10 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(f"Exporting to {fmt}…")
         try:
-            data, ext = export_network(self.state.network, fmt)
+            data, ext = export_network(
+                self.state.network, fmt,
+                parameters=dlg.parameters or None,
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Save failed", f"Export failed: {exc}")
             self.statusBar().showMessage(f"Export failed: {exc}")

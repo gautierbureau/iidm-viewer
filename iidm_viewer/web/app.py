@@ -153,6 +153,14 @@ from iidm_viewer.lf_parameters_schema import (
     group_provider_params_by_category,
     parse_provider_options,
 )
+from iidm_viewer.io_options_schema import (
+    csv_split as _csv_split,
+    filter_changed_params,
+    get_format_parameters,
+    get_import_formats,
+    get_import_post_processors,
+    parse_possible_values,
+)
 from iidm_viewer.network_loader import (
     export_network,
     get_export_formats,
@@ -634,6 +642,202 @@ def _open_lf_parameters_dialog(on_save) -> None:
     dialog.open()
 
 
+def _render_params_form(container, df, initial: Optional[dict] = None):
+    """Build NiceGUI inputs for an import/export parameters DataFrame.
+
+    Each row gets a typed widget (switch for BOOLEAN, number for
+    INTEGER / DOUBLE, multi-select for STRING_LIST with options, plain
+    select for enumerated STRING, free input otherwise). Returns a
+    callable ``read_values()`` that produces the
+    ``{name: wire-string}`` dict matching pypowsybl's parameter shape.
+    """
+    seed = dict(initial or {})
+    widgets: dict[str, tuple[str, Any]] = {}
+    container.clear()
+    with container:
+        if df is None or df.empty:
+            ui.label("No configurable options for this format.") \
+                .classes("text-caption")
+
+            def _empty_read() -> dict[str, str]:
+                return {}
+
+            return _empty_read
+
+        for name, row in df.iterrows():
+            ptype = str(row.get("type") or "STRING").upper()
+            default = row.get("default") if "default" in df.columns else ""
+            desc = str(row.get("description") or name)
+            options = parse_possible_values(row.get("possible_values"))
+            current = seed.get(str(name), default if default is not None else "")
+            with ui.row().classes("items-center w-full"):
+                lbl = ui.label(desc).classes("w-1/2 text-caption")
+                lbl.tooltip(str(name))
+                if ptype == "STRING_LIST" and options:
+                    selected = [v for v in _csv_split(current) if v in options]
+                    w = ui.select(
+                        options=options, value=selected, multiple=True,
+                    ).props("dense outlined use-chips").classes("w-1/2")
+                elif options:
+                    val = str(current) if str(current) in options else (
+                        options[0] if options else ""
+                    )
+                    w = ui.select(options=options, value=val) \
+                        .props("dense outlined").classes("w-1/2")
+                elif ptype == "BOOLEAN":
+                    bv = str(current).strip().lower() in ("true", "1", "yes", "on")
+                    w = ui.switch(value=bv)
+                elif ptype == "INTEGER":
+                    try:
+                        iv = int(float(current))
+                    except (TypeError, ValueError):
+                        try:
+                            iv = int(float(default))
+                        except (TypeError, ValueError):
+                            iv = 0
+                    w = ui.number(value=iv, step=1, format="%d") \
+                        .props("dense outlined").classes("w-1/2")
+                elif ptype in ("DOUBLE", "FLOAT"):
+                    try:
+                        fv = float(current)
+                    except (TypeError, ValueError):
+                        try:
+                            fv = float(default)
+                        except (TypeError, ValueError):
+                            fv = 0.0
+                    w = ui.number(value=fv, format="%g") \
+                        .props("dense outlined").classes("w-1/2")
+                else:
+                    w = ui.input(value="" if current is None else str(current)) \
+                        .props("dense outlined").classes("w-1/2")
+                widgets[str(name)] = (ptype, w)
+
+    def _read_values() -> dict[str, str]:
+        out: dict[str, str] = {}
+        for name, (ptype, w) in widgets.items():
+            v = w.value
+            if isinstance(v, list):
+                out[name] = ",".join(str(x) for x in v)
+            elif isinstance(v, bool):
+                out[name] = "true" if v else "false"
+            elif v is None:
+                out[name] = ""
+            else:
+                out[name] = str(v)
+        return out
+
+    return _read_values
+
+
+def _open_load_options_dialog() -> None:
+    """Modal editor for the next file load's import options.
+
+    Mirrors Streamlit's "Import options…" dialog: format selector
+    (``Auto-detect`` + pypowsybl's import list), format-specific
+    parameters rebuilt on every format change, and a post-processors
+    checklist. On Save the trimmed dicts land on
+    ``_state.import_format`` / ``_state.import_params`` /
+    ``_state.import_post_processors`` so the next upload picks them up.
+    """
+    try:
+        formats = get_import_formats()
+    except Exception as exc:
+        ui.notify(f"Failed to list import formats: {exc}", type="negative")
+        return
+    try:
+        post_processors = get_import_post_processors()
+    except Exception:
+        post_processors = []
+
+    auto = "Auto-detect"
+    current_fmt_raw = _state.import_format or auto
+    options = [auto] + list(formats)
+
+    params_state: dict = {"read_values": lambda: {}}
+
+    with ui.dialog() as dialog, ui.card().style(
+        "min-width: 640px; max-width: 95vw; max-height: 90vh",
+    ):
+        ui.label("Import options").classes("text-h6")
+        ui.label(
+            'Configure how the next file is parsed. "Auto-detect" lets '
+            "pypowsybl pick the format from the file extension."
+        ).classes("text-caption q-mb-sm")
+        with ui.row().classes("items-center w-full"):
+            ui.label("Import format").classes("w-1/3 text-caption")
+            fmt_select = ui.select(
+                options=options,
+                value=current_fmt_raw if current_fmt_raw in options else auto,
+            ).props("dense outlined").classes("w-2/3")
+
+        params_box = ui.expansion("Format parameters", value=True) \
+            .classes("w-full")
+        params_container = ui.column().classes("w-full")
+        params_box.add(params_container)
+
+        def _rebuild_params() -> None:
+            fmt = fmt_select.value
+            if fmt == auto or not fmt:
+                params_container.clear()
+                params_box.visible = False
+                params_state["read_values"] = lambda: {}
+                params_state["df"] = None
+                return
+            try:
+                df = get_format_parameters("import", fmt)
+            except Exception:
+                df = None
+            params_state["df"] = df
+            seed = _state.import_params if (
+                fmt == _state.import_format
+            ) else {}
+            params_state["read_values"] = _render_params_form(
+                params_container, df, seed,
+            )
+            params_box.visible = True
+
+        fmt_select.on("update:model-value", lambda *_: _rebuild_params())
+        _rebuild_params()
+
+        pp_box = ui.expansion("Post-processors", value=False).classes("w-full")
+        pp_switches: dict[str, Any] = {}
+        with pp_box:
+            if not post_processors:
+                ui.label("No post-processors reported.") \
+                    .classes("text-caption")
+            else:
+                checked = set(_state.import_post_processors or [])
+                for pp in post_processors:
+                    pp_switches[pp] = ui.checkbox(pp, value=pp in checked)
+
+        def _on_save_click() -> None:
+            fmt = fmt_select.value
+            _state.import_format = None if fmt == auto else fmt
+            raw = params_state["read_values"]()
+            df = params_state.get("df")
+            if df is not None:
+                _state.import_params = filter_changed_params(raw, df)
+            else:
+                _state.import_params = {}
+            _state.import_post_processors = [
+                name for name, sw in pp_switches.items() if sw.value
+            ]
+            ui.notify(
+                f"Import options updated — format: "
+                f"{_state.import_format or 'auto-detect'}, "
+                f"{len(_state.import_params)} param override(s), "
+                f"{len(_state.import_post_processors)} post-processor(s).",
+                type="positive", timeout=2000,
+            )
+            dialog.close()
+
+        with ui.row().classes("w-full justify-end q-mt-md"):
+            ui.button("Cancel", on_click=dialog.close).props("flat")
+            ui.button("Save", on_click=_on_save_click).props("color=primary")
+
+    dialog.open()
+
+
 def _open_save_network_dialog() -> None:
     """Open the "Save network" modal — Streamlit-style.
 
@@ -662,14 +866,46 @@ def _open_save_network_dialog() -> None:
 
     default_fmt = "XIIDM" if "XIIDM" in formats else formats[0]
     status_state: dict = {"label": None}
+    # Format-specific parameter form — rebuilt every time the format
+    # changes. ``params_state['read_values']`` returns the current
+    # widget values; the host trims to overrides before exporting.
+    params_state: dict = {"read_values": lambda: {}, "df": None}
 
-    with ui.dialog() as dialog, ui.card().style("min-width: 420px"):
+    with ui.dialog() as dialog, ui.card().style(
+        "min-width: 560px; max-width: 95vw; max-height: 90vh",
+    ):
         ui.label("Save network").classes("text-h6")
         ui.label("Pick an export format:").classes("text-caption")
         fmt_select = ui.select(
             options=list(formats),
             value=default_fmt,
         ).props("dense outlined").classes("full-width q-mb-md")
+        params_box = ui.expansion("Export parameters", value=False) \
+            .classes("w-full")
+        params_container = ui.column().classes("w-full")
+        params_box.add(params_container)
+
+        def _rebuild_params() -> None:
+            fmt = fmt_select.value
+            if not fmt:
+                params_container.clear()
+                params_box.visible = False
+                params_state["read_values"] = lambda: {}
+                params_state["df"] = None
+                return
+            try:
+                df = get_format_parameters("export", fmt)
+            except Exception:
+                df = None
+            params_state["df"] = df
+            params_state["read_values"] = _render_params_form(
+                params_container, df,
+            )
+            params_box.visible = True
+
+        fmt_select.on("update:model-value", lambda *_: _rebuild_params())
+        _rebuild_params()
+
         status_state["label"] = ui.label("").classes("text-caption q-mb-sm")
 
         async def _on_download_click() -> None:
@@ -678,10 +914,13 @@ def _open_save_network_dialog() -> None:
             fmt = fmt_select.value
             if not fmt or _state.network is None:
                 return
+            raw_params = params_state["read_values"]()
+            df = params_state.get("df")
+            params = filter_changed_params(raw_params, df) if df is not None else {}
             status_state["label"].set_text(f"Exporting to {fmt}…")
             try:
                 data, ext = await asyncio.to_thread(
-                    export_network, _state.network, fmt,
+                    export_network, _state.network, fmt, params or None,
                 )
             except Exception as exc:
                 status_state["label"].set_text(f"Export failed: {exc}")
@@ -3080,8 +3319,16 @@ def main_page() -> None:
                 # the worker thread, which surfaces as
                 #   "The current slot cannot be determined…"
                 from iidm_viewer import network_loader
+
+                # Thread the AppState-cached import overrides through —
+                # set by the Import options modal. Pypowsybl auto-detects
+                # the format from the extension when ``import_format``
+                # is ``None`` (the dialog's "Auto-detect" value).
                 network = await asyncio.to_thread(
-                    network_loader.load_from_path, tmp_path,
+                    network_loader.load_from_path,
+                    tmp_path,
+                    parameters=_state.import_params or None,
+                    post_processors=_state.import_post_processors or None,
                 )
                 _state.install_network(network)
             except Exception as exc:
@@ -3095,6 +3342,12 @@ def main_page() -> None:
             label="Load network…",
         ).props("flat dense accept='.xiidm,.iidm,.xml,.zip,.mat,.uct'") \
          .classes("full-width q-mb-sm")
+
+        # "Import options…" opens the load-options modal — sets the
+        # format / params / post-processors used on the next upload.
+        ui.button(
+            "Import options…", on_click=_open_load_options_dialog,
+        ).props("flat dense").classes("full-width q-mb-sm")
 
         # "Save network" mirrors the Streamlit dialog: pops a modal
         # with a format picker and downloads the exported bytes via

@@ -40,6 +40,13 @@ class AppState:
         # mean "use pypowsybl's defaults".
         self.lf_generic_params: dict = {}
         self.lf_provider_params: dict = {}
+        # Persisted import-side overrides — set by the LoadOptions
+        # dialog and threaded through the upload handler so the next
+        # file load applies them. ``import_format`` is the explicit
+        # format override (``None`` means "auto-detect").
+        self.import_format: Optional[str] = None
+        self.import_params: dict = {}
+        self.import_post_processors: list = []
         # One ChangeLog per process. Reset on every network reload.
         self.change_log = ChangeLog()
 
