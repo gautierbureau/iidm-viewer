@@ -39,13 +39,17 @@ from PySide6.QtWidgets import (
 from iidm_viewer.component_creation import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
+    CREATABLE_CONTAINERS,
     LOCATOR_FIELDS,
     branch_side_locator_fields,
     coerce_field_values,
     create_branch_bay,
     create_component_bay,
+    create_container,
     list_busbar_sections,
     list_node_breaker_voltage_levels,
+    list_substations_df,
+    next_free_node,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy
 
@@ -560,6 +564,251 @@ class CreateBranchPanel(QWidget):
         values["bus_or_busbar_section_id_2"] = bbs2
         try:
             create_branch_bay(self._network, self._component, values)
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        created_id = str(values.get("id", ""))
+        self._status.setText(f"Created {self._component.rstrip('s')} {created_id!r}.")
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit(self._component, created_id)
+
+
+# ---------------------------------------------------------------------------
+# Container creation panel (Substations / Voltage Levels / Busbar Sections)
+# ---------------------------------------------------------------------------
+class CreateContainerPanel(QWidget):
+    """Generic creation form for any component in :data:`CREATABLE_CONTAINERS`.
+
+    Each container type has a different "context" picker on top:
+
+    * **Substations**         — no picker (top-level).
+    * **Voltage Levels**      — optional substation picker.
+    * **Busbar Sections**     — required node-breaker VL picker; the
+      ``node`` field default updates to ``next_free_node(network, vl)``.
+
+    Below the picker comes the registry-driven field grid + Create
+    button + status label.
+    """
+
+    component_created = Signal(str, str)  # (component, element_id)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+        self._field_widgets: dict[str, QWidget] = {}
+
+        self._group = QGroupBox("Create a new container")
+        self._group.setCheckable(True)
+        self._group.setChecked(True)
+        self._group.toggled.connect(self._on_toggled)
+
+        # Context picker — visible only when the component needs one.
+        self._context_lbl = QLabel("")
+        self._context_combo = QComboBox()
+        self._context_combo.setMinimumWidth(240)
+        self._context_combo.currentIndexChanged.connect(self._on_context_changed)
+        picker_row = QHBoxLayout()
+        picker_row.addWidget(self._context_lbl)
+        picker_row.addWidget(self._context_combo)
+        picker_row.addStretch(1)
+        self._picker_widget = QWidget()
+        self._picker_widget.setLayout(picker_row)
+        self._picker_widget.setVisible(False)
+
+        # Field grid — repopulated on every set_component.
+        self._fields_grid = QGridLayout()
+        self._fields_grid.setSpacing(6)
+        self._fields_widget = QWidget()
+        self._fields_widget.setLayout(self._fields_grid)
+
+        self._create_btn = QPushButton("Create")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self._create_btn)
+        action_row.addWidget(self._status, 1)
+
+        inner = QVBoxLayout()
+        inner.setContentsMargins(6, 2, 6, 6)
+        inner.setSpacing(6)
+        inner.addWidget(self._picker_widget)
+        inner.addWidget(self._fields_widget)
+        inner.addLayout(action_row)
+        self._group.setLayout(inner)
+        self._fields_widget.setVisible(True)
+        self.setVisible(False)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._rebuild_for_current_component()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._group.setTitle(
+            f"Create a new {component.lower().rstrip('s')}"
+            if component else "Create a new container"
+        )
+        self._rebuild_for_current_component()
+        self._status.setText("")
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._fields_widget.setVisible(checked)
+        self._picker_widget.setVisible(checked and self._picker_lbl_text() is not None)
+
+    def _picker_lbl_text(self) -> Optional[str]:
+        if self._component == "Voltage Levels":
+            return "Substation (optional):"
+        if self._component == "Busbar Sections":
+            return "Voltage level:"
+        return None
+
+    def _rebuild_for_current_component(self) -> None:
+        applicable = (
+            self._network is not None
+            and self._component in CREATABLE_CONTAINERS
+        )
+        self.setVisible(applicable)
+        if not applicable:
+            return
+        self._populate_context_combo()
+        self._rebuild_field_widgets()
+
+    def _populate_context_combo(self) -> None:
+        self._context_combo.blockSignals(True)
+        self._context_combo.clear()
+        text = self._picker_lbl_text()
+        if text is None:
+            self._context_lbl.setText("")
+            self._picker_widget.setVisible(False)
+            self._context_combo.blockSignals(False)
+            return
+        self._context_lbl.setText(text)
+        self._picker_widget.setVisible(True)
+        if self._component == "Voltage Levels":
+            # Optional — first entry is "(no substation)".
+            self._context_combo.addItem("(none — no substation)", userData=None)
+            try:
+                subs = list_substations_df(self._network)
+            except Exception:
+                subs = None
+            if subs is not None and not subs.empty:
+                for _, row in subs.iterrows():
+                    self._context_combo.addItem(
+                        str(row["display"]), userData=str(row["id"]),
+                    )
+            self._create_btn.setEnabled(True)
+        elif self._component == "Busbar Sections":
+            try:
+                vls = list_node_breaker_voltage_levels(self._network)
+            except Exception:
+                vls = None
+            if vls is None or vls.empty:
+                self._context_combo.addItem("(no node-breaker VLs)", userData=None)
+                self._context_combo.setEnabled(False)
+                self._create_btn.setEnabled(False)
+            else:
+                self._context_combo.setEnabled(True)
+                self._create_btn.setEnabled(True)
+                for _, row in vls.iterrows():
+                    label = f"{row['display']} ({row['nominal_v']:.0f} kV)"
+                    self._context_combo.addItem(label, userData=str(row["id"]))
+        self._context_combo.blockSignals(False)
+
+    def _on_context_changed(self, _idx: int) -> None:
+        # For Busbar Sections, update the ``node`` default to the next
+        # free node in the chosen VL.
+        if self._component != "Busbar Sections":
+            return
+        vl_id = self._context_combo.currentData()
+        if not vl_id or self._network is None:
+            return
+        try:
+            suggested = next_free_node(self._network, str(vl_id))
+        except Exception:
+            return
+        node_w = self._field_widgets.get("node")
+        if isinstance(node_w, QSpinBox):
+            node_w.setValue(int(suggested))
+
+    def _rebuild_field_widgets(self) -> None:
+        for w in self._field_widgets.values():
+            w.setParent(None)
+        self._field_widgets.clear()
+        while self._fields_grid.count():
+            item = self._fields_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+        if self._component not in CREATABLE_CONTAINERS:
+            return
+        spec = CREATABLE_CONTAINERS[self._component]
+        fields = list(spec["fields"])
+        # For Busbar Sections, prefill the ``node`` widget with the
+        # next-free-node for the currently-picked VL.
+        suggested_node: Optional[int] = None
+        if self._component == "Busbar Sections":
+            vl_id = self._context_combo.currentData()
+            if vl_id and self._network is not None:
+                try:
+                    suggested_node = next_free_node(self._network, str(vl_id))
+                except Exception:
+                    suggested_node = None
+
+        for i, f in enumerate(fields):
+            row, col = divmod(i, 3)
+            widget_label = f["label"] + (" *" if f.get("required") else "")
+            label = QLabel(widget_label)
+            if f.get("help"):
+                label.setToolTip(f["help"])
+            field_spec = f
+            if f["name"] == "node" and suggested_node is not None:
+                field_spec = {**f, "default": suggested_node}
+            widget = make_field_widget(field_spec)
+            cell = QWidget()
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(2)
+            cell_layout.addWidget(label)
+            cell_layout.addWidget(widget)
+            self._fields_grid.addWidget(cell, row, col)
+            self._field_widgets[f["name"]] = widget
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component not in CREATABLE_CONTAINERS:
+            return
+        spec = CREATABLE_CONTAINERS[self._component]
+        raw = {f["name"]: read_field_widget(f, self._field_widgets[f["name"]])
+               for f in spec["fields"] if f["name"] in self._field_widgets}
+        values = coerce_field_values(spec["fields"], raw)
+        # Inject the context from the picker.
+        if self._component == "Voltage Levels":
+            sub_id = self._context_combo.currentData()
+            if sub_id:
+                values["substation_id"] = str(sub_id)
+        elif self._component == "Busbar Sections":
+            vl_id = self._context_combo.currentData()
+            if not vl_id:
+                self._status.setText("Pick a voltage level first.")
+                self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+                return
+            values["voltage_level_id"] = str(vl_id)
+
+        try:
+            create_container(self._network, self._component, values)
         except Exception as exc:
             self._status.setText(f"Create failed — {exc}")
             self._status.setStyleSheet("color: #b30000; padding: 0 6px;")

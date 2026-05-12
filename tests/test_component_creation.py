@@ -6,16 +6,22 @@ import pytest
 from iidm_viewer.component_creation import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
+    CREATABLE_CONTAINERS,
     LOCATOR_FIELDS,
+    TOPOLOGY_KINDS,
     _SHUNT_LINEAR_FIELDS,
     _VALIDATORS,
     branch_side_locator_fields,
     coerce_field_values,
     create_branch_bay,
     create_component_bay,
+    create_container,
     list_busbar_sections,
     list_node_breaker_voltage_levels,
+    list_substations_df,
+    next_free_node,
     validate_create_branch_fields,
+    validate_create_container_fields,
     validate_create_fields,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy, run
@@ -298,3 +304,129 @@ def test_create_line_end_to_end(node_breaker_network):
 def test_create_branch_rejects_unknown(node_breaker_network):
     with pytest.raises(ValueError, match="not a creatable branch"):
         create_branch_bay(node_breaker_network, "Tie Lines", {"id": "X"})
+
+
+# ---------------------------------------------------------------------------
+# Containers
+# ---------------------------------------------------------------------------
+def test_creatable_containers_carries_three_types():
+    assert set(CREATABLE_CONTAINERS) == {
+        "Substations", "Voltage Levels", "Busbar Sections",
+    }
+    assert CREATABLE_CONTAINERS["Substations"]["create_function"] == "create_substations"
+    assert CREATABLE_CONTAINERS["Voltage Levels"]["create_function"] == "create_voltage_levels"
+    assert CREATABLE_CONTAINERS["Busbar Sections"]["create_function"] == "create_busbar_sections"
+
+
+def test_topology_kinds_includes_node_and_bus_breaker():
+    assert TOPOLOGY_KINDS == ["NODE_BREAKER", "BUS_BREAKER"]
+
+
+def test_voltage_level_validator_registered_in_shared_dict():
+    """The container validator hook is added to the shared _VALIDATORS
+    on module import — Streamlit relied on this side-effect."""
+    assert "_validate_voltage_level" in _VALIDATORS
+
+
+def test_creatable_containers_re_exported_from_streamlit_state():
+    pytest.importorskip("streamlit")
+    from iidm_viewer.state import CREATABLE_CONTAINERS as ST
+    assert ST is CREATABLE_CONTAINERS
+
+
+def test_validate_container_fields_flags_required():
+    errors = validate_create_container_fields("Substations", {})
+    assert any("ID" in e for e in errors)
+
+
+def test_validate_container_fields_vl_voltage_limits_rule():
+    fields = {
+        "id": "VL_NEW", "name": "",
+        "topology_kind": "NODE_BREAKER", "nominal_v": 400.0,
+        "low_voltage_limit": 420.0, "high_voltage_limit": 380.0,
+    }
+    errors = validate_create_container_fields("Voltage Levels", fields)
+    assert any("high_voltage_limit" in e and "low_voltage_limit" in e for e in errors)
+
+
+def test_validate_container_fields_busbar_requires_vl():
+    fields = {"id": "BBS_NEW", "node": 0}
+    errors = validate_create_container_fields("Busbar Sections", fields)
+    assert any("Voltage level is required" in e for e in errors)
+
+
+def test_validate_container_fields_rejects_unknown():
+    errors = validate_create_container_fields("Mystery", {"id": "X"})
+    assert errors and "not a creatable container" in errors[0]
+
+
+def test_list_substations_df_returns_id_and_display(node_breaker_network):
+    df = list_substations_df(node_breaker_network)
+    assert df.shape[0] > 0
+    assert set(df.columns) == {"id", "display"}
+
+
+def test_next_free_node_returns_max_plus_one(node_breaker_network):
+    """``next_free_node`` must return a non-negative integer; for a
+    populated VL it's higher than zero."""
+    vls = list_node_breaker_voltage_levels(node_breaker_network)
+    vl_id = str(vls["id"].iloc[0])
+    n = next_free_node(node_breaker_network, vl_id)
+    assert isinstance(n, int)
+    assert n >= 0
+
+
+def test_create_substation_end_to_end():
+    """A blank network → create a Substation → confirm it shows up."""
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_empty(network_id="x")
+    network = NetworkProxy(run(_make))
+    create_container(network, "Substations", {
+        "id": "SUB_NEW", "name": "New Sub", "country": "FR", "TSO": "RTE",
+    })
+    subs = network.get_substations()
+    assert "SUB_NEW" in subs.index
+
+
+def test_create_voltage_level_with_substation_end_to_end():
+    """Substation first, then a VL attached to it."""
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_empty(network_id="x")
+    network = NetworkProxy(run(_make))
+    create_container(network, "Substations", {"id": "S1"})
+    create_container(network, "Voltage Levels", {
+        "id": "VL_NEW", "name": "", "topology_kind": "NODE_BREAKER",
+        "nominal_v": 400.0, "low_voltage_limit": 0.0, "high_voltage_limit": 0.0,
+        "substation_id": "S1",
+    })
+    vls = network.get_voltage_levels()
+    assert "VL_NEW" in vls.index
+    assert str(vls.at["VL_NEW", "substation_id"]) == "S1"
+
+
+def test_create_voltage_level_drops_zero_voltage_limits():
+    """``low_voltage_limit=0`` / ``high_voltage_limit=0`` are sentinels
+    meaning "unset" — they must not be sent to pypowsybl as 0.0."""
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_empty(network_id="x")
+    network = NetworkProxy(run(_make))
+    create_container(network, "Substations", {"id": "S2"})
+    create_container(network, "Voltage Levels", {
+        "id": "VL_NOLIMITS", "topology_kind": "NODE_BREAKER",
+        "nominal_v": 225.0, "low_voltage_limit": 0.0, "high_voltage_limit": 0.0,
+        "substation_id": "S2",
+    })
+    df = network.get_voltage_levels(all_attributes=True)
+    row = df.loc["VL_NOLIMITS"]
+    # pypowsybl reports NaN when limits weren't set.
+    import math
+    assert math.isnan(row.get("low_voltage_limit", float("nan")))
+    assert math.isnan(row.get("high_voltage_limit", float("nan")))
+
+
+def test_create_container_rejects_unknown(node_breaker_network):
+    with pytest.raises(ValueError, match="not a creatable container"):
+        create_container(node_breaker_network, "Mystery", {"id": "X"})

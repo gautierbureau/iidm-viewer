@@ -67,13 +67,17 @@ from iidm_viewer.component_registry import (
 from iidm_viewer.component_creation import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
+    CREATABLE_CONTAINERS,
     LOCATOR_FIELDS,
     branch_side_locator_fields,
     coerce_field_values,
     create_branch_bay,
     create_component_bay,
+    create_container,
     list_busbar_sections,
     list_node_breaker_voltage_levels,
+    list_substations_df,
+    next_free_node,
 )
 from iidm_viewer.data_view import (
     FILTERS,
@@ -828,6 +832,215 @@ def _refresh_create_branch_panel(state: dict, component: str) -> None:
     expansion.visible = True
 
 
+def _build_create_container_panel_widgets(state: dict, refresh_after_create) -> None:
+    """Materialise the "Create a new container" expansion.
+
+    Substations / Voltage Levels / Busbar Sections share this panel.
+    The "context" picker on top varies:
+
+    * Substations         — no picker (top-level objects).
+    * Voltage Levels      — optional substation picker.
+    * Busbar Sections     — required node-breaker VL picker; the
+      ``node`` default updates to ``next_free_node`` when the picker
+      changes.
+    """
+    expansion = ui.expansion("Create a new container", icon="apartment").classes("w-full")
+    expansion.visible = False
+    state["expansion"] = expansion
+    with expansion:
+        picker_row = ui.row().classes("items-center w-full q-pa-sm")
+        with picker_row:
+            context_label = ui.label("")
+            context_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-64")
+        picker_row.visible = False
+        fields_container = ui.row().classes("items-start w-full q-pa-sm flex-wrap")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            create_btn = ui.button("Create", icon="add_circle")
+            status_label = ui.label("").classes("text-caption q-ml-md")
+
+    state["picker_row"] = picker_row
+    state["context_select"] = context_select
+    state["context_label"] = context_label
+    state["fields_container"] = fields_container
+    state["status_label"] = status_label
+    state["create_btn"] = create_btn
+    state["field_widgets"] = {}
+
+    def _on_context_change(_e=None) -> None:
+        # For Busbar Sections, refresh the ``node`` default to the next
+        # free node in the freshly-picked VL.
+        if state.get("current_component") != "Busbar Sections":
+            return
+        vl_id = context_select.value
+        if not vl_id or _state.network is None:
+            return
+        try:
+            suggested = next_free_node(_state.network, str(vl_id))
+        except Exception:
+            return
+        node_w = state["field_widgets"].get("node")
+        if node_w is not None:
+            node_w.value = int(suggested)
+            node_w.update()
+
+    context_select.on_value_change(_on_context_change)
+
+    def _on_create_click() -> None:
+        component = state.get("current_component")
+        if not component or component not in CREATABLE_CONTAINERS or _state.network is None:
+            return
+        spec = CREATABLE_CONTAINERS[component]
+        raw = {f["name"]: _read_create_widget(state, f) for f in spec["fields"]}
+        values = coerce_field_values(spec["fields"], raw)
+        # Inject context from the picker.
+        if component == "Voltage Levels":
+            sub_id = context_select.value
+            if sub_id:
+                values["substation_id"] = str(sub_id)
+        elif component == "Busbar Sections":
+            vl_id = context_select.value
+            if not vl_id:
+                status_label.set_text("Pick a voltage level first.")
+                return
+            values["voltage_level_id"] = str(vl_id)
+        try:
+            create_container(_state.network, component, values)
+        except Exception as exc:
+            status_label.set_text(f"Create failed — {exc}")
+            ui.notify(f"Create failed: {exc}", type="negative")
+            return
+        created_id = str(values.get("id") or "")
+        status_label.set_text(f"Created {component.rstrip('s')} {created_id!r}.")
+        ui.notify(f"Created {component.rstrip('s')} {created_id!r}",
+                  type="positive", timeout=1500)
+        # Topology changed (or geography for substations) -> flush diagram caches.
+        _nad_cache.clear()
+        _sld_cache.clear()
+        if _state.selected_vl:
+            _push_sld(_state.selected_vl)
+            _push_nad(_state.selected_vl, _nad_depth)
+        refresh_after_create()
+
+    create_btn.on_click(_on_create_click)
+
+
+def _refresh_create_container_panel(state: dict, component: str) -> None:
+    """Repopulate the container-creation panel for ``component``.
+
+    Hides the whole expansion when the component isn't a creatable
+    container.
+    """
+    expansion = state.get("expansion")
+    if expansion is None:
+        return
+    state["current_component"] = component
+    if component not in CREATABLE_CONTAINERS or _state.network is None:
+        expansion.visible = False
+        return
+
+    # Configure the context picker per component.
+    picker_row = state["picker_row"]
+    sel = state["context_select"]
+    label = state["context_label"]
+    if component == "Substations":
+        picker_row.visible = False
+    elif component == "Voltage Levels":
+        label.set_text("Substation (optional):")
+        try:
+            subs = list_substations_df(_state.network)
+        except Exception:
+            subs = None
+        options = {"": "(none — no substation)"}
+        if subs is not None and not subs.empty:
+            for _, row in subs.iterrows():
+                options[str(row["id"])] = str(row["display"])
+        sel.options = options
+        sel.value = ""
+        sel.update()
+        picker_row.visible = True
+    elif component == "Busbar Sections":
+        label.set_text("Voltage level:")
+        try:
+            vls = list_node_breaker_voltage_levels(_state.network)
+        except Exception:
+            vls = None
+        if vls is None or vls.empty:
+            sel.options = {}
+            sel.value = None
+            sel.update()
+            picker_row.visible = True
+            ui.notify(
+                "No node-breaker VLs — Busbar Sections can't be created.",
+                type="info", timeout=2000,
+            )
+        else:
+            options = {
+                str(row["id"]): f"{row['display']} ({row['nominal_v']:.0f} kV)"
+                for _, row in vls.iterrows()
+            }
+            sel.options = options
+            sel.value = next(iter(options))
+            sel.update()
+            picker_row.visible = True
+
+    # Rebuild the field widgets.
+    container = state["fields_container"]
+    container.clear()
+    state["field_widgets"] = {}
+    spec = CREATABLE_CONTAINERS[component]
+    fields = list(spec["fields"])
+    suggested_node: Optional[int] = None
+    if component == "Busbar Sections" and sel.value:
+        try:
+            suggested_node = next_free_node(_state.network, str(sel.value))
+        except Exception:
+            suggested_node = None
+    with container:
+        for f in fields:
+            label_text = f["label"] + (" *" if f.get("required") else "")
+            help_text = f.get("help") or ""
+            with ui.column().classes("q-mr-md q-mb-md"):
+                ui.label(label_text).classes("text-caption")
+                kind = f["kind"]
+                default = f.get("default")
+                if f["name"] == "node" and suggested_node is not None:
+                    default = suggested_node
+                if kind == "text":
+                    w = ui.input(value=str(default or "")) \
+                        .props("dense outlined")
+                elif kind == "float":
+                    w = ui.number(
+                        value=float(default or 0.0),
+                        min=f.get("min_value"),
+                        format="%.6f",
+                    ).props("dense outlined")
+                elif kind == "int":
+                    w = ui.number(
+                        value=int(default or 0),
+                        min=f.get("min_value"),
+                        step=int(f.get("step", 1)),
+                        format="%d",
+                    ).props("dense outlined")
+                elif kind == "bool":
+                    w = ui.switch(value=bool(default))
+                elif kind == "select":
+                    options_list = list(f.get("options", []))
+                    w = ui.select(
+                        options=options_list,
+                        value=default if default in options_list else (options_list[0] if options_list else None),
+                    ).props("dense outlined").classes("w-40")
+                else:
+                    continue
+                if help_text:
+                    w.tooltip(help_text)
+                state["field_widgets"][f["name"]] = w
+
+    state["status_label"].set_text("")
+    expansion.text = f"Create a new {component.lower().rstrip('s')}"
+    expansion.visible = True
+
+
 def _build_data_explorer():
     """Materialise the Data Explorer panel and return a refresh closure.
 
@@ -873,6 +1086,17 @@ def _build_data_explorer():
     }
     _build_create_branch_panel_widgets(
         branch_create_state, refresh_after_create=lambda: refresh(),
+    )
+
+    container_create_state = {
+        "context_select": None,
+        "context_label": None,
+        "field_widgets": {},
+        "status_label": None,
+        "expansion": None,
+    }
+    _build_create_container_panel_widgets(
+        container_create_state, refresh_after_create=lambda: refresh(),
     )
 
     grid = ui.aggrid({
@@ -977,9 +1201,10 @@ def _build_data_explorer():
         bulk_attr.value = cols[0] if cols else None
         bulk_attr.update()
         # Refresh the create panels; each one auto-hides for the wrong
-        # category (injections vs. branches).
+        # category (injections / branches / containers).
         _refresh_create_panel(create_state, label)
         _refresh_create_branch_panel(branch_create_state, label)
+        _refresh_create_container_panel(container_create_state, label)
         is_disconnectable = label in DISCONNECTABLE_COMPONENTS
         is_removable = label in REMOVABLE_COMPONENTS
         bulk_row.set_visibility(bool(cols) or is_disconnectable or is_removable)
