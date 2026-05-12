@@ -706,3 +706,105 @@ def create_container(
         getattr(raw, spec["create_function"])(df)
 
     run(_do_create)
+
+
+# ---------------------------------------------------------------------------
+# HVDC lines (between two existing converter stations)
+# ---------------------------------------------------------------------------
+CONVERTERS_MODES = [
+    "SIDE_1_RECTIFIER_SIDE_2_INVERTER",
+    "SIDE_1_INVERTER_SIDE_2_RECTIFIER",
+]
+
+
+# HVDC lines are created directly via ``raw.create_hvdc_lines`` — no _bay
+# helper. The two endpoints are *existing* VSC / LCC converter stations.
+CREATABLE_HVDC_LINES: dict = {
+    "create_function": "create_hvdc_lines",
+    "fields": [
+        {"name": "id", "label": "ID", "kind": "text", "required": True, "default": ""},
+        {"name": "name", "label": "Name", "kind": "text", "required": False, "default": ""},
+        {"name": "r", "label": "r (Ω)", "kind": "float", "required": True, "default": 1.0},
+        {"name": "nominal_v", "label": "nominal_v (kV)", "kind": "float",
+         "required": True, "default": 400.0},
+        {"name": "max_p", "label": "max_p (MW)", "kind": "float",
+         "required": True, "default": 1000.0, "min_value": 0.0},
+        {"name": "target_p", "label": "target_p (MW)", "kind": "float",
+         "required": True, "default": 0.0},
+        {"name": "converters_mode", "label": "Converters mode", "kind": "select",
+         "required": True, "default": CONVERTERS_MODES[0],
+         "options": CONVERTERS_MODES},
+    ],
+}
+
+
+def list_converter_stations(network: NetworkProxy) -> list[tuple[str, str]]:
+    """Return ``[(id, kind)]`` for every VSC + LCC converter station in the network.
+
+    Used by the HVDC creation form to populate the two endpoint pickers.
+    """
+    stations: list[tuple[str, str]] = []
+    try:
+        for sid in network.get_vsc_converter_stations().index.tolist():
+            stations.append((sid, "VSC"))
+    except Exception:
+        pass
+    try:
+        for sid in network.get_lcc_converter_stations().index.tolist():
+            stations.append((sid, "LCC"))
+    except Exception:
+        pass
+    return sorted(stations)
+
+
+def validate_create_hvdc_line_fields(fields: dict) -> list[str]:
+    """Required fields + distinct endpoints + ``|target_p| <= max_p``.
+
+    Anything pypowsybl-specific (e.g. a station already attached to
+    another HVDC line) surfaces at the create call rather than here.
+    """
+    errors: list[str] = []
+    for f in CREATABLE_HVDC_LINES["fields"]:
+        if f["required"] and (
+            fields.get(f["name"]) is None or fields.get(f["name"]) == ""
+        ):
+            errors.append(f"{f['label']} is required.")
+    if not fields.get("converter_station1_id"):
+        errors.append("Converter station 1 is required.")
+    if not fields.get("converter_station2_id"):
+        errors.append("Converter station 2 is required.")
+    if (
+        fields.get("converter_station1_id")
+        and fields.get("converter_station2_id")
+        and fields["converter_station1_id"] == fields["converter_station2_id"]
+    ):
+        errors.append("The two converter stations must differ.")
+    if (
+        fields.get("target_p") is not None
+        and fields.get("max_p") is not None
+        and abs(fields["target_p"]) > fields["max_p"]
+    ):
+        errors.append("|target_p| must be <= max_p.")
+    return errors
+
+
+def create_hvdc_line(network: NetworkProxy, fields: dict) -> None:
+    """Create an HVDC line between two existing converter stations.
+
+    Validates the endpoints + electrical attributes; then dispatches
+    ``raw.create_hvdc_lines`` on the worker thread. The two stations
+    must already exist and must not already be wired to another HVDC
+    line — pypowsybl raises if either condition fails.
+    """
+    errors = validate_create_hvdc_line_fields(fields)
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    row = {k: v for k, v in fields.items() if v is not None and v != ""}
+    df = pd.DataFrame([row]).set_index("id")
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_create():
+        raw.create_hvdc_lines(df)
+
+    run(_do_create)

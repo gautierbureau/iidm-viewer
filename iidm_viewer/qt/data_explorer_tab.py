@@ -58,6 +58,7 @@ from iidm_viewer.qt.create_panel import (
     CreateBranchPanel,
     CreateComponentPanel,
     CreateContainerPanel,
+    CreateHvdcLinePanel,
 )
 from iidm_viewer.component_registry import (
     COMPONENT_TYPES,
@@ -395,6 +396,8 @@ class DataExplorerTab(QWidget):
         self._create_branch_panel.component_created.connect(self._on_component_created)
         self._create_container_panel = CreateContainerPanel()
         self._create_container_panel.component_created.connect(self._on_component_created)
+        self._create_hvdc_panel = CreateHvdcLinePanel()
+        self._create_hvdc_panel.component_created.connect(self._on_component_created)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -403,6 +406,7 @@ class DataExplorerTab(QWidget):
         layout.addWidget(self._create_panel)
         layout.addWidget(self._create_branch_panel)
         layout.addWidget(self._create_container_panel)
+        layout.addWidget(self._create_hvdc_panel)
         layout.addWidget(self._filters_panel)
         layout.addWidget(self._summary)
         layout.addWidget(self._table, 1)
@@ -421,6 +425,8 @@ class DataExplorerTab(QWidget):
         self._create_branch_panel.set_component(self._combo.currentText())
         self._create_container_panel.set_network(network)
         self._create_container_panel.set_component(self._combo.currentText())
+        self._create_hvdc_panel.set_network(network)
+        self._create_hvdc_panel.set_component(self._combo.currentText())
         if network is None:
             self._model.set_dataframe(pd.DataFrame(), editable_cols=[])
             self._summary.setText("No network loaded.")
@@ -461,6 +467,7 @@ class DataExplorerTab(QWidget):
         self._create_panel.set_component(label)
         self._create_branch_panel.set_component(label)
         self._create_container_panel.set_component(label)
+        self._create_hvdc_panel.set_component(label)
         self._refresh(label)
         # Rebuild the structured-filter widgets *after* refresh so the
         # widget specs come from the freshly-loaded frame.
