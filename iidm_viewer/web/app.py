@@ -68,13 +68,16 @@ from iidm_viewer.component_creation import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
     CREATABLE_CONTAINERS,
+    CREATABLE_HVDC_LINES,
     LOCATOR_FIELDS,
     branch_side_locator_fields,
     coerce_field_values,
     create_branch_bay,
     create_component_bay,
     create_container,
+    create_hvdc_line,
     list_busbar_sections,
+    list_converter_stations,
     list_node_breaker_voltage_levels,
     list_substations_df,
     next_free_node,
@@ -1041,6 +1044,146 @@ def _refresh_create_container_panel(state: dict, component: str) -> None:
     expansion.visible = True
 
 
+def _build_create_hvdc_panel_widgets(state: dict, refresh_after_create) -> None:
+    """Materialise the "Create a new HVDC line" expansion.
+
+    Two converter-station pickers + the electrical fields from
+    :data:`CREATABLE_HVDC_LINES`. Auto-hides when the active
+    component isn't "HVDC Lines" or the network has fewer than two
+    converter stations.
+    """
+    expansion = ui.expansion("Create a new HVDC line", icon="bolt").classes("w-full")
+    expansion.visible = False
+    state["expansion"] = expansion
+    with expansion:
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            ui.label("Converter station 1:")
+            cs1 = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-64")
+            ui.label("Converter station 2:")
+            cs2 = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-64")
+        fields_container = ui.row().classes("items-start w-full q-pa-sm flex-wrap")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            create_btn = ui.button("Create", icon="add_circle")
+            status_label = ui.label("").classes("text-caption q-ml-md")
+
+    state["cs1_select"] = cs1
+    state["cs2_select"] = cs2
+    state["fields_container"] = fields_container
+    state["status_label"] = status_label
+    state["create_btn"] = create_btn
+    state["field_widgets"] = {}
+
+    def _on_create_click() -> None:
+        if _state.network is None or state.get("current_component") != "HVDC Lines":
+            return
+        if not cs1.value or not cs2.value:
+            status_label.set_text("Pick both converter stations first.")
+            return
+        spec = CREATABLE_HVDC_LINES
+        raw = {f["name"]: _read_create_widget(state, f) for f in spec["fields"]}
+        values = coerce_field_values(spec["fields"], raw)
+        values["converter_station1_id"] = str(cs1.value)
+        values["converter_station2_id"] = str(cs2.value)
+        try:
+            create_hvdc_line(_state.network, values)
+        except Exception as exc:
+            status_label.set_text(f"Create failed — {exc}")
+            ui.notify(f"Create failed: {exc}", type="negative")
+            return
+        created_id = str(values.get("id") or "")
+        status_label.set_text(f"Created HVDC line {created_id!r}.")
+        ui.notify(f"Created HVDC line {created_id!r}",
+                  type="positive", timeout=1500)
+        # HVDC creation also touches the two converter stations on
+        # both sides — flush diagram caches.
+        _nad_cache.clear()
+        _sld_cache.clear()
+        if _state.selected_vl:
+            _push_sld(_state.selected_vl)
+            _push_nad(_state.selected_vl, _nad_depth)
+        refresh_after_create()
+
+    create_btn.on_click(_on_create_click)
+
+
+def _refresh_create_hvdc_panel(state: dict, component: str) -> None:
+    """Repopulate the HVDC creation panel for ``component``.
+
+    Hides the expansion when the active component isn't "HVDC Lines"
+    or the network has fewer than two converter stations.
+    """
+    expansion = state.get("expansion")
+    if expansion is None:
+        return
+    state["current_component"] = component
+    if component != "HVDC Lines" or _state.network is None:
+        expansion.visible = False
+        return
+
+    try:
+        stations = list_converter_stations(_state.network)
+    except Exception:
+        stations = []
+    if len(stations) < 2:
+        expansion.visible = False
+        return
+
+    options = {sid: f"{sid} ({kind})" for sid, kind in stations}
+    items = list(options.keys())
+    state["cs1_select"].options = options
+    state["cs1_select"].value = items[0]
+    state["cs1_select"].update()
+    state["cs2_select"].options = options
+    state["cs2_select"].value = items[1] if len(items) > 1 else items[0]
+    state["cs2_select"].update()
+
+    container = state["fields_container"]
+    container.clear()
+    state["field_widgets"] = {}
+    with container:
+        for f in CREATABLE_HVDC_LINES["fields"]:
+            label_text = f["label"] + (" *" if f.get("required") else "")
+            help_text = f.get("help") or ""
+            with ui.column().classes("q-mr-md q-mb-md"):
+                ui.label(label_text).classes("text-caption")
+                kind = f["kind"]
+                default = f.get("default")
+                if kind == "text":
+                    w = ui.input(value=str(default or "")) \
+                        .props("dense outlined")
+                elif kind == "float":
+                    w = ui.number(
+                        value=float(default or 0.0),
+                        min=f.get("min_value"),
+                        format="%.6f",
+                    ).props("dense outlined")
+                elif kind == "int":
+                    w = ui.number(
+                        value=int(default or 0),
+                        min=f.get("min_value"),
+                        step=int(f.get("step", 1)),
+                        format="%d",
+                    ).props("dense outlined")
+                elif kind == "bool":
+                    w = ui.switch(value=bool(default))
+                elif kind == "select":
+                    options_list = list(f.get("options", []))
+                    w = ui.select(
+                        options=options_list,
+                        value=default if default in options_list else (options_list[0] if options_list else None),
+                    ).props("dense outlined").classes("w-56")
+                else:
+                    continue
+                if help_text:
+                    w.tooltip(help_text)
+                state["field_widgets"][f["name"]] = w
+
+    state["status_label"].set_text("")
+    expansion.visible = True
+
+
 def _build_data_explorer():
     """Materialise the Data Explorer panel and return a refresh closure.
 
@@ -1097,6 +1240,16 @@ def _build_data_explorer():
     }
     _build_create_container_panel_widgets(
         container_create_state, refresh_after_create=lambda: refresh(),
+    )
+
+    hvdc_create_state = {
+        "cs1_select": None, "cs2_select": None,
+        "field_widgets": {},
+        "status_label": None,
+        "expansion": None,
+    }
+    _build_create_hvdc_panel_widgets(
+        hvdc_create_state, refresh_after_create=lambda: refresh(),
     )
 
     grid = ui.aggrid({
@@ -1201,10 +1354,11 @@ def _build_data_explorer():
         bulk_attr.value = cols[0] if cols else None
         bulk_attr.update()
         # Refresh the create panels; each one auto-hides for the wrong
-        # category (injections / branches / containers).
+        # category (injections / branches / containers / HVDC).
         _refresh_create_panel(create_state, label)
         _refresh_create_branch_panel(branch_create_state, label)
         _refresh_create_container_panel(container_create_state, label)
+        _refresh_create_hvdc_panel(hvdc_create_state, label)
         is_disconnectable = label in DISCONNECTABLE_COMPONENTS
         is_removable = label in REMOVABLE_COMPONENTS
         bulk_row.set_visibility(bool(cols) or is_disconnectable or is_removable)

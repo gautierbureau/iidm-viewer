@@ -932,6 +932,99 @@ def test_branch_panel_hides_for_non_branch_component(qapp):
     assert panel.isVisible() is True
 
 
+def test_hvdc_panel_hides_when_no_converter_stations(qapp):
+    """The HVDC panel auto-hides when fewer than 2 converter stations exist."""
+    from iidm_viewer.qt.create_panel import CreateHvdcLinePanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_empty(network_id="x")
+
+    network = NetworkProxy(run(_make))
+    panel = CreateHvdcLinePanel()
+    panel.set_network(network)
+    panel.set_component("HVDC Lines")
+    qapp.processEvents()
+    assert panel.isVisible() is False
+
+
+def test_hvdc_panel_creates_line_between_two_vsc_stations(qapp):
+    """End-to-end HVDC creation via the Qt CreateHvdcLinePanel."""
+    from iidm_viewer.qt.create_panel import CreateHvdcLinePanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        n = pn.create_empty(network_id="x")
+        n.create_substations(id="S1")
+        n.create_voltage_levels(id="VL1", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=400.0)
+        n.create_voltage_levels(id="VL2", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=400.0)
+        n.create_busbar_sections(id="BBS1", voltage_level_id="VL1", node=0)
+        n.create_busbar_sections(id="BBS2", voltage_level_id="VL2", node=0)
+        n.create_vsc_converter_stations(
+            id="VSC_A", voltage_level_id="VL1", node=1,
+            loss_factor=0.01, voltage_regulator_on=False, target_q=0.0,
+        )
+        n.create_vsc_converter_stations(
+            id="VSC_B", voltage_level_id="VL2", node=1,
+            loss_factor=0.01, voltage_regulator_on=False, target_q=0.0,
+        )
+        return n
+
+    network = NetworkProxy(run(_make))
+    panel = CreateHvdcLinePanel()
+    panel.set_network(network)
+    panel.set_component("HVDC Lines")
+    qapp.processEvents()
+    assert panel.isVisible() is True
+    # Pickers populated with both VSC stations.
+    assert panel._cs1.count() == 2
+    assert panel._cs2.count() == 2
+    panel._cs1.setCurrentIndex(0)
+    panel._cs2.setCurrentIndex(1)
+
+    panel._field_widgets["id"].setText("HVDC_QT")
+    seen: list = []
+    panel.component_created.connect(lambda c, eid: seen.append((c, eid)))
+    panel._on_create_clicked()
+    qapp.processEvents()
+
+    assert "HVDC_QT" in network.get_hvdc_lines().index
+    assert seen == [("HVDC Lines", "HVDC_QT")]
+
+
+def test_hvdc_panel_hides_for_non_hvdc_component(qapp):
+    """The HVDC panel only renders for the HVDC Lines component."""
+    from iidm_viewer.qt.create_panel import CreateHvdcLinePanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateHvdcLinePanel()
+    panel.set_network(network)
+    panel.set_component("Generators")
+    qapp.processEvents()
+    assert panel.isVisible() is False
+    panel.set_component("HVDC Lines")
+    qapp.processEvents()
+    assert panel.isVisible() is True
+
+
 def test_change_log_panel_repaints_on_record(qapp, loaded_window):
     """The panel's title and table reflect log mutations in real time
     via the on_changed bus.

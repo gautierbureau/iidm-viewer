@@ -716,95 +716,22 @@ def create_coupling_device(
 
 
 # --- HVDC lines (attach to two existing converter stations) ---
-
-CONVERTERS_MODES = [
-    "SIDE_1_RECTIFIER_SIDE_2_INVERTER",
-    "SIDE_1_INVERTER_SIDE_2_RECTIFIER",
-]
-
-# HVDC lines are created directly via network.create_hvdc_lines — no _bay.
-# The two endpoints are *existing* VSC/LCC converter stations (not busbars).
-CREATABLE_HVDC_LINES: dict = {
-    "create_function": "create_hvdc_lines",
-    "fields": [
-        {"name": "id", "label": "ID", "kind": "text", "required": True, "default": ""},
-        {"name": "name", "label": "Name", "kind": "text", "required": False, "default": ""},
-        {"name": "r", "label": "r (Ω)", "kind": "float", "required": True, "default": 1.0},
-        {"name": "nominal_v", "label": "nominal_v (kV)", "kind": "float",
-         "required": True, "default": 400.0},
-        {"name": "max_p", "label": "max_p (MW)", "kind": "float",
-         "required": True, "default": 1000.0, "min_value": 0.0},
-        {"name": "target_p", "label": "target_p (MW)", "kind": "float",
-         "required": True, "default": 0.0},
-        {"name": "converters_mode", "label": "Converters mode", "kind": "select",
-         "required": True, "default": CONVERTERS_MODES[0],
-         "options": CONVERTERS_MODES},
-    ],
-}
-
-
-def list_converter_stations(network):
-    """Return ``[(id, kind)]`` for every VSC and LCC converter station."""
-    stations: list[tuple[str, str]] = []
-    try:
-        for sid in network.get_vsc_converter_stations().index.tolist():
-            stations.append((sid, "VSC"))
-    except Exception:
-        pass
-    try:
-        for sid in network.get_lcc_converter_stations().index.tolist():
-            stations.append((sid, "LCC"))
-    except Exception:
-        pass
-    return sorted(stations)
-
-
-def validate_create_hvdc_line_fields(fields: dict) -> list[str]:
-    """Required fields + distinct endpoints; all other checks go to pypowsybl."""
-    errors = []
-    for f in CREATABLE_HVDC_LINES["fields"]:
-        if f["required"] and (fields.get(f["name"]) is None
-                               or fields.get(f["name"]) == ""):
-            errors.append(f"{f['label']} is required.")
-    if not fields.get("converter_station1_id"):
-        errors.append("Converter station 1 is required.")
-    if not fields.get("converter_station2_id"):
-        errors.append("Converter station 2 is required.")
-    if (
-        fields.get("converter_station1_id")
-        and fields.get("converter_station2_id")
-        and fields["converter_station1_id"] == fields["converter_station2_id"]
-    ):
-        errors.append("The two converter stations must differ.")
-    if (
-        fields.get("target_p") is not None
-        and fields.get("max_p") is not None
-        and abs(fields["target_p"]) > fields["max_p"]
-    ):
-        errors.append("|target_p| must be <= max_p.")
-    return errors
+#
+# The registry, the converter-station lister, the validator and the
+# worker-routed creator live in ``iidm_viewer.component_creation`` so
+# the PySide6 and NiceGUI prototypes share them.
+from iidm_viewer.component_creation import (  # noqa: E402, F401  (re-exported)
+    CONVERTERS_MODES,
+    CREATABLE_HVDC_LINES,
+    list_converter_stations,
+    validate_create_hvdc_line_fields,
+)
 
 
 def create_hvdc_line(network, fields: dict):
-    """Create an HVDC line between two existing converter stations.
-
-    Validates the endpoints and electrical attributes on the main thread,
-    then dispatches ``network.create_hvdc_lines`` via the worker. The two
-    stations must already exist and must not already be connected to an
-    HVDC line.
-    """
-    errors = validate_create_hvdc_line_fields(fields)
-    if errors:
-        raise ValueError("; ".join(errors))
-
-    row = {k: v for k, v in fields.items() if v is not None and v != ""}
-    df = pd.DataFrame([row]).set_index("id")
-    raw = object.__getattribute__(network, "_obj")
-
-    def _do_create():
-        raw.create_hvdc_lines(df)
-
-    run(_do_create)
+    """Streamlit wrapper around the shared dispatcher; adds cache invalidation."""
+    from iidm_viewer.component_creation import create_hvdc_line as _shared
+    _shared(network, fields)
     invalidate_on_topology_change(affects_geography=True)
     script_recorder.record_create_hvdc_line(fields)
 

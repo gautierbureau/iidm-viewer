@@ -40,13 +40,16 @@ from iidm_viewer.component_creation import (
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
     CREATABLE_CONTAINERS,
+    CREATABLE_HVDC_LINES,
     LOCATOR_FIELDS,
     branch_side_locator_fields,
     coerce_field_values,
     create_branch_bay,
     create_component_bay,
     create_container,
+    create_hvdc_line,
     list_busbar_sections,
+    list_converter_stations,
     list_node_breaker_voltage_levels,
     list_substations_df,
     next_free_node,
@@ -817,3 +820,183 @@ class CreateContainerPanel(QWidget):
         self._status.setText(f"Created {self._component.rstrip('s')} {created_id!r}.")
         self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
         self.component_created.emit(self._component, created_id)
+
+
+# ---------------------------------------------------------------------------
+# HVDC line creation panel
+# ---------------------------------------------------------------------------
+class CreateHvdcLinePanel(QWidget):
+    """Form to create an HVDC line between two existing converter stations.
+
+    Layout:
+
+    * Two station pickers (Converter station 1, Converter station 2),
+      defaulting to the first and second stations so the user can't
+      accidentally pick the same one on both sides.
+    * Electrical fields (id, name, r, nominal_v, max_p, target_p,
+      converters_mode) from :data:`CREATABLE_HVDC_LINES`.
+    * Create button + status label.
+
+    Auto-hides when the active component isn't "HVDC Lines" or the
+    network has fewer than two converter stations (pypowsybl requires
+    both endpoints to already exist).
+    """
+
+    component_created = Signal(str, str)  # ("HVDC Lines", element_id)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+        self._field_widgets: dict[str, QWidget] = {}
+
+        self._group = QGroupBox("Create a new HVDC line")
+        self._group.setCheckable(True)
+        self._group.setChecked(True)
+        self._group.toggled.connect(self._on_toggled)
+
+        # Station pickers — labelled with both the id and the kind so
+        # the user can spot VSC vs. LCC at a glance.
+        self._cs1 = QComboBox(); self._cs1.setMinimumWidth(240)
+        self._cs2 = QComboBox(); self._cs2.setMinimumWidth(240)
+        pickers = QHBoxLayout()
+        pickers.addWidget(QLabel("Converter station 1:"))
+        pickers.addWidget(self._cs1)
+        pickers.addSpacing(12)
+        pickers.addWidget(QLabel("Converter station 2:"))
+        pickers.addWidget(self._cs2)
+        pickers.addStretch(1)
+
+        self._fields_grid = QGridLayout()
+        self._fields_grid.setSpacing(6)
+        self._fields_widget = QWidget()
+        self._fields_widget.setLayout(self._fields_grid)
+
+        self._create_btn = QPushButton("Create")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self._create_btn)
+        action_row.addWidget(self._status, 1)
+
+        inner = QVBoxLayout()
+        inner.setContentsMargins(6, 2, 6, 6)
+        inner.setSpacing(6)
+        inner.addLayout(pickers)
+        inner.addWidget(self._fields_widget)
+        inner.addLayout(action_row)
+        self._group.setLayout(inner)
+        self._fields_widget.setVisible(True)
+        self.setVisible(False)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._refresh_for_current()
+        self._status.setText("")
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._fields_widget.setVisible(checked)
+
+    def _refresh_for_current(self) -> None:
+        applicable = (
+            self._network is not None
+            and self._component == "HVDC Lines"
+        )
+        if not applicable:
+            self.setVisible(False)
+            return
+
+        try:
+            stations = list_converter_stations(self._network)
+        except Exception:
+            stations = []
+        if len(stations) < 2:
+            # pypowsybl needs at least two existing stations.
+            self.setVisible(False)
+            return
+
+        self.setVisible(True)
+        self._cs1.blockSignals(True)
+        self._cs2.blockSignals(True)
+        self._cs1.clear()
+        self._cs2.clear()
+        for sid, kind in stations:
+            label = f"{sid} ({kind})"
+            self._cs1.addItem(label, userData=sid)
+            self._cs2.addItem(label, userData=sid)
+        # Pre-select the second station on side 2.
+        if self._cs2.count() > 1:
+            self._cs2.setCurrentIndex(1)
+        self._cs1.blockSignals(False)
+        self._cs2.blockSignals(False)
+
+        self._rebuild_field_widgets()
+
+    def _rebuild_field_widgets(self) -> None:
+        for w in self._field_widgets.values():
+            w.setParent(None)
+        self._field_widgets.clear()
+        while self._fields_grid.count():
+            item = self._fields_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+        for i, f in enumerate(CREATABLE_HVDC_LINES["fields"]):
+            row, col = divmod(i, 3)
+            widget_label = f["label"] + (" *" if f.get("required") else "")
+            label = QLabel(widget_label)
+            if f.get("help"):
+                label.setToolTip(f["help"])
+            widget = make_field_widget(f)
+            cell = QWidget()
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(2)
+            cell_layout.addWidget(label)
+            cell_layout.addWidget(widget)
+            self._fields_grid.addWidget(cell, row, col)
+            self._field_widgets[f["name"]] = widget
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component != "HVDC Lines":
+            return
+        cs1 = self._cs1.currentData()
+        cs2 = self._cs2.currentData()
+        if not cs1 or not cs2:
+            self._status.setText("Pick both converter stations first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        raw = {
+            f["name"]: read_field_widget(f, self._field_widgets[f["name"]])
+            for f in CREATABLE_HVDC_LINES["fields"]
+            if f["name"] in self._field_widgets
+        }
+        values = coerce_field_values(CREATABLE_HVDC_LINES["fields"], raw)
+        values["converter_station1_id"] = str(cs1)
+        values["converter_station2_id"] = str(cs2)
+        try:
+            create_hvdc_line(self._network, values)
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        created_id = str(values.get("id", ""))
+        self._status.setText(f"Created HVDC line {created_id!r}.")
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit("HVDC Lines", created_id)

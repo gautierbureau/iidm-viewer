@@ -4,9 +4,11 @@ from __future__ import annotations
 import pytest
 
 from iidm_viewer.component_creation import (
+    CONVERTERS_MODES,
     CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
     CREATABLE_CONTAINERS,
+    CREATABLE_HVDC_LINES,
     LOCATOR_FIELDS,
     TOPOLOGY_KINDS,
     _SHUNT_LINEAR_FIELDS,
@@ -16,13 +18,16 @@ from iidm_viewer.component_creation import (
     create_branch_bay,
     create_component_bay,
     create_container,
+    create_hvdc_line,
     list_busbar_sections,
+    list_converter_stations,
     list_node_breaker_voltage_levels,
     list_substations_df,
     next_free_node,
     validate_create_branch_fields,
     validate_create_container_fields,
     validate_create_fields,
+    validate_create_hvdc_line_fields,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy, run
 
@@ -430,3 +435,117 @@ def test_create_voltage_level_drops_zero_voltage_limits():
 def test_create_container_rejects_unknown(node_breaker_network):
     with pytest.raises(ValueError, match="not a creatable container"):
         create_container(node_breaker_network, "Mystery", {"id": "X"})
+
+
+# ---------------------------------------------------------------------------
+# HVDC lines
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def vsc_only_network() -> NetworkProxy:
+    """Fresh network with two unwired VSC stations ready for an HVDC line."""
+    def _make():
+        import pypowsybl.network as pn
+        n = pn.create_empty(network_id="x")
+        n.create_substations(id="S1")
+        n.create_voltage_levels(id="VL1", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=400.0)
+        n.create_voltage_levels(id="VL2", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=400.0)
+        n.create_busbar_sections(id="BBS1", voltage_level_id="VL1", node=0)
+        n.create_busbar_sections(id="BBS2", voltage_level_id="VL2", node=0)
+        n.create_vsc_converter_stations(
+            id="VSC_A", voltage_level_id="VL1", node=1,
+            loss_factor=0.01, voltage_regulator_on=False, target_q=0.0,
+        )
+        n.create_vsc_converter_stations(
+            id="VSC_B", voltage_level_id="VL2", node=1,
+            loss_factor=0.01, voltage_regulator_on=False, target_q=0.0,
+        )
+        return n
+
+    return NetworkProxy(run(_make))
+
+
+def test_creatable_hvdc_lines_registry_shape():
+    names = {f["name"] for f in CREATABLE_HVDC_LINES["fields"]}
+    assert {"id", "r", "nominal_v", "max_p", "target_p", "converters_mode"} <= names
+    assert CREATABLE_HVDC_LINES["create_function"] == "create_hvdc_lines"
+
+
+def test_converters_modes_constant():
+    assert "SIDE_1_RECTIFIER_SIDE_2_INVERTER" in CONVERTERS_MODES
+    assert "SIDE_1_INVERTER_SIDE_2_RECTIFIER" in CONVERTERS_MODES
+
+
+def test_creatable_hvdc_re_exported_from_streamlit_state():
+    pytest.importorskip("streamlit")
+    from iidm_viewer.state import (
+        CREATABLE_HVDC_LINES as ST_HVDC,
+        CONVERTERS_MODES as ST_MODES,
+    )
+    assert ST_HVDC is CREATABLE_HVDC_LINES
+    assert ST_MODES is CONVERTERS_MODES
+
+
+def test_validate_create_hvdc_line_fields_flags_required():
+    errors = validate_create_hvdc_line_fields({})
+    assert any("ID" in e for e in errors)
+    assert any("Converter station 1" in e for e in errors)
+    assert any("Converter station 2" in e for e in errors)
+
+
+def test_validate_create_hvdc_line_fields_rejects_same_station():
+    errors = validate_create_hvdc_line_fields({
+        "id": "H", "r": 1.0, "nominal_v": 400.0, "max_p": 1000.0,
+        "target_p": 0.0, "converters_mode": CONVERTERS_MODES[0],
+        "converter_station1_id": "VSC_A", "converter_station2_id": "VSC_A",
+    })
+    assert any("must differ" in e for e in errors)
+
+
+def test_validate_create_hvdc_line_fields_enforces_target_within_max():
+    errors = validate_create_hvdc_line_fields({
+        "id": "H", "r": 1.0, "nominal_v": 400.0, "max_p": 100.0,
+        "target_p": 200.0, "converters_mode": CONVERTERS_MODES[0],
+        "converter_station1_id": "A", "converter_station2_id": "B",
+    })
+    assert any("target_p" in e for e in errors)
+
+
+def test_validate_create_hvdc_line_fields_accepts_valid_payload():
+    assert validate_create_hvdc_line_fields({
+        "id": "H", "r": 1.0, "nominal_v": 400.0, "max_p": 1000.0,
+        "target_p": 50.0, "converters_mode": CONVERTERS_MODES[0],
+        "converter_station1_id": "A", "converter_station2_id": "B",
+    }) == []
+
+
+def test_list_converter_stations_includes_vsc_and_lcc(node_breaker_network):
+    stations = list_converter_stations(node_breaker_network)
+    ids = {sid for sid, _ in stations}
+    kinds = {kind for _, kind in stations}
+    # The 4-sub demo carries 2 VSC + 2 LCC stations.
+    assert {"VSC1", "VSC2", "LCC1", "LCC2"} <= ids
+    assert {"VSC", "LCC"} <= kinds
+
+
+def test_create_hvdc_line_end_to_end(vsc_only_network):
+    create_hvdc_line(vsc_only_network, {
+        "id": "HVDC_NEW", "r": 1.0, "nominal_v": 400.0,
+        "max_p": 1000.0, "target_p": 50.0,
+        "converters_mode": CONVERTERS_MODES[0],
+        "converter_station1_id": "VSC_A",
+        "converter_station2_id": "VSC_B",
+    })
+    assert "HVDC_NEW" in vsc_only_network.get_hvdc_lines().index
+
+
+def test_create_hvdc_line_raises_on_invalid(vsc_only_network):
+    with pytest.raises(ValueError, match="must differ"):
+        create_hvdc_line(vsc_only_network, {
+            "id": "H", "r": 1.0, "nominal_v": 400.0,
+            "max_p": 1000.0, "target_p": 0.0,
+            "converters_mode": CONVERTERS_MODES[0],
+            "converter_station1_id": "VSC_A",
+            "converter_station2_id": "VSC_A",
+        })
