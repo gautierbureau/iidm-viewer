@@ -13,6 +13,7 @@ from typing import Optional
 
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -38,7 +39,10 @@ from iidm_viewer.qt.state import AppState
 
 
 class _Sidebar(QWidget):
-    def __init__(self, on_load, on_run_loadflow, on_vl_selected, on_view_logs, parent=None) -> None:
+    def __init__(
+        self, on_load, on_run_loadflow, on_vl_selected, on_view_logs,
+        on_lf_parameters, parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setFixedWidth(240)
         self.setStyleSheet("background: #f6f6f6;")
@@ -67,9 +71,19 @@ class _Sidebar(QWidget):
         self._vl_combo.setEnabled(False)
         self._vl_combo.currentIndexChanged.connect(self._on_vl_combo_changed)
 
+        # "Run AC Load Flow" + a gear button that opens the
+        # LFParametersDialog, mirroring Streamlit's sidebar pair.
         self._run_lf_btn = QPushButton("Run AC Load Flow")
         self._run_lf_btn.clicked.connect(on_run_loadflow)
         self._run_lf_btn.setEnabled(False)
+        self._lf_params_btn = QPushButton("⚙")
+        self._lf_params_btn.setToolTip("Load Flow Parameters")
+        self._lf_params_btn.setFixedWidth(32)
+        self._lf_params_btn.clicked.connect(on_lf_parameters)
+        lf_row = QHBoxLayout()
+        lf_row.setSpacing(4)
+        lf_row.addWidget(self._run_lf_btn, 1)
+        lf_row.addWidget(self._lf_params_btn)
         self._lf_status = QLabel("")
         self._lf_status.setWordWrap(True)
         self._lf_status.setStyleSheet("padding: 4px 10px; font-size: 11px;")
@@ -88,7 +102,7 @@ class _Sidebar(QWidget):
         layout.addWidget(vl_filter_lbl)
         layout.addWidget(self._vl_filter)
         layout.addWidget(self._vl_combo)
-        layout.addWidget(self._run_lf_btn)
+        layout.addLayout(lf_row)
         layout.addWidget(self._lf_status)
         layout.addWidget(self._view_logs_btn)
         layout.addStretch(1)
@@ -212,6 +226,7 @@ class MainWindow(QMainWindow):
             self._on_run_loadflow_clicked,
             self._on_sidebar_vl_selected,
             self._on_view_logs_clicked,
+            self._on_lf_parameters_clicked,
         )
 
         central = QWidget()
@@ -294,6 +309,24 @@ class MainWindow(QMainWindow):
         from iidm_viewer.qt.lf_report_dialog import LFReportDialog
         dlg = LFReportDialog(report_json, self)
         dlg.exec()
+
+    def _on_lf_parameters_clicked(self) -> None:
+        """Open the LFParametersDialog and persist the result onto AppState.
+
+        The dialog reads / writes the same dicts that
+        ``AppState.run_loadflow`` forwards to pypowsybl, so a subsequent
+        "Run AC Load Flow" click uses the new overrides automatically.
+        """
+        from iidm_viewer.qt.lf_parameters_dialog import LFParametersDialog
+        dlg = LFParametersDialog(
+            generic_overrides=self.state.lf_generic_params,
+            provider_overrides=self.state.lf_provider_params,
+            parent=self,
+        )
+        if dlg.exec() == QDialog.Accepted:
+            self.state.lf_generic_params = dlg.generic_params
+            self.state.lf_provider_params = dlg.provider_params
+            self.statusBar().showMessage("Load Flow parameters updated.")
 
     def _on_loadflow_completed(self, result) -> None:
         """Refresh peripheral views once the flow returns.

@@ -38,6 +38,11 @@ class AppState(QObject):
         # "View Logs" button can open the dialog without re-running
         # the load flow. Cleared on every new network load.
         self._last_report_json: Optional[str] = None
+        # Persisted LF parameter overrides — set by the LFParametersDialog
+        # and forwarded by :meth:`run_loadflow`. Empty dicts mean
+        # "use pypowsybl's defaults" and are the initial state.
+        self.lf_generic_params: dict = {}
+        self.lf_provider_params: dict = {}
         # One ChangeLog per process. Reset on every network reload so
         # entries don't leak between unrelated networks.
         self.change_log = ChangeLog()
@@ -94,6 +99,12 @@ class AppState(QObject):
         """
         if self._network is None:
             return None
+        # Fall back to the AppState-cached parameters (set by the
+        # "LF Parameters" dialog) when the caller doesn't override.
+        if generic_params is None:
+            generic_params = self.lf_generic_params or None
+        if provider_params is None:
+            provider_params = self.lf_provider_params or None
         result = run_ac(self._network, generic_params, provider_params)
         self._last_report_json = getattr(result, "report_json", None)
         self.loadflow_completed.emit(result)

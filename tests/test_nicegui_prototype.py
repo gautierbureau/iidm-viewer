@@ -552,6 +552,51 @@ def test_view_logs_dialog_helper_uses_shared_parser_and_gates_empty_input():
     assert "_rebuild_tree" in src
 
 
+def test_lf_parameters_dialog_uses_shared_helpers():
+    """``_open_lf_parameters_dialog`` must funnel everything through
+    the shared :mod:`iidm_viewer.lf_parameters_schema` helpers so
+    parsing / coercion / filtering stays in one place."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._open_lf_parameters_dialog)
+    for token in (
+        "GENERIC_PARAMETERS",
+        "group_provider_params_by_category",
+        "parse_provider_options",
+        "coerce_provider_value",
+        "filter_changed_generic_params",
+        "filter_changed_provider_params",
+    ):
+        assert token in src, f"NiceGUI LF params dialog should reference {token}"
+
+
+def test_app_state_caches_lf_params_and_forwards_to_run_loadflow(monkeypatch):
+    """``AppState.run_loadflow`` should pick up ``lf_generic_params`` /
+    ``lf_provider_params`` when the caller doesn't pass them."""
+    import pypowsybl.network as pn
+    from iidm_viewer import loadflow as lf_mod
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.web.state import AppState
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    state.lf_generic_params = {"distributed_slack": False}
+    state.lf_provider_params = {"slackBusSelectionMode": "FIRST"}
+
+    captured: dict = {}
+
+    def fake_run_ac(net, generic, provider):
+        captured["generic"] = generic
+        captured["provider"] = provider
+        return lf_mod.LoadFlowResult([], "{}")
+
+    monkeypatch.setattr("iidm_viewer.web.state.run_ac", fake_run_ac)
+    state.run_loadflow()
+    assert captured["generic"] == {"distributed_slack": False}
+    assert captured["provider"] == {"slackBusSelectionMode": "FIRST"}
+
+
 def test_shared_vl_selector_helpers():
     """``network_loader`` exposes the framework-agnostic VL listing +
     filter helpers used by Streamlit's ``vl_selector`` and the

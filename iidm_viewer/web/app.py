@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from nicegui import app, ui
 
@@ -146,10 +146,21 @@ from iidm_viewer.diagram_services import (
     generate_nad as _generate_nad,
     generate_sld as _generate_sld,
 )
+from iidm_viewer.lf_parameters_schema import (
+    coerce_provider_value,
+    filter_changed_generic_params,
+    filter_changed_provider_params,
+    group_provider_params_by_category,
+    parse_provider_options,
+)
 from iidm_viewer.lf_report import (
     SEVERITY_LEVELS,
     SEVERITY_ORDER,
     parse_report_to_tree,
+)
+from iidm_viewer.loadflow import (
+    GENERIC_PARAMETERS,
+    get_provider_parameters_df,
 )
 
 
@@ -472,6 +483,148 @@ def _open_lf_report_dialog(report_json: Optional[str]) -> None:
 
         with ui.row().classes("full-width justify-end q-mt-md"):
             ui.button("Close", on_click=dialog.close).props("flat")
+
+    dialog.open()
+
+
+def _open_lf_parameters_dialog(on_save) -> None:
+    """Open the "Load Flow Parameters" modal.
+
+    Two tabs: **Generic** (from the shared
+    :data:`GENERIC_PARAMETERS` schema) and **OpenLoadFlow** (from
+    pypowsybl's ``get_provider_parameters()`` descriptor). On Save the
+    trimmed-to-changed dicts are passed to ``on_save(generic_dict,
+    provider_dict)`` — the host then writes them onto AppState so the
+    next ``run_loadflow`` picks them up.
+    """
+    generic_overrides = dict(_state.lf_generic_params or {})
+    provider_overrides = dict(_state.lf_provider_params or {})
+
+    try:
+        provider_df = get_provider_parameters_df()
+    except Exception:
+        provider_df = None
+
+    generic_widgets: dict[str, Any] = {}
+    provider_widgets: dict[str, tuple[str, Any]] = {}
+
+    with ui.dialog() as dialog, ui.card().style(
+        "min-width: 720px; max-width: 95vw; max-height: 90vh",
+    ):
+        ui.label("Load Flow Parameters").classes("text-h6")
+        with ui.tabs().classes("w-full") as param_tabs:
+            generic_tab = ui.tab("Generic Parameters")
+            provider_tab = ui.tab("OpenLoadFlow Parameters")
+        with ui.tab_panels(param_tabs, value=generic_tab) \
+                .classes("w-full").style("max-height: 60vh; overflow: auto"):
+            with ui.tab_panel(generic_tab):
+                for param_def in GENERIC_PARAMETERS:
+                    name, ptype, default, desc = (
+                        param_def[0], param_def[1], param_def[2], param_def[3],
+                    )
+                    current = generic_overrides.get(name, default)
+                    with ui.row().classes("items-center w-full"):
+                        ui.label(desc).classes("w-1/2 text-caption")
+                        if ptype == "bool":
+                            w = ui.switch(value=bool(current))
+                        elif ptype == "enum":
+                            options = list(param_def[4])
+                            w = ui.select(
+                                options=options,
+                                value=str(current) if str(current) in options else options[0],
+                            ).props("dense outlined").classes("w-1/2")
+                        elif ptype == "float":
+                            try:
+                                cur_float = float(current)
+                            except (TypeError, ValueError):
+                                cur_float = float(default)
+                            w = ui.number(value=cur_float, format="%g") \
+                                .props("dense outlined").classes("w-1/2")
+                        else:
+                            w = ui.input(value=str(current)) \
+                                .props("dense outlined").classes("w-1/2")
+                        generic_widgets[name] = (ptype, w)
+
+            with ui.tab_panel(provider_tab):
+                if provider_df is None or provider_df.empty:
+                    ui.label("Provider parameters unavailable.") \
+                        .classes("text-caption")
+                else:
+                    for category, rows in group_provider_params_by_category(provider_df):
+                        with ui.expansion(category).classes("w-full"):
+                            for name, row in rows.iterrows():
+                                ptype = row["type"]
+                                default = row["default"]
+                                desc = row.get("description", "")
+                                current = provider_overrides.get(name, default)
+                                with ui.row().classes("items-center w-full"):
+                                    lbl = ui.label(name).classes("w-1/3 text-caption")
+                                    if desc:
+                                        lbl.tooltip(desc)
+                                    if ptype == "BOOLEAN":
+                                        w = ui.switch(
+                                            value=coerce_provider_value(
+                                                ptype, current, default,
+                                            ),
+                                        )
+                                    elif ptype == "INTEGER":
+                                        w = ui.number(
+                                            value=coerce_provider_value(
+                                                ptype, current, default,
+                                            ),
+                                            step=1, format="%d",
+                                        ).props("dense outlined").classes("w-1/2")
+                                    elif ptype == "DOUBLE":
+                                        w = ui.number(
+                                            value=coerce_provider_value(
+                                                ptype, current, default,
+                                            ),
+                                            format="%g",
+                                        ).props("dense outlined").classes("w-1/2")
+                                    elif ptype == "STRING":
+                                        options = parse_provider_options(
+                                            row.get("possible_values"),
+                                        )
+                                        if options:
+                                            value = (
+                                                str(current) if str(current) in options
+                                                else options[0]
+                                            )
+                                            w = ui.select(
+                                                options=options, value=value,
+                                            ).props("dense outlined").classes("w-1/2")
+                                        else:
+                                            w = ui.input(
+                                                value="" if current is None
+                                                else str(current),
+                                            ).props("dense outlined").classes("w-1/2")
+                                    else:
+                                        w = ui.input(
+                                            value="" if current is None
+                                            else str(current),
+                                        ).props("dense outlined").classes("w-1/2")
+                                    if desc:
+                                        w.tooltip(desc)
+                                    provider_widgets[name] = (ptype, w)
+
+        with ui.row().classes("w-full justify-end q-mt-md"):
+            ui.button("Cancel", on_click=dialog.close).props("flat")
+
+            def _on_save_click() -> None:
+                generic_raw = {
+                    name: w.value for name, (_pt, w) in generic_widgets.items()
+                }
+                generic = filter_changed_generic_params(generic_raw)
+                provider_raw = {
+                    name: coerce_provider_value(ptype, w.value)
+                    for name, (ptype, w) in provider_widgets.items()
+                }
+                provider = filter_changed_provider_params(provider_raw, provider_df)
+                on_save(generic, provider)
+                ui.notify("Load Flow parameters updated.", type="positive", timeout=1500)
+                dialog.close()
+
+            ui.button("Save", on_click=_on_save_click).props("color=primary")
 
     dialog.open()
 
@@ -2922,9 +3075,23 @@ def main_page() -> None:
 
         # AC load-flow trigger — disabled until a network is loaded;
         # status appears below it via ui.notify when the run returns.
-        run_lf_btn = ui.button("Run AC Load Flow").props("flat dense") \
-            .classes("full-width")
-        run_lf_btn.set_enabled(False)
+        # "Run AC Load Flow" + a gear button that opens the LF
+        # parameters dialog, mirroring Streamlit's sidebar pair.
+        with ui.row().classes("full-width items-center no-wrap"):
+            run_lf_btn = ui.button("Run AC Load Flow").props("flat dense") \
+                .classes("col-grow")
+            run_lf_btn.set_enabled(False)
+            lf_params_btn = ui.button(icon="settings").props("flat dense round") \
+                .tooltip("Load Flow Parameters")
+
+        def _on_lf_params_save(generic: dict, provider: dict) -> None:
+            _state.lf_generic_params = generic
+            _state.lf_provider_params = provider
+
+        lf_params_btn.on_click(
+            lambda: _open_lf_parameters_dialog(_on_lf_params_save),
+        )
+
         lf_status_lbl = ui.label("").classes("text-caption q-mt-sm")
         # "View Logs" opens a modal with the parsed report_json tree.
         # Disabled until a LF has produced a non-empty report.
