@@ -61,13 +61,29 @@ class AppState:
     # Mutators
     # ------------------------------------------------------------------
     def load_network_from_path(self, path: str) -> NetworkProxy:
-        """Load a network and auto-select the highest-nominal-V VL.
+        """Load a network and apply it. Convenience for synchronous callers
+        (startup, tests). NiceGUI's upload handler should instead pull the
+        loader call into ``asyncio.to_thread`` and finish with
+        :meth:`install_network` so the listener callbacks run on the
+        event-loop thread (where NiceGUI's slot stack is populated).
 
-        Delegates to :mod:`iidm_viewer.network_loader` for both the
-        load itself and the "highest nominal V" default-VL pick so
-        the Streamlit, PySide6 and NiceGUI hosts share one code path.
+        Delegates to :mod:`iidm_viewer.network_loader` for both the load
+        itself and the "highest nominal V" default-VL pick so the
+        Streamlit, PySide6 and NiceGUI hosts share one code path.
         """
         network = network_loader.load_from_path(path)
+        self.install_network(network)
+        return network
+
+    def install_network(self, network: NetworkProxy) -> None:
+        """Apply a pre-loaded network and broadcast listeners.
+
+        Split from :meth:`load_network_from_path` so the heavy load can
+        happen on a worker thread (``asyncio.to_thread``) while listener
+        callbacks still fire on the caller's thread — required for
+        NiceGUI, where UI mutations need the page slot stack to be
+        populated by the event loop.
+        """
         default_vl = network_loader.pick_default_vl(network)
         self._network = network
         self._selected_vl = None
@@ -76,7 +92,6 @@ class AppState:
             listener(network)
         if default_vl:
             self.set_selected_vl(default_vl)
-        return network
 
     def set_selected_vl(self, vl_id: Optional[str]) -> None:
         new = vl_id or None
