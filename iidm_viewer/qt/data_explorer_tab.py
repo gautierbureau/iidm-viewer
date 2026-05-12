@@ -60,6 +60,7 @@ from iidm_viewer.qt.create_panel import (
     CreateContainerPanel,
     CreateCouplingDevicePanel,
     CreateHvdcLinePanel,
+    CreateReactiveLimitsPanel,
     CreateTapChangerPanel,
 )
 from iidm_viewer.component_registry import (
@@ -404,6 +405,8 @@ class DataExplorerTab(QWidget):
         self._create_tap_changer_panel.component_created.connect(self._on_component_created)
         self._create_coupling_panel = CreateCouplingDevicePanel()
         self._create_coupling_panel.component_created.connect(self._on_component_created)
+        self._create_reactive_limits_panel = CreateReactiveLimitsPanel()
+        self._create_reactive_limits_panel.component_created.connect(self._on_component_created)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -415,6 +418,7 @@ class DataExplorerTab(QWidget):
         layout.addWidget(self._create_hvdc_panel)
         layout.addWidget(self._create_tap_changer_panel)
         layout.addWidget(self._create_coupling_panel)
+        layout.addWidget(self._create_reactive_limits_panel)
         layout.addWidget(self._filters_panel)
         layout.addWidget(self._summary)
         layout.addWidget(self._table, 1)
@@ -439,6 +443,8 @@ class DataExplorerTab(QWidget):
         self._create_tap_changer_panel.set_component(self._combo.currentText())
         self._create_coupling_panel.set_network(network)
         self._create_coupling_panel.set_component(self._combo.currentText())
+        self._create_reactive_limits_panel.set_network(network)
+        self._create_reactive_limits_panel.set_component(self._combo.currentText())
         if network is None:
             self._model.set_dataframe(pd.DataFrame(), editable_cols=[])
             self._summary.setText("No network loaded.")
@@ -482,6 +488,7 @@ class DataExplorerTab(QWidget):
         self._create_hvdc_panel.set_component(label)
         self._create_tap_changer_panel.set_component(label)
         self._create_coupling_panel.set_component(label)
+        self._create_reactive_limits_panel.set_component(label)
         self._refresh(label)
         # Rebuild the structured-filter widgets *after* refresh so the
         # widget specs come from the freshly-loaded frame.

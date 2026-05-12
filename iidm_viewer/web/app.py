@@ -71,6 +71,8 @@ from iidm_viewer.component_creation import (
     CREATABLE_HVDC_LINES,
     CREATABLE_TAP_CHANGERS,
     LOCATOR_FIELDS,
+    REACTIVE_LIMITS_MODES,
+    REACTIVE_LIMITS_TARGETS,
     branch_side_locator_fields,
     coerce_field_values,
     create_branch_bay,
@@ -78,11 +80,13 @@ from iidm_viewer.component_creation import (
     create_container,
     create_coupling_device,
     create_hvdc_line,
+    create_reactive_limits,
     create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
     list_node_breaker_vls_with_multi_bbs,
+    list_reactive_limit_candidates,
     list_substations_df,
     list_transformers_without_tap_changer,
     next_free_node,
@@ -1508,6 +1512,186 @@ def _refresh_create_coupling_device_panel(state: dict, component: str) -> None:
     expansion.visible = True
 
 
+def _build_create_reactive_limits_panel_widgets(
+    state: dict, refresh_after_create,
+) -> None:
+    """Materialise the "Attach reactive limits" expansion.
+
+    A target picker (Generator / Battery / VSC), a mode toggle (min/max
+    or curve), and the editable inputs for the chosen mode. Auto-hides
+    when the active component isn't in :data:`REACTIVE_LIMITS_TARGETS`
+    or no candidate element exists.
+    """
+    expansion = ui.expansion("Attach reactive limits", icon="show_chart") \
+        .classes("w-full")
+    expansion.visible = False
+    state["expansion"] = expansion
+    with expansion:
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            ui.label("Target:")
+            target_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-64")
+            ui.label("Mode:")
+            mode_select = ui.select(
+                options={"minmax": "min/max", "curve": "curve"},
+                value="minmax",
+            ).props("dense outlined").classes("w-40")
+
+        minmax_row = ui.row().classes("items-center w-full q-pa-sm")
+        with minmax_row:
+            ui.label("min_q (MVar):")
+            min_q_input = ui.number(value=-100.0, format="%.3f") \
+                .props("dense outlined").classes("w-40")
+            ui.label("max_q (MVar):")
+            max_q_input = ui.number(value=100.0, format="%.3f") \
+                .props("dense outlined").classes("w-40")
+
+        curve_container = ui.column().classes("w-full q-pa-sm")
+        with curve_container:
+            with ui.row().classes("items-center"):
+                ui.label("Number of points:")
+                point_count = ui.number(value=2, min=2, max=50, step=1, format="%d") \
+                    .props("dense outlined").classes("w-24")
+            points_container = ui.column().classes("w-full")
+
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            create_btn = ui.button("Save reactive limits", icon="save")
+            status_label = ui.label("").classes("text-caption q-ml-md")
+
+    state["target_select"] = target_select
+    state["mode_select"] = mode_select
+    state["minmax_row"] = minmax_row
+    state["min_q_input"] = min_q_input
+    state["max_q_input"] = max_q_input
+    state["curve_container"] = curve_container
+    state["point_count"] = point_count
+    state["points_container"] = points_container
+    state["status_label"] = status_label
+    state["create_btn"] = create_btn
+    state["point_widgets"] = []  # list[dict[col -> ui.number]]
+
+    def _seed_curve_defaults() -> list[tuple[float, float, float]]:
+        return [(0.0, -100.0, 100.0), (100.0, -80.0, 80.0)]
+
+    def _rebuild_points() -> None:
+        n = int(state["point_count"].value or 2)
+        if n < 2:
+            n = 2
+        defaults = _seed_curve_defaults()
+        # Linearly extrapolate beyond the 2 seeded rows.
+        def _row_default(r: int) -> tuple[float, float, float]:
+            if r < len(defaults):
+                return defaults[r]
+            last_p, last_mn, last_mx = defaults[-1]
+            return (last_p + 100.0 * (r - len(defaults) + 1), last_mn, last_mx)
+
+        state["points_container"].clear()
+        state["point_widgets"] = []
+        with state["points_container"]:
+            with ui.row().classes("items-center text-caption"):
+                ui.label("point").classes("w-12")
+                for col in ("p", "min_q", "max_q"):
+                    ui.label(col).classes("w-24 text-center")
+            for r in range(n):
+                p_d, mn_d, mx_d = _row_default(r)
+                with ui.row().classes("items-center"):
+                    ui.label(str(r)).classes("w-12 text-caption")
+                    p_w = ui.number(value=p_d, format="%.4f") \
+                        .props("dense outlined").classes("w-24")
+                    mn_w = ui.number(value=mn_d, format="%.4f") \
+                        .props("dense outlined").classes("w-24")
+                    mx_w = ui.number(value=mx_d, format="%.4f") \
+                        .props("dense outlined").classes("w-24")
+                    state["point_widgets"].append(
+                        {"p": p_w, "min_q": mn_w, "max_q": mx_w},
+                    )
+
+    state["rebuild_points"] = _rebuild_points
+
+    def _apply_mode_visibility() -> None:
+        mode = state["mode_select"].value
+        state["minmax_row"].visible = mode == "minmax"
+        state["curve_container"].visible = mode == "curve"
+
+    state["apply_mode_visibility"] = _apply_mode_visibility
+    mode_select.on("update:model-value", lambda *_: _apply_mode_visibility())
+    point_count.on("update:model-value", lambda *_: _rebuild_points())
+
+    def _on_create_click() -> None:
+        if (
+            _state.network is None
+            or state.get("current_component") not in REACTIVE_LIMITS_TARGETS
+        ):
+            return
+        target_id = state["target_select"].value
+        if not target_id:
+            status_label.set_text("Pick a target first.")
+            return
+        mode = state["mode_select"].value or "minmax"
+        if mode == "minmax":
+            payload = [{
+                "min_q": float(min_q_input.value),
+                "max_q": float(max_q_input.value),
+            }]
+        else:
+            payload = []
+            for row in state["point_widgets"]:
+                try:
+                    payload.append({
+                        "p": float(row["p"].value),
+                        "min_q": float(row["min_q"].value),
+                        "max_q": float(row["max_q"].value),
+                    })
+                except (TypeError, ValueError):
+                    pass
+        try:
+            create_reactive_limits(_state.network, str(target_id), mode, payload)
+        except Exception as exc:
+            status_label.set_text(f"Save failed — {exc}")
+            ui.notify(f"Save failed: {exc}", type="negative")
+            return
+        label = "min/max" if mode == "minmax" else "curve"
+        status_label.set_text(f"Saved {label} reactive limits on {target_id!r}.")
+        ui.notify(
+            f"Saved {label} reactive limits on {target_id!r}",
+            type="positive", timeout=1500,
+        )
+        refresh_after_create()
+
+    create_btn.on_click(_on_create_click)
+
+
+def _refresh_create_reactive_limits_panel(state: dict, component: str) -> None:
+    """Repopulate the reactive-limits panel for ``component``.
+
+    Hides the expansion when the active component isn't in
+    :data:`REACTIVE_LIMITS_TARGETS` or no candidate target is available.
+    """
+    expansion = state.get("expansion")
+    if expansion is None:
+        return
+    state["current_component"] = component
+    if (
+        component not in REACTIVE_LIMITS_TARGETS
+        or _state.network is None
+    ):
+        expansion.visible = False
+        return
+    ids = list_reactive_limit_candidates(_state.network, component)
+    if not ids:
+        expansion.visible = False
+        return
+    options = {i: i for i in ids}
+    state["target_select"].options = options
+    if state["target_select"].value not in ids:
+        state["target_select"].value = ids[0]
+    state["target_select"].update()
+    state["rebuild_points"]()
+    state["apply_mode_visibility"]()
+    state["status_label"].set_text("")
+    expansion.visible = True
+
+
 def _build_data_explorer():
     """Materialise the Data Explorer panel and return a refresh closure.
 
@@ -1599,6 +1783,19 @@ def _build_data_explorer():
     }
     _build_create_coupling_device_panel_widgets(
         coupling_create_state, refresh_after_create=lambda: refresh(),
+    )
+
+    reactive_limits_create_state: dict = {
+        "target_select": None, "mode_select": None,
+        "minmax_row": None, "min_q_input": None, "max_q_input": None,
+        "curve_container": None, "point_count": None,
+        "points_container": None, "point_widgets": [],
+        "status_label": None, "expansion": None,
+        "rebuild_points": None, "apply_mode_visibility": None,
+        "current_component": "",
+    }
+    _build_create_reactive_limits_panel_widgets(
+        reactive_limits_create_state, refresh_after_create=lambda: refresh(),
     )
 
     grid = ui.aggrid({
@@ -1710,6 +1907,7 @@ def _build_data_explorer():
         _refresh_create_hvdc_panel(hvdc_create_state, label)
         _refresh_create_tap_changer_panel(tap_changer_create_state, label)
         _refresh_create_coupling_device_panel(coupling_create_state, label)
+        _refresh_create_reactive_limits_panel(reactive_limits_create_state, label)
         is_disconnectable = label in DISCONNECTABLE_COMPONENTS
         is_removable = label in REMOVABLE_COMPONENTS
         bulk_row.set_visibility(bool(cols) or is_disconnectable or is_removable)

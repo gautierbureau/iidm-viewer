@@ -1078,3 +1078,107 @@ def create_coupling_device(
         pn.create_coupling_device(raw, **kwargs)
 
     run(_do_create)
+
+
+# ---------------------------------------------------------------------------
+# Reactive limits (min/max or per-P capability curve)
+# ---------------------------------------------------------------------------
+REACTIVE_LIMITS_TARGETS = {
+    "Generators": "get_generators",
+    "Batteries": "get_batteries",
+    "VSC Converter Stations": "get_vsc_converter_stations",
+}
+
+REACTIVE_LIMITS_MODES = ["minmax", "curve"]
+
+
+def list_reactive_limit_candidates(
+    network: NetworkProxy, component: str,
+) -> list[str]:
+    """Return ids of elements that can carry reactive limits for ``component``."""
+    getter = REACTIVE_LIMITS_TARGETS.get(component)
+    if not getter:
+        return []
+    try:
+        df = getattr(network, getter)()
+    except Exception:
+        return []
+    return sorted(df.index.tolist())
+
+
+def validate_create_reactive_limits_fields(
+    mode: str, element_id: str, payload: list[dict],
+) -> list[str]:
+    """Validate a reactive-limits payload before dispatching it.
+
+    ``mode`` must be ``"minmax"`` (one row with ``min_q``/``max_q``) or
+    ``"curve"`` (≥2 distinct ``p`` rows). Returns human-readable errors.
+    """
+    errors: list[str] = []
+    if mode not in REACTIVE_LIMITS_MODES:
+        errors.append(f"Unknown reactive-limits mode: {mode!r}")
+        return errors
+    if not element_id:
+        errors.append("Target element id is required.")
+    if not payload:
+        errors.append("At least one row is required.")
+        return errors
+
+    if mode == "minmax":
+        row = payload[0]
+        if row.get("min_q") is None or row.get("max_q") is None:
+            errors.append("min_q and max_q are required.")
+        elif row["max_q"] < row["min_q"]:
+            errors.append("max_q must be >= min_q.")
+        return errors
+
+    # curve
+    for row in payload:
+        for k in ("p", "min_q", "max_q"):
+            if row.get(k) is None:
+                errors.append(f"Curve rows need non-null {k}.")
+                return errors
+        if row["max_q"] < row["min_q"]:
+            errors.append("max_q must be >= min_q at every active power point.")
+            return errors
+    if len({row["p"] for row in payload}) < 2:
+        errors.append(
+            "A reactive capability curve needs at least 2 distinct p points."
+        )
+    return errors
+
+
+def create_reactive_limits(
+    network: NetworkProxy, element_id: str, mode: str, payload: list[dict],
+) -> None:
+    """Attach reactive limits (min/max or per-P curve) to an existing element.
+
+    Validates on the main thread; then dispatches the appropriate
+    pypowsybl call on the worker. pypowsybl replaces any existing reactive
+    limits on the target.
+    """
+    errors = validate_create_reactive_limits_fields(mode, element_id, payload)
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    raw = object.__getattribute__(network, "_obj")
+    if mode == "minmax":
+        row = payload[0]
+        df = pd.DataFrame(
+            [{"id": element_id, "min_q": row["min_q"], "max_q": row["max_q"]}]
+        ).set_index("id")
+
+        def _do_create():
+            raw.create_minmax_reactive_limits(df)
+    else:
+        rows = [
+            {"id": element_id, "p": row["p"],
+             "min_q": row["min_q"], "max_q": row["max_q"]}
+            for row in payload
+        ]
+        df = pd.DataFrame(rows).set_index("id")
+
+        def _do_create():
+            raw.create_curve_reactive_limits(df)
+
+    run(_do_create)

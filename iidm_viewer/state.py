@@ -587,78 +587,24 @@ def create_hvdc_line(network, fields: dict):
 
 
 # --- Reactive limits (min/max or per-P curve) on generators / VSC / batteries ---
+#
+# Registry + candidate lister + validator + worker-routed dispatcher live in the
+# shared ``iidm_viewer.component_creation`` module. The Streamlit wrapper adds
+# the cache invalidation that every topology-affecting mutation needs.
 
-REACTIVE_LIMITS_TARGETS = {
-    "Generators": "get_generators",
-    "Batteries": "get_batteries",
-    "VSC Converter Stations": "get_vsc_converter_stations",
-}
-
-
-def list_reactive_limit_candidates(network, component: str) -> list[str]:
-    """Return ids of elements that can carry reactive limits for the given component."""
-    getter = REACTIVE_LIMITS_TARGETS.get(component)
-    if not getter:
-        return []
-    try:
-        df = getattr(network, getter)()
-    except Exception:
-        return []
-    return sorted(df.index.tolist())
+from iidm_viewer.component_creation import (  # noqa: E402, F401  (re-exported)
+    REACTIVE_LIMITS_MODES,
+    REACTIVE_LIMITS_TARGETS,
+    list_reactive_limit_candidates,
+    validate_create_reactive_limits_fields,
+)
 
 
 def create_reactive_limits(
     network, element_id: str, mode: str, payload: list[dict]
 ):
-    """Attach reactive limits (min/max or per-P curve) to an existing element.
-
-    ``mode`` is ``"minmax"`` (one row with ``min_q``/``max_q``) or
-    ``"curve"`` (>=2 rows of ``p``/``min_q``/``max_q``). pypowsybl replaces
-    any existing reactive limits on the target. Routed via the worker.
-    """
-    if mode not in ("minmax", "curve"):
-        raise ValueError(f"Unknown reactive-limits mode: {mode!r}")
-    if not element_id:
-        raise ValueError("Target element id is required.")
-    if not payload:
-        raise ValueError("At least one row is required.")
-
-    if mode == "minmax":
-        row = payload[0]
-        if row.get("min_q") is None or row.get("max_q") is None:
-            raise ValueError("min_q and max_q are required.")
-        if row["max_q"] < row["min_q"]:
-            raise ValueError("max_q must be >= min_q.")
-        df = pd.DataFrame(
-            [{"id": element_id, "min_q": row["min_q"], "max_q": row["max_q"]}]
-        ).set_index("id")
-
-        raw = object.__getattribute__(network, "_obj")
-
-        def _do_create():
-            raw.create_minmax_reactive_limits(df)
-    else:
-        rows = []
-        for row in payload:
-            for k in ("p", "min_q", "max_q"):
-                if row.get(k) is None:
-                    raise ValueError(f"Curve rows need non-null {k}.")
-            if row["max_q"] < row["min_q"]:
-                raise ValueError("max_q must be >= min_q at every active power point.")
-            rows.append({
-                "id": element_id, "p": row["p"],
-                "min_q": row["min_q"], "max_q": row["max_q"],
-            })
-        if len({r["p"] for r in rows}) < 2:
-            raise ValueError("A reactive capability curve needs at least 2 distinct p points.")
-        df = pd.DataFrame(rows).set_index("id")
-
-        raw = object.__getattribute__(network, "_obj")
-
-        def _do_create():
-            raw.create_curve_reactive_limits(df)
-
-    run(_do_create)
+    from iidm_viewer.component_creation import create_reactive_limits as _shared
+    _shared(network, element_id, mode, payload)
     invalidate_on_topology_change()
     script_recorder.record_create_reactive_limits(element_id, mode, payload)
 
