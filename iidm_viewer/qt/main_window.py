@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -45,7 +46,7 @@ class _Sidebar(QWidget):
     def __init__(
         self, on_load, on_run_loadflow, on_vl_selected, on_view_logs,
         on_lf_parameters, on_save_network, on_import_options,
-        on_network_reduction, parent=None,
+        on_network_reduction, on_blank_network, parent=None,
     ) -> None:
         super().__init__(parent)
         self.setFixedWidth(240)
@@ -56,6 +57,14 @@ class _Sidebar(QWidget):
 
         self._load_btn = QPushButton("Load network…")
         self._load_btn.clicked.connect(on_load)
+
+        # "Start with empty network" prompts for a network id and
+        # installs a freshly-created blank pypowsybl Network. Lets
+        # users build a model from scratch via the Data Explorer's
+        # "Create a new …" forms — mirrors Streamlit's blank-network
+        # dialog.
+        self._blank_btn = QPushButton("Start with empty network")
+        self._blank_btn.clicked.connect(on_blank_network)
 
         # "Import options…" opens the LoadOptionsDialog — sets the
         # format / params / post-processors used on the next file
@@ -122,6 +131,7 @@ class _Sidebar(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.addWidget(title)
         layout.addWidget(self._load_btn)
+        layout.addWidget(self._blank_btn)
         layout.addWidget(self._import_opts_btn)
         layout.addWidget(self._save_btn)
         layout.addWidget(self._reduction_btn)
@@ -265,6 +275,7 @@ class MainWindow(QMainWindow):
             self._on_save_network_clicked,
             self._on_import_options_clicked,
             self._on_network_reduction_clicked,
+            self._on_blank_network_clicked,
         )
 
         central = QWidget()
@@ -295,6 +306,35 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # User actions
     # ------------------------------------------------------------------
+    def _on_blank_network_clicked(self) -> None:
+        """Mirror Streamlit's "Start with empty network" dialog.
+
+        Prompts for a network id (defaulting to ``"network"``), then
+        installs a fresh pypowsybl ``create_empty`` Network. The
+        AppState's listener loop refreshes every tab against the new
+        (empty) topology — the user can then build it up via the
+        Data Explorer's "Create a new …" forms.
+        """
+        network_id, ok = QInputDialog.getText(
+            self,
+            "Start with empty network",
+            "Network id:",
+            text="network",
+        )
+        if not ok:
+            return
+        try:
+            self.state.create_empty_network(network_id or "network")
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Empty network failed", f"Failed to create: {exc}",
+            )
+            return
+        self.sidebar.set_file(None)
+        self.statusBar().showMessage(
+            f"Started empty network — id: {network_id or 'network'}.",
+        )
+
     def _on_load_clicked(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,

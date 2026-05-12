@@ -1717,6 +1717,45 @@ def test_app_state_threads_import_params_into_load_network(qapp, monkeypatch):
     assert captured["post_processors"] == state.import_post_processors
 
 
+def test_app_state_create_empty_network_installs_and_broadcasts(qapp):
+    """``AppState.create_empty_network`` should build a blank
+    pypowsybl Network and fire ``network_changed`` so every listener
+    refreshes against the new (empty) topology."""
+    from iidm_viewer.qt.state import AppState
+
+    state = AppState()
+    seen: list = []
+    state.network_changed.connect(lambda net: seen.append(net))
+
+    network = state.create_empty_network("blank_net")
+    qapp.processEvents()
+    assert network is state.network
+    assert len(seen) == 1
+    assert seen[0] is network
+    # Empty network has no voltage levels → selected_vl stays cleared.
+    assert state.selected_vl is None
+
+
+def test_app_state_create_empty_network_resets_change_log_and_report(qapp):
+    """Switching to an empty network must clear the carried-over LF
+    report + change log so the new model starts from scratch."""
+    from iidm_viewer.change_log import ChangeLog
+    from iidm_viewer.qt.state import AppState
+
+    state = AppState()
+    # Stash some pretend prior state to confirm the reset.
+    state._last_report_json = '{"foo": "bar"}'
+    state.change_log.record(
+        "Generators", "GH1", "target_p", 0.0, 42.0,
+    )
+
+    state.create_empty_network("blank_net2")
+    qapp.processEvents()
+    assert state.last_report_json is None
+    assert isinstance(state.change_log, ChangeLog)
+    assert len(state.change_log.entries()) == 0
+
+
 def test_network_reduction_dialog_applies_voltage_range(qapp):
     """End-to-end NetworkReductionDialog: apply a voltage-range
     reduction on IEEE14 and confirm the dialog reports success +

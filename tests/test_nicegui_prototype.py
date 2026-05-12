@@ -606,6 +606,34 @@ def test_upload_handler_forwards_import_params():
     assert "post_processors=" in handler_src
 
 
+def test_blank_network_dialog_uses_shared_helper():
+    """``_open_blank_network_dialog`` must funnel through the shared
+    ``network_loader.create_empty`` + ``_state.install_network`` —
+    no inline pypowsybl probes."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._open_blank_network_dialog)
+    assert "_create_empty_network" in src
+    assert "_state.install_network" in src
+    assert "import pypowsybl" not in src
+    assert "pn.create_empty" not in src
+
+
+def test_blank_network_button_lives_in_left_drawer():
+    """The drawer must carry the "Start with empty network" button
+    right after the upload widget, mirroring Streamlit's sidebar."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    drawer_start = src.index("ui.left_drawer(")
+    drawer_end = src.index("with ui.tabs(", drawer_start)
+    drawer_src = src[drawer_start:drawer_end]
+    assert "Start with empty network" in drawer_src
+    assert "_open_blank_network_dialog" in drawer_src
+
+
 def test_network_reduction_dialog_uses_shared_actions():
     """``_open_network_reduction_dialog`` must funnel everything
     through the shared reduction module — no inline pypowsybl calls."""
