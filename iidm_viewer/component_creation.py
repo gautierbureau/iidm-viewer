@@ -389,3 +389,156 @@ def create_component_bay(
         CREATABLE_COMPONENTS[component]["bay_function"],
         fields,
     )
+
+
+# ---------------------------------------------------------------------------
+# Branches (Lines + 2-Winding Transformers)
+# ---------------------------------------------------------------------------
+# Locator fields applied to each side of a branch. Rendered twice
+# (sides 1 + 2) by the form renderer; the helper below suffixes the
+# field names with ``_<side>``.
+_BRANCH_SIDE_LOCATOR: list[dict] = [
+    {"name": "position_order", "label": "Position order",
+     "kind": "int", "required": True, "default": 10,
+     "min_value": 0, "step": 10, "help": _POSITION_HELP},
+    {"name": "direction", "label": "Direction", "kind": "select",
+     "required": False, "default": "BOTTOM", "options": FEEDER_DIRECTIONS},
+]
+
+
+CREATABLE_BRANCHES: dict[str, dict] = {
+    "Lines": {
+        "bay_function": "create_line_bays",
+        "fields": [
+            {"name": "id", "label": "ID", "kind": "text", "required": True, "default": ""},
+            {"name": "r", "label": "r (Ω)", "kind": "float", "required": True, "default": 0.1},
+            {"name": "x", "label": "x (Ω)", "kind": "float", "required": True, "default": 1.0},
+            {"name": "g1", "label": "g1 (S)", "kind": "float", "required": True, "default": 0.0},
+            {"name": "b1", "label": "b1 (S)", "kind": "float", "required": True, "default": 0.0},
+            {"name": "g2", "label": "g2 (S)", "kind": "float", "required": True, "default": 0.0},
+            {"name": "b2", "label": "b2 (S)", "kind": "float", "required": True, "default": 0.0},
+        ],
+        "same_substation": False,
+    },
+    "2-Winding Transformers": {
+        "bay_function": "create_2_windings_transformer_bays",
+        "fields": [
+            {"name": "id", "label": "ID", "kind": "text", "required": True, "default": ""},
+            {"name": "r", "label": "r (Ω)", "kind": "float", "required": True, "default": 0.5},
+            {"name": "x", "label": "x (Ω)", "kind": "float", "required": True, "default": 10.0},
+            {"name": "g", "label": "g (S)", "kind": "float", "required": True, "default": 0.0},
+            {"name": "b", "label": "b (S)", "kind": "float", "required": True, "default": 0.0},
+            {"name": "rated_u1", "label": "rated_u1 (kV)", "kind": "float",
+             "required": True, "default": 400.0},
+            {"name": "rated_u2", "label": "rated_u2 (kV)", "kind": "float",
+             "required": True, "default": 225.0},
+            {"name": "rated_s", "label": "rated_s (MVA, 0 = unset)",
+             "kind": "float", "required": False, "default": 0.0, "min_value": 0.0},
+        ],
+        # pypowsybl only allows 2WTs between two VLs of the same substation.
+        "same_substation": True,
+    },
+}
+
+
+def branch_side_locator_fields(side: int) -> list[dict]:
+    """Locator fields for one side of a branch, with names suffixed ``_<side>``.
+
+    Used by the form renderer to build two identical locator grids
+    (side 1 and side 2) and by :func:`validate_create_branch_fields`
+    to assemble the required-field list.
+    """
+    return [
+        {**f, "name": f"{f['name']}_{side}", "label": f"{f['label']} {side}"}
+        for f in _BRANCH_SIDE_LOCATOR
+    ]
+
+
+def _substations_of_busbars(
+    network: NetworkProxy, bbs1: str, bbs2: str,
+) -> Optional[tuple[str, str]]:
+    """Return ``(sub1, sub2)`` for the two busbar sections, or ``None``.
+
+    Used by :func:`validate_create_branch_fields` to enforce 2-Winding
+    Transformer's same-substation constraint.
+    """
+    if not bbs1 or not bbs2:
+        return None
+    bbs = network.get_busbar_sections()
+    vls = network.get_voltage_levels()
+    if bbs1 not in bbs.index or bbs2 not in bbs.index:
+        return None
+    vl1 = bbs.loc[bbs1, "voltage_level_id"]
+    vl2 = bbs.loc[bbs2, "voltage_level_id"]
+    if vl1 not in vls.index or vl2 not in vls.index:
+        return None
+    return vls.loc[vl1, "substation_id"], vls.loc[vl2, "substation_id"]
+
+
+def validate_create_branch_fields(
+    component: str,
+    fields: dict,
+    network: Optional[NetworkProxy] = None,
+) -> list[str]:
+    """Validate branch creation fields.
+
+    Checks electrical fields + side-1/side-2 locator fields + busbar
+    ids; if the spec has ``same_substation`` and a ``network`` is
+    supplied, verifies both chosen busbar sections live in the same
+    substation (the pypowsybl 2WT constraint).
+    """
+    spec = CREATABLE_BRANCHES.get(component)
+    if not spec:
+        return [f"{component!r} is not a creatable branch"]
+    errors: list[str] = []
+    all_required = (
+        spec["fields"]
+        + branch_side_locator_fields(1)
+        + branch_side_locator_fields(2)
+    )
+    for f in all_required:
+        if f["required"] and (
+            fields.get(f["name"]) is None or fields.get(f["name"]) == ""
+        ):
+            errors.append(f"{f['label']} is required.")
+    for side in (1, 2):
+        key = f"bus_or_busbar_section_id_{side}"
+        if not fields.get(key):
+            errors.append(f"Busbar section {side} is required.")
+    if spec.get("same_substation") and network is not None:
+        sub = _substations_of_busbars(
+            network,
+            fields.get("bus_or_busbar_section_id_1"),
+            fields.get("bus_or_busbar_section_id_2"),
+        )
+        if sub is not None and sub[0] != sub[1]:
+            errors.append(
+                f"{component} must connect voltage levels of the same substation "
+                f"(side 1: {sub[0]!r}, side 2: {sub[1]!r})."
+            )
+    return errors
+
+
+def create_branch_bay(
+    network: NetworkProxy,
+    component: str,
+    fields: dict,
+) -> None:
+    """Create a Line or 2-Winding Transformer with feeder bays on each side.
+
+    ``fields`` must include the electrical fields,
+    ``bus_or_busbar_section_id_1`` / ``_2``, and
+    ``position_order_1`` / ``_2``. Worker-thread bound.
+    """
+    if component not in CREATABLE_BRANCHES:
+        raise ValueError(f"{component!r} is not a creatable branch")
+
+    errors = validate_create_branch_fields(component, fields, network=network)
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    _dispatch_bay_create(
+        network,
+        CREATABLE_BRANCHES[component]["bay_function"],
+        fields,
+    )

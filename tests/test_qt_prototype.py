@@ -796,6 +796,74 @@ def test_create_panel_creates_load_on_node_breaker_network(qapp):
     assert seen == [("Loads", "QT_NEW_LOAD")]
 
 
+def test_branch_panel_creates_line_on_node_breaker_network(qapp):
+    """End-to-end Line creation via the Qt CreateBranchPanel.
+
+    Builds a fresh node-breaker network, picks two different VLs +
+    their first busbars, drives the panel and asserts the new line
+    shows up in pypowsybl.
+    """
+    from iidm_viewer.qt.create_panel import CreateBranchPanel
+    from iidm_viewer.component_creation import (
+        list_busbar_sections,
+        list_node_breaker_voltage_levels,
+    )
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateBranchPanel()
+    panel.set_network(network)
+    panel.set_component("Lines")
+    qapp.processEvents()
+
+    vls = list_node_breaker_voltage_levels(network)
+    assert vls.shape[0] >= 2
+    # The panel pre-selects vl1[0] and vl2[1] (avoids self-loop).
+    bbs1 = list_busbar_sections(network, str(panel._vl1.currentData()))[0]
+    bbs2 = list_busbar_sections(network, str(panel._vl2.currentData()))[0]
+    panel._bbs1.setCurrentText(bbs1)
+    panel._bbs2.setCurrentText(bbs2)
+
+    panel._field_widgets["id"].setText("QT_NEW_LINE")
+    seen: list = []
+    panel.component_created.connect(lambda c, eid: seen.append((c, eid)))
+    panel._on_create_clicked()
+    qapp.processEvents()
+
+    assert "QT_NEW_LINE" in network.get_lines().index
+    assert seen == [("Lines", "QT_NEW_LINE")]
+
+
+def test_branch_panel_hides_for_non_branch_component(qapp):
+    """The branch panel only renders for components in CREATABLE_BRANCHES."""
+    from iidm_viewer.qt.create_panel import CreateBranchPanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateBranchPanel()
+    panel.set_network(network)
+    panel.set_component("Generators")  # not a branch
+    qapp.processEvents()
+    assert panel.isVisible() is False
+    panel.set_component("Lines")
+    qapp.processEvents()
+    assert panel.isVisible() is True
+
+
 def test_change_log_panel_repaints_on_record(qapp, loaded_window):
     """The panel's title and table reflect log mutations in real time
     via the on_changed bus.
