@@ -117,6 +117,20 @@ function sendParent(msg: Record<string, unknown>): void {
   window.parent.postMessage({ isStreamlitMessage: true, ...msg }, '*');
 }
 
+function setComponentValue(value: unknown): void {
+  // Mirrors the SLD / NAD bundles. Streamlit's component runtime
+  // *also* exposes ``setComponentValue`` as a global polyfill, but
+  // our two non-Streamlit hosts (PySide6 QWebEngineView and NiceGUI
+  // iframe) load the bundle without that runtime — so we define our
+  // own here. The bridge JS in each host listens for this exact
+  // ``streamlit:setComponentValue`` postMessage.
+  sendParent({
+    type: 'streamlit:setComponentValue',
+    dataType: 'json',
+    value,
+  });
+}
+
 function setFrameHeight(h: number): void {
   sendParent({ type: 'streamlit:setFrameHeight', height: h });
 }

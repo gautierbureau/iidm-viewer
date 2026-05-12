@@ -284,6 +284,28 @@ def test_bridge_js_has_expected_hooks():
         assert token in _BRIDGE_JS, f"bridge JS lost token {token!r}"
 
 
+def test_map_bundle_defines_setcomponentvalue_globally():
+    """The bundle calls ``setComponentValue(...)`` as a bare global
+    when the user clicks a substation. Streamlit's component runtime
+    polyfills it; our two non-Streamlit hosts (PySide6 + NiceGUI) do
+    not — so the bundle must carry its own definition. Without it,
+    clicks raised ``ReferenceError: setComponentValue is not defined``.
+    """
+    import os
+    bundle = os.path.join(
+        os.path.dirname(__file__), "..",
+        "iidm_viewer", "frontend", "map_component", "dist",
+        "assets", "map-component.js",
+    )
+    with open(bundle, encoding="utf-8") as fh:
+        js = fh.read()
+    assert "streamlit:setComponentValue" in js, (
+        "the map bundle must define setComponentValue (matching the SLD "
+        "and NAD bundles) so it works under non-Streamlit hosts. "
+        "Rebuild with `npm run build` in frontend/map_component."
+    )
+
+
 def test_page_route_is_registered():
     """Importing ``iidm_viewer.web.app`` should register the ``/`` page.
 
