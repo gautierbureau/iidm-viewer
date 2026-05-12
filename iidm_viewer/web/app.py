@@ -2961,10 +2961,13 @@ def run_app(initial_file: Optional[str] = None, native: bool = True, port: int =
     if native and not _native_backend_available():
         import sys
         print(
-            "warning: --native requested but no pywebview backend is "
-            "available (install PyGObject + GTK, or PySide6 + "
-            "PySide6-Addons). Falling back to browser mode; open "
-            f"http://localhost:{port}/ to use the app.",
+            "warning: --native requested but no pywebview backend is available.\n"
+            "  To enable a native window on Linux:\n"
+            "    sudo apt install gir1.2-gtk-3.0 gir1.2-webkit2-4.1 "
+            "libcairo2-dev libgirepository1.0-dev\n"
+            "    pip install 'pywebview[gtk]'\n"
+            "  (Qt alternative: pip install 'pywebview[qt]'.)\n"
+            f"  Falling back to browser mode at http://localhost:{port}/.",
             file=sys.stderr,
         )
         native = False
