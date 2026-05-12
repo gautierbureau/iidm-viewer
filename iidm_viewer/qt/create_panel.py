@@ -28,10 +28,13 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -41,6 +44,7 @@ from iidm_viewer.component_creation import (
     CREATABLE_COMPONENTS,
     CREATABLE_CONTAINERS,
     CREATABLE_HVDC_LINES,
+    CREATABLE_TAP_CHANGERS,
     LOCATOR_FIELDS,
     branch_side_locator_fields,
     coerce_field_values,
@@ -48,10 +52,12 @@ from iidm_viewer.component_creation import (
     create_component_bay,
     create_container,
     create_hvdc_line,
+    create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
     list_substations_df,
+    list_transformers_without_tap_changer,
     next_free_node,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy
@@ -1000,3 +1006,241 @@ class CreateHvdcLinePanel(QWidget):
         self._status.setText(f"Created HVDC line {created_id!r}.")
         self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
         self.component_created.emit("HVDC Lines", created_id)
+
+
+# ---------------------------------------------------------------------------
+# Tap changer creation panel (ratio + phase, sub-form on a 2WT)
+# ---------------------------------------------------------------------------
+class CreateTapChangerPanel(QWidget):
+    """Sub-form to add a ratio or phase tap changer to an existing 2WT.
+
+    Auto-hides unless the active data-explorer component is
+    "2-Winding Transformers" and the network carries at least one
+    transformer that doesn't yet have a tap changer of the chosen kind.
+
+    Layout:
+      * Kind picker (Ratio / Phase)
+      * Target transformer picker (filtered to ones without that kind)
+      * Main-fields grid built from the shared registry
+      * Editable steps table with a "Number of steps" spinner
+      * Create button + status label
+    """
+
+    component_created = Signal(str, str)  # ("Tap Changers", transformer_id)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+        self._kind: str = "Ratio"
+        self._main_widgets: dict[str, QWidget] = {}
+
+        self._group = QGroupBox("Create a tap changer on a 2-winding transformer")
+        self._group.setCheckable(True)
+        self._group.setChecked(True)
+        self._group.toggled.connect(self._on_toggled)
+
+        # Pickers row
+        self._kind_combo = QComboBox()
+        for k in CREATABLE_TAP_CHANGERS:
+            self._kind_combo.addItem(k)
+        self._kind_combo.currentTextChanged.connect(self._on_kind_changed)
+        self._twt_combo = QComboBox()
+        self._twt_combo.setMinimumWidth(220)
+        pickers = QHBoxLayout()
+        pickers.addWidget(QLabel("Kind"))
+        pickers.addWidget(self._kind_combo)
+        pickers.addSpacing(12)
+        pickers.addWidget(QLabel("Target 2WT"))
+        pickers.addWidget(self._twt_combo, 1)
+
+        # Main-fields grid
+        self._main_grid = QGridLayout()
+        self._main_grid.setSpacing(6)
+        self._main_widget = QWidget()
+        self._main_widget.setLayout(self._main_grid)
+
+        # Steps table + count spinner
+        self._steps_count = QSpinBox()
+        self._steps_count.setRange(1, 50)
+        self._steps_count.setValue(3)
+        self._steps_count.valueChanged.connect(self._resize_steps_table)
+        self._steps_table = QTableWidget(0, 0)
+        self._steps_table.setMinimumHeight(120)
+        self._steps_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        steps_row = QHBoxLayout()
+        steps_row.addWidget(QLabel("Number of steps"))
+        steps_row.addWidget(self._steps_count)
+        steps_row.addStretch(1)
+
+        # Action row
+        self._create_btn = QPushButton("Create tap changer")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self._create_btn)
+        action_row.addWidget(self._status, 1)
+
+        inner = QVBoxLayout()
+        inner.addLayout(pickers)
+        inner.addWidget(self._main_widget)
+        inner.addLayout(steps_row)
+        inner.addWidget(self._steps_table)
+        inner.addLayout(action_row)
+        self._group.setLayout(inner)
+
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+        self.setLayout(outer)
+
+        self.setVisible(False)
+
+    # -- Public API ------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._refresh_for_current()
+        self._status.setText("")
+
+    # -- Internals -------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._main_widget.setVisible(checked)
+        self._steps_table.setVisible(checked)
+
+    def _on_kind_changed(self, _kind: str) -> None:
+        self._kind = self._kind_combo.currentText()
+        self._refresh_for_current()
+
+    def _refresh_for_current(self) -> None:
+        show = (
+            self._network is not None
+            and self._component == "2-Winding Transformers"
+        )
+        if show:
+            available = list_transformers_without_tap_changer(
+                self._network, self._kind,
+            )
+        else:
+            available = []
+        self.setVisible(bool(show and available))
+        if not (show and available):
+            return
+
+        self._twt_combo.blockSignals(True)
+        self._twt_combo.clear()
+        for tid in available:
+            self._twt_combo.addItem(tid)
+        self._twt_combo.blockSignals(False)
+
+        self._rebuild_main_fields()
+        self._rebuild_steps_table()
+
+    def _rebuild_main_fields(self) -> None:
+        for w in self._main_widgets.values():
+            w.deleteLater()
+        self._main_widgets.clear()
+        while self._main_grid.count():
+            item = self._main_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        spec = CREATABLE_TAP_CHANGERS[self._kind]
+        for idx, f in enumerate(spec["main_fields"]):
+            widget = make_field_widget(f)
+            row, col = divmod(idx, 3)
+            cell = QWidget()
+            box = QVBoxLayout()
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(2)
+            box.addWidget(QLabel(f["label"]))
+            box.addWidget(widget)
+            cell.setLayout(box)
+            self._main_grid.addWidget(cell, row, col)
+            self._main_widgets[f["name"]] = widget
+
+    def _rebuild_steps_table(self) -> None:
+        spec = CREATABLE_TAP_CHANGERS[self._kind]
+        cols = spec["step_columns"]
+        n_rows = self._steps_count.value()
+        self._steps_table.blockSignals(True)
+        self._steps_table.setColumnCount(len(cols))
+        self._steps_table.setHorizontalHeaderLabels(cols)
+        self._steps_table.setRowCount(n_rows)
+        defaults = spec["step_defaults"]
+        for r in range(n_rows):
+            for c, col in enumerate(cols):
+                item = self._steps_table.item(r, c)
+                if item is None:
+                    self._steps_table.setItem(
+                        r, c, QTableWidgetItem(str(defaults[col])),
+                    )
+        self._steps_table.blockSignals(False)
+
+    def _resize_steps_table(self, _n: int) -> None:
+        spec = CREATABLE_TAP_CHANGERS[self._kind]
+        cols = spec["step_columns"]
+        defaults = spec["step_defaults"]
+        n_rows = self._steps_count.value()
+        prev = self._steps_table.rowCount()
+        self._steps_table.setRowCount(n_rows)
+        if n_rows > prev:
+            for r in range(prev, n_rows):
+                for c, col in enumerate(cols):
+                    self._steps_table.setItem(
+                        r, c, QTableWidgetItem(str(defaults[col])),
+                    )
+
+    def _collect_steps(self) -> list[dict]:
+        spec = CREATABLE_TAP_CHANGERS[self._kind]
+        cols = spec["step_columns"]
+        rows: list[dict] = []
+        for r in range(self._steps_table.rowCount()):
+            row: dict = {}
+            for c, col in enumerate(cols):
+                item = self._steps_table.item(r, c)
+                text = (item.text() if item else "").strip()
+                try:
+                    row[col] = float(text) if text != "" else spec["step_defaults"][col]
+                except ValueError:
+                    row[col] = spec["step_defaults"][col]
+            rows.append(row)
+        return rows
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component != "2-Winding Transformers":
+            return
+        transformer_id = self._twt_combo.currentText()
+        if not transformer_id:
+            self._status.setText("Pick a target transformer first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        spec = CREATABLE_TAP_CHANGERS[self._kind]
+        raw = {
+            f["name"]: read_field_widget(f, self._main_widgets[f["name"]])
+            for f in spec["main_fields"]
+            if f["name"] in self._main_widgets
+        }
+        main_fields = coerce_field_values(spec["main_fields"], raw)
+        steps = self._collect_steps()
+        try:
+            create_tap_changer(
+                self._network, self._kind, transformer_id, main_fields, steps,
+            )
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        self._status.setText(
+            f"Created {self._kind.lower()} tap changer on {transformer_id!r} "
+            f"({len(steps)} steps)."
+        )
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit("Tap Changers", transformer_id)
+        # Refresh the target picker — the transformer just got its tap changer.
+        self._refresh_for_current()

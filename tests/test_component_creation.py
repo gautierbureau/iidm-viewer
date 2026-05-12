@@ -9,8 +9,11 @@ from iidm_viewer.component_creation import (
     CREATABLE_COMPONENTS,
     CREATABLE_CONTAINERS,
     CREATABLE_HVDC_LINES,
+    CREATABLE_TAP_CHANGERS,
     LOCATOR_FIELDS,
+    PTC_REGULATION_MODES,
     TOPOLOGY_KINDS,
+    TRANSFORMER_SIDES,
     _SHUNT_LINEAR_FIELDS,
     _VALIDATORS,
     branch_side_locator_fields,
@@ -19,15 +22,19 @@ from iidm_viewer.component_creation import (
     create_component_bay,
     create_container,
     create_hvdc_line,
+    create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
     list_substations_df,
+    list_transformers_without_tap_changer,
+    list_two_winding_transformers,
     next_free_node,
     validate_create_branch_fields,
     validate_create_container_fields,
     validate_create_fields,
     validate_create_hvdc_line_fields,
+    validate_create_tap_changer_fields,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy, run
 
@@ -549,3 +556,172 @@ def test_create_hvdc_line_raises_on_invalid(vsc_only_network):
             "converter_station1_id": "VSC_A",
             "converter_station2_id": "VSC_A",
         })
+
+
+# ---------------------------------------------------------------------------
+# Tap changers (ratio + phase) on existing 2WT
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def twt_without_tap_changer_network() -> NetworkProxy:
+    """Fresh network with a single 2WT and no tap changers attached."""
+    def _make():
+        import pypowsybl.network as pn
+        n = pn.create_empty(network_id="x")
+        n.create_substations(id="S1")
+        n.create_voltage_levels(id="VL1", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=400.0)
+        n.create_voltage_levels(id="VL2", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=225.0)
+        n.create_busbar_sections(id="BBS1", voltage_level_id="VL1", node=0)
+        n.create_busbar_sections(id="BBS2", voltage_level_id="VL2", node=0)
+        n.create_2_windings_transformers(
+            id="T1", voltage_level1_id="VL1", voltage_level2_id="VL2",
+            node1=1, node2=1, rated_u1=400.0, rated_u2=225.0,
+            r=0.1, x=10.0, g=0.0, b=0.0,
+        )
+        return n
+
+    return NetworkProxy(run(_make))
+
+
+def test_creatable_tap_changers_carries_ratio_and_phase():
+    assert set(CREATABLE_TAP_CHANGERS) == {"Ratio", "Phase"}
+    assert CREATABLE_TAP_CHANGERS["Ratio"]["create_method"] == "create_ratio_tap_changers"
+    assert CREATABLE_TAP_CHANGERS["Phase"]["create_method"] == "create_phase_tap_changers"
+    # Phase tap changer steps carry an extra ``alpha`` column.
+    assert "alpha" in CREATABLE_TAP_CHANGERS["Phase"]["step_columns"]
+    assert "alpha" not in CREATABLE_TAP_CHANGERS["Ratio"]["step_columns"]
+
+
+def test_tap_changer_mode_constants():
+    assert "CURRENT_LIMITER" in PTC_REGULATION_MODES
+    assert "ACTIVE_POWER_CONTROL" in PTC_REGULATION_MODES
+    assert TRANSFORMER_SIDES == ["ONE", "TWO"]
+
+
+def test_creatable_tap_changers_re_exported_from_streamlit_state():
+    pytest.importorskip("streamlit")
+    from iidm_viewer.state import (
+        CREATABLE_TAP_CHANGERS as ST_TC,
+        PTC_REGULATION_MODES as ST_MODES,
+        TRANSFORMER_SIDES as ST_SIDES,
+    )
+    assert ST_TC is CREATABLE_TAP_CHANGERS
+    assert ST_MODES is PTC_REGULATION_MODES
+    assert ST_SIDES is TRANSFORMER_SIDES
+
+
+def test_validate_create_tap_changer_fields_flags_missing_target():
+    errors = validate_create_tap_changer_fields("Ratio", "", {}, [])
+    assert any("Target 2-winding transformer" in e for e in errors)
+    assert any("At least one tap step" in e for e in errors)
+
+
+def test_validate_create_tap_changer_fields_flags_tap_out_of_range():
+    errors = validate_create_tap_changer_fields(
+        "Ratio", "T1",
+        {"tap": 5, "low_tap": 0, "oltc": False, "regulating": False,
+         "target_v": 0.0, "target_deadband": 0.0, "regulated_side": "ONE"},
+        [{"rho": 1.0}, {"rho": 1.0}, {"rho": 1.0}],
+    )
+    assert any("between 0 and 2" in e for e in errors)
+
+
+def test_validate_create_tap_changer_fields_requires_oltc_for_regulating_ratio():
+    errors = validate_create_tap_changer_fields(
+        "Ratio", "T1",
+        {"tap": 1, "low_tap": 0, "oltc": False, "regulating": True,
+         "target_v": 400.0, "target_deadband": 0.0, "regulated_side": "ONE"},
+        [{"rho": 0.85}, {"rho": 1.0}, {"rho": 1.15}],
+    )
+    assert any("OLTC must be enabled" in e for e in errors)
+
+
+def test_validate_create_tap_changer_fields_requires_target_v_for_regulating_ratio():
+    errors = validate_create_tap_changer_fields(
+        "Ratio", "T1",
+        {"tap": 1, "low_tap": 0, "oltc": True, "regulating": True,
+         "target_v": 0.0, "target_deadband": 0.0, "regulated_side": "ONE"},
+        [{"rho": 1.0}, {"rho": 1.0}, {"rho": 1.0}],
+    )
+    assert any("target_v must be > 0" in e for e in errors)
+
+
+def test_validate_create_tap_changer_fields_rejects_unknown_kind():
+    errors = validate_create_tap_changer_fields("Mystery", "T1", {}, [])
+    assert any("not creatable" in e for e in errors)
+
+
+def test_list_two_winding_transformers_returns_ids(twt_without_tap_changer_network):
+    ids = list_two_winding_transformers(twt_without_tap_changer_network)
+    assert ids == ["T1"]
+
+
+def test_list_transformers_without_tap_changer_filters_by_kind(
+    twt_without_tap_changer_network,
+):
+    # No tap changer yet → T1 should be available for both kinds.
+    assert list_transformers_without_tap_changer(
+        twt_without_tap_changer_network, "Ratio"
+    ) == ["T1"]
+    assert list_transformers_without_tap_changer(
+        twt_without_tap_changer_network, "Phase"
+    ) == ["T1"]
+
+
+def test_create_ratio_tap_changer_end_to_end(twt_without_tap_changer_network):
+    create_tap_changer(
+        twt_without_tap_changer_network, "Ratio", "T1",
+        {"tap": 1, "low_tap": 0, "oltc": True, "regulating": False,
+         "target_v": 400.0, "target_deadband": 2.0, "regulated_side": "ONE"},
+        [{"rho": 0.85}, {"rho": 1.0}, {"rho": 1.15}],
+    )
+    rtcs = twt_without_tap_changer_network.get_ratio_tap_changers()
+    assert "T1" in rtcs.index
+    # The same transformer is now ineligible for another Ratio tap changer.
+    assert list_transformers_without_tap_changer(
+        twt_without_tap_changer_network, "Ratio"
+    ) == []
+    # ...but still eligible for a Phase tap changer.
+    assert list_transformers_without_tap_changer(
+        twt_without_tap_changer_network, "Phase"
+    ) == ["T1"]
+
+
+def test_create_phase_tap_changer_end_to_end(twt_without_tap_changer_network):
+    create_tap_changer(
+        twt_without_tap_changer_network, "Phase", "T1",
+        {"tap": 1, "low_tap": 0, "regulation_mode": "CURRENT_LIMITER",
+         "regulating": False, "target_deadband": 0.0, "regulated_side": "ONE"},
+        [{"rho": 1.0, "alpha": -2.0},
+         {"rho": 1.0, "alpha": 0.0},
+         {"rho": 1.0, "alpha": 2.0}],
+    )
+    ptcs = twt_without_tap_changer_network.get_phase_tap_changers()
+    assert "T1" in ptcs.index
+
+
+def test_create_tap_changer_drops_zero_sentinel_target_v(
+    twt_without_tap_changer_network,
+):
+    """target_v=0 / target_deadband=0 are sentinels meaning "unset" — they
+    must not be sent to pypowsybl as 0.0 (which would mean "regulate to 0V")."""
+    create_tap_changer(
+        twt_without_tap_changer_network, "Ratio", "T1",
+        {"tap": 1, "low_tap": 0, "oltc": False, "regulating": False,
+         "target_v": 0.0, "target_deadband": 0.0, "regulated_side": "ONE"},
+        [{"rho": 0.95}, {"rho": 1.0}, {"rho": 1.05}],
+    )
+    rtcs = twt_without_tap_changer_network.get_ratio_tap_changers()
+    assert "T1" in rtcs.index
+    # When target_v is unset pypowsybl reports NaN.
+    import math
+    target_v = rtcs.at["T1", "target_v"]
+    assert math.isnan(target_v) or target_v != 0.0
+
+
+def test_create_tap_changer_raises_on_unknown_kind(twt_without_tap_changer_network):
+    with pytest.raises(ValueError, match="not creatable"):
+        create_tap_changer(
+            twt_without_tap_changer_network, "Mystery", "T1", {}, [{"rho": 1.0}],
+        )
