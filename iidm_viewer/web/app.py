@@ -146,6 +146,11 @@ from iidm_viewer.diagram_services import (
     generate_nad as _generate_nad,
     generate_sld as _generate_sld,
 )
+from iidm_viewer.lf_report import (
+    SEVERITY_LEVELS,
+    SEVERITY_ORDER,
+    parse_report_to_tree,
+)
 
 
 def _fetch_dataframe(network: NetworkProxy, getter_name: str):
@@ -374,6 +379,101 @@ def _push_nad(vl_id: str, depth: int) -> None:
     _last_nad = args
     if _nad_ready:
         _send_render("nad", args)
+
+
+def _open_lf_report_dialog(report_json: Optional[str]) -> None:
+    """Open a modal showing the parsed LoadFlow report tree.
+
+    Parsing — message-template interpolation, severity filter, and the
+    "expand subtrees containing WARN/ERROR" heuristic — lives in
+    :mod:`iidm_viewer.lf_report` so all three prototypes share it.
+    The dialog rebuilds the tree on every severity-filter change.
+    """
+    if not report_json:
+        ui.notify(
+            "No load flow report available. Run a load flow first.",
+            type="warning",
+        )
+        return
+
+    severity_state: dict = {
+        "selected": ["INFO", "WARN", "ERROR"],
+    }
+
+    with ui.dialog() as dialog, ui.card().style("min-width: 720px; max-width: 95vw"):
+        ui.label("Load Flow Logs").classes("text-h6")
+        ui.label(
+            "Filter by severity. Subtrees containing a WARN or ERROR open by default."
+        ).classes("text-caption q-mb-sm")
+        sev_select = ui.select(
+            options=list(SEVERITY_LEVELS),
+            value=list(severity_state["selected"]),
+            multiple=True,
+            label="Show",
+        ).props("dense outlined use-chips").classes("full-width q-mb-md")
+
+        tree_container = ui.column().classes("full-width")
+
+        def _build_q_tree_nodes(nodes: list[dict], prefix: str = "n") -> list[dict]:
+            """Translate ``parse_report_to_tree`` output into the shape
+            ``ui.tree`` expects (``id`` / ``label`` / ``children``)."""
+            out: list[dict] = []
+            for i, node in enumerate(nodes):
+                node_id = f"{prefix}_{i}"
+                label = (
+                    f"{node['icon']} {node['message']}"
+                    if node["icon"]
+                    else node["message"]
+                )
+                out.append({
+                    "id": node_id,
+                    "label": label,
+                    "expanded_default": node["expanded"],
+                    "children": _build_q_tree_nodes(node["children"], node_id),
+                })
+            return out
+
+        def _collect_expanded(nodes: list[dict], acc: list[str]) -> list[str]:
+            for node in nodes:
+                if node["expanded_default"] and node["children"]:
+                    acc.append(node["id"])
+                _collect_expanded(node["children"], acc)
+            return acc
+
+        def _rebuild_tree() -> None:
+            tree_container.clear()
+            selected = sev_select.value or []
+            if not selected:
+                with tree_container:
+                    ui.label("Select at least one severity level.") \
+                        .classes("text-caption")
+                return
+            min_severity = min(selected, key=lambda s: SEVERITY_ORDER.get(s, 2))
+            try:
+                nodes = parse_report_to_tree(report_json, min_severity=min_severity)
+            except ValueError as exc:
+                with tree_container:
+                    ui.label(f"Failed to parse report: {exc}") \
+                        .classes("text-caption text-negative")
+                return
+            if not nodes:
+                with tree_container:
+                    ui.label("No log entries match the selected severity filter.") \
+                        .classes("text-caption")
+                return
+            q_nodes = _build_q_tree_nodes(nodes)
+            expanded = _collect_expanded(q_nodes, [])
+            with tree_container:
+                ui.tree(q_nodes, label_key="label", node_key="id") \
+                    .expand(expanded)
+
+        sev_select.on("update:model-value", lambda *_: _rebuild_tree())
+        _rebuild_tree()
+
+        with ui.row().classes("full-width justify-end q-mt-md"):
+            ui.button("Close", on_click=dialog.close).props("flat")
+
+    dialog.open()
 
 
 # ---------------------------------------------------------------------------
@@ -2826,6 +2926,11 @@ def main_page() -> None:
             .classes("full-width")
         run_lf_btn.set_enabled(False)
         lf_status_lbl = ui.label("").classes("text-caption q-mt-sm")
+        # "View Logs" opens a modal with the parsed report_json tree.
+        # Disabled until a LF has produced a non-empty report.
+        view_logs_btn = ui.button("View Logs").props("flat dense") \
+            .classes("full-width")
+        view_logs_btn.set_enabled(False)
 
         async def on_run_lf() -> None:
             if _state.network is None:
@@ -2839,12 +2944,17 @@ def main_page() -> None:
                 return
             status = result.status if result else "UNKNOWN"
             lf_status_lbl.set_text(f"LF: {status}")
+            # Gate the "View Logs" button on the cached report.
+            view_logs_btn.set_enabled(bool(_state.last_report_json))
             if result and result.converged:
                 ui.notify(f"AC load flow: {status}", type="positive")
             else:
                 ui.notify(f"AC load flow: {status}", type="warning")
 
         run_lf_btn.on_click(on_run_lf)
+        view_logs_btn.on_click(
+            lambda: _open_lf_report_dialog(_state.last_report_json),
+        )
 
     with ui.tabs().classes("w-full") as tabs:
         map_tab = ui.tab("Network Map")
@@ -2911,6 +3021,7 @@ def main_page() -> None:
         # changes (load / clear). Also refresh the VL picker so it
         # carries the new network's voltage levels.
         run_lf_btn.set_enabled(network is not None)
+        view_logs_btn.set_enabled(False)
         lf_status_lbl.set_text("")
         if network is None:
             vl_picker_state["df"] = None
