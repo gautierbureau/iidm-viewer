@@ -2764,6 +2764,62 @@ def main_page() -> None:
         ).props("flat dense accept='.xiidm,.iidm,.xml,.zip,.mat,.uct'") \
          .classes("full-width q-mb-sm")
 
+        # Voltage Level picker (mirrors Streamlit's vl_selector).
+        # Hidden until a network is loaded. The "Filter" input narrows
+        # the dropdown to a substring match on the display name; the
+        # select fires AppState.set_selected_vl on every change.
+        ui.label("Voltage Level").classes("text-caption q-mt-sm")
+        vl_filter_input = ui.input(placeholder="Filter voltage levels") \
+            .props("dense outlined clearable").classes("full-width")
+        vl_select = ui.select(options=[], value=None) \
+            .props("dense outlined").classes("full-width q-mb-sm")
+        vl_filter_input.visible = False
+        vl_select.visible = False
+
+        # Holds the latest pd.DataFrame so filter changes don't re-fetch.
+        vl_picker_state: dict = {"df": None, "suppress_listener": False}
+
+        def _rebuild_vl_options() -> None:
+            df = vl_picker_state["df"]
+            if df is None or df.empty:
+                vl_select.options = {}
+                vl_select.value = None
+                vl_select.update()
+                return
+            from iidm_viewer.network_loader import (
+                filter_voltage_levels as _filter,
+            )
+            filtered = _filter(df, vl_filter_input.value or "")
+            options: dict[str, str] = {}
+            for _, row in filtered.iterrows():
+                kv = (
+                    f" ({row['nominal_v']:.0f} kV)"
+                    if "nominal_v" in row and row["nominal_v"] == row["nominal_v"]
+                    else ""
+                )
+                options[row["id"]] = f"{row['display']}{kv}"
+            current = vl_select.value if vl_select.value in options else None
+            vl_select.options = options
+            # Preserve the previous selection if still present, else fall
+            # through and let the state-driven sync (_on_state_vl) set it.
+            vl_select.value = current
+            vl_select.update()
+
+        def _on_vl_filter_changed(_e=None) -> None:
+            _rebuild_vl_options()
+
+        def _on_vl_select_changed(_e=None) -> None:
+            # Skip while we're programmatically syncing the widget from
+            # AppState (set_selected_vl will fire again otherwise).
+            if vl_picker_state["suppress_listener"]:
+                return
+            vl_id = vl_select.value
+            if vl_id:
+                _state.set_selected_vl(str(vl_id))
+
+        vl_filter_input.on("update:model-value", _on_vl_filter_changed)
+        vl_select.on("update:model-value", _on_vl_select_changed)
+
         # AC load-flow trigger — disabled until a network is loaded;
         # status appears below it via ui.notify when the run returns.
         run_lf_btn = ui.button("Run AC Load Flow").props("flat dense") \
@@ -2852,17 +2908,41 @@ def main_page() -> None:
     # ------------------------------------------------------------------
     def _on_state_network(network):
         # Enable the Run-LF button + reset status whenever the network
-        # changes (load / clear).
+        # changes (load / clear). Also refresh the VL picker so it
+        # carries the new network's voltage levels.
         run_lf_btn.set_enabled(network is not None)
         lf_status_lbl.set_text("")
         if network is None:
+            vl_picker_state["df"] = None
+            vl_filter_input.visible = False
+            vl_select.visible = False
+            _rebuild_vl_options()
             return
+        try:
+            from iidm_viewer.network_loader import (
+                list_voltage_levels_for_selector,
+            )
+            vl_picker_state["df"] = list_voltage_levels_for_selector(network)
+        except Exception:
+            vl_picker_state["df"] = None
+        vl_filter_input.visible = True
+        vl_select.visible = True
+        _rebuild_vl_options()
         _push_map()
         tabs.set_value(map_tab)
         refresh_data_grid()
 
     def _on_state_vl(vl_id):
         vl_lbl.set_text(f"VL: {vl_id}" if vl_id else "VL: —")
+        # Keep the dropdown in sync with externally-set VLs (map / NAD
+        # click, default-VL pick). Skip the listener so we don't loop.
+        if vl_id and vl_id in (vl_select.options or {}):
+            vl_picker_state["suppress_listener"] = True
+            try:
+                vl_select.value = vl_id
+                vl_select.update()
+            finally:
+                vl_picker_state["suppress_listener"] = False
         if vl_id:
             _push_sld(vl_id)
             _push_nad(vl_id, _nad_depth)

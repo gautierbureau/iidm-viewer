@@ -1540,3 +1540,57 @@ def test_app_state_emits_signal_only_on_change(qapp):
     s.set_selected_vl("VL_B")
     s.set_selected_vl(None)
     assert seen == ["VL_A", "VL_B", ""]
+
+
+def test_sidebar_vl_picker_filters_and_selects(qapp, loaded_window):
+    """Mirrors Streamlit's ``vl_selector``: the sidebar carries a
+    filter input + a dropdown populated with the network's VLs. Typing
+    in the filter narrows the dropdown; picking an item routes through
+    ``AppState.set_selected_vl`` (same path as a map click). Locks in
+    the contract that the sidebar can drive VL selection on its own."""
+    sidebar = loaded_window.sidebar
+    # The dropdown is populated from the loaded IEEE14 network.
+    assert sidebar._vl_combo.isEnabled()
+    assert sidebar._vl_combo.count() > 0
+    # The current selection should match the auto-picked default-VL.
+    assert sidebar._vl_combo.currentData() == loaded_window.state.selected_vl
+
+    # Filtering narrows the dropdown.
+    full_count = sidebar._vl_combo.count()
+    sidebar._vl_filter.setText("VL1")
+    qapp.processEvents()
+    narrowed_count = sidebar._vl_combo.count()
+    assert 0 < narrowed_count <= full_count
+
+    # Clear filter — combo regrows.
+    sidebar._vl_filter.setText("")
+    qapp.processEvents()
+    assert sidebar._vl_combo.count() == full_count
+
+    # Picking a different VL programmatically goes through the AppState.
+    target_idx = 1 if sidebar._vl_combo.count() > 1 else 0
+    target_id = sidebar._vl_combo.itemData(target_idx)
+    sidebar._vl_combo.setCurrentIndex(target_idx)
+    qapp.processEvents()
+    assert loaded_window.state.selected_vl == target_id
+
+
+def test_sidebar_vl_picker_syncs_when_state_changes_externally(qapp, loaded_window):
+    """A map / NAD / SLD click sets ``state.selected_vl`` directly.
+    The sidebar dropdown must follow — otherwise users see a desynced
+    label."""
+    sidebar = loaded_window.sidebar
+    assert sidebar._vl_combo.count() >= 2
+
+    # Pick a VL that isn't the current one.
+    current = sidebar._vl_combo.currentData()
+    other = None
+    for i in range(sidebar._vl_combo.count()):
+        if sidebar._vl_combo.itemData(i) != current:
+            other = sidebar._vl_combo.itemData(i)
+            break
+    assert other is not None
+
+    loaded_window.state.set_selected_vl(other)
+    qapp.processEvents()
+    assert sidebar._vl_combo.currentData() == other

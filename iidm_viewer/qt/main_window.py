@@ -12,9 +12,11 @@ import sys
 from typing import Optional
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -24,6 +26,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from iidm_viewer.network_loader import (
+    filter_voltage_levels,
+    list_voltage_levels_for_selector,
+)
 from iidm_viewer.qt.data_explorer_tab import DataExplorerTab
 from iidm_viewer.qt.map_tab import MapTab
 from iidm_viewer.qt.nad_tab import NadTab
@@ -32,9 +38,9 @@ from iidm_viewer.qt.state import AppState
 
 
 class _Sidebar(QWidget):
-    def __init__(self, on_load, on_run_loadflow, parent=None) -> None:
+    def __init__(self, on_load, on_run_loadflow, on_vl_selected, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedWidth(220)
+        self.setFixedWidth(240)
         self.setStyleSheet("background: #f6f6f6;")
 
         title = QLabel("IIDM Viewer\n(PySide6 preview)")
@@ -47,8 +53,19 @@ class _Sidebar(QWidget):
         self._file_lbl.setWordWrap(True)
         self._file_lbl.setStyleSheet("padding: 8px 10px; color: #555; font-size: 11px;")
 
-        self._vl_lbl = QLabel("Selected VL: —")
-        self._vl_lbl.setStyleSheet("padding: 8px 10px; color: #333; font-size: 12px;")
+        # VL filter + dropdown (mirrors Streamlit's vl_selector).
+        # The full VL DataFrame is kept around so the filter input can
+        # re-narrow the combo without re-fetching from pypowsybl.
+        self._on_vl_selected = on_vl_selected
+        self._vl_df = None  # populated by ``set_voltage_levels``
+        vl_filter_lbl = QLabel("Voltage Level")
+        vl_filter_lbl.setStyleSheet("padding: 8px 10px 0 10px; font-size: 11px; color: #555;")
+        self._vl_filter = QLineEdit()
+        self._vl_filter.setPlaceholderText("Filter voltage levels")
+        self._vl_filter.textChanged.connect(self._on_vl_filter_changed)
+        self._vl_combo = QComboBox()
+        self._vl_combo.setEnabled(False)
+        self._vl_combo.currentIndexChanged.connect(self._on_vl_combo_changed)
 
         self._run_lf_btn = QPushButton("Run AC Load Flow")
         self._run_lf_btn.clicked.connect(on_run_loadflow)
@@ -62,16 +79,16 @@ class _Sidebar(QWidget):
         layout.addWidget(title)
         layout.addWidget(self._load_btn)
         layout.addWidget(self._file_lbl)
-        layout.addWidget(self._vl_lbl)
+        layout.addWidget(vl_filter_lbl)
+        layout.addWidget(self._vl_filter)
+        layout.addWidget(self._vl_combo)
         layout.addWidget(self._run_lf_btn)
         layout.addWidget(self._lf_status)
         layout.addStretch(1)
 
+    # -- File / status labels --------------------------------------------
     def set_file(self, path: Optional[str]) -> None:
         self._file_lbl.setText(os.path.basename(path) if path else "No file loaded.")
-
-    def set_vl(self, vl_id: Optional[str]) -> None:
-        self._vl_lbl.setText(f"Selected VL: {vl_id}" if vl_id else "Selected VL: —")
 
     def set_loadflow_enabled(self, enabled: bool) -> None:
         self._run_lf_btn.setEnabled(enabled)
@@ -86,6 +103,74 @@ class _Sidebar(QWidget):
         self._lf_status.setStyleSheet(
             f"padding: 4px 10px; font-size: 11px; color: {color};"
         )
+
+    # -- VL picker -------------------------------------------------------
+    def set_voltage_levels(self, vls_df) -> None:
+        """Feed the dropdown with the full VL DataFrame from
+        :func:`iidm_viewer.network_loader.list_voltage_levels_for_selector`.
+        ``None`` (or an empty frame) clears the combo."""
+        self._vl_df = vls_df
+        self._vl_filter.blockSignals(True)
+        self._vl_filter.clear()
+        self._vl_filter.blockSignals(False)
+        self._rebuild_combo()
+
+    def set_vl(self, vl_id: Optional[str]) -> None:
+        """Sync the dropdown to an externally-set VL (e.g. map click)."""
+        if vl_id is None or self._vl_df is None:
+            return
+        for i in range(self._vl_combo.count()):
+            if self._vl_combo.itemData(i) == vl_id:
+                if self._vl_combo.currentIndex() != i:
+                    self._vl_combo.blockSignals(True)
+                    self._vl_combo.setCurrentIndex(i)
+                    self._vl_combo.blockSignals(False)
+                return
+
+    # -- Internals -------------------------------------------------------
+    def _on_vl_filter_changed(self, _text: str) -> None:
+        self._rebuild_combo()
+
+    def _on_vl_combo_changed(self, _idx: int) -> None:
+        vl_id = self._vl_combo.currentData()
+        if vl_id:
+            self._on_vl_selected(str(vl_id))
+
+    def _rebuild_combo(self) -> None:
+        # NOTE: programmatic repopulation never fires the selection
+        # callback — the network's default-VL pick (highest V) flows in
+        # via ``set_vl`` from the AppState's listener loop, and we
+        # don't want to clobber it with the alphabetical first item.
+        if self._vl_df is None or self._vl_df.empty:
+            self._vl_combo.blockSignals(True)
+            self._vl_combo.clear()
+            self._vl_combo.setEnabled(False)
+            self._vl_combo.blockSignals(False)
+            return
+        filtered = filter_voltage_levels(self._vl_df, self._vl_filter.text())
+        # Preserve the current selection across re-filters when possible.
+        current = self._vl_combo.currentData()
+        self._vl_combo.blockSignals(True)
+        self._vl_combo.clear()
+        if filtered.empty:
+            self._vl_combo.setEnabled(False)
+        else:
+            self._vl_combo.setEnabled(True)
+            for _, row in filtered.iterrows():
+                kv = (
+                    f" ({row['nominal_v']:.0f} kV)"
+                    if "nominal_v" in row and row["nominal_v"] == row["nominal_v"]  # NaN guard
+                    else ""
+                )
+                self._vl_combo.addItem(f"{row['display']}{kv}", userData=row["id"])
+            target_idx = 0
+            if current:
+                for i in range(self._vl_combo.count()):
+                    if self._vl_combo.itemData(i) == current:
+                        target_idx = i
+                        break
+            self._vl_combo.setCurrentIndex(target_idx)
+        self._vl_combo.blockSignals(False)
 
 
 class MainWindow(QMainWindow):
@@ -111,7 +196,11 @@ class MainWindow(QMainWindow):
         # survives tab switches and component changes.
         self.data_tab.set_change_log(self.state.change_log)
 
-        self.sidebar = _Sidebar(self._on_load_clicked, self._on_run_loadflow_clicked)
+        self.sidebar = _Sidebar(
+            self._on_load_clicked,
+            self._on_run_loadflow_clicked,
+            self._on_sidebar_vl_selected,
+        )
 
         central = QWidget()
         layout = QHBoxLayout(central)
@@ -206,7 +295,16 @@ class MainWindow(QMainWindow):
     # State → UI plumbing
     # ------------------------------------------------------------------
     def _on_network_changed(self, network) -> None:
-        self.sidebar.set_vl(None)
+        # Refresh the VL dropdown before the rest — the default-VL pick
+        # that fires next will land on a populated combo.
+        if network is None:
+            self.sidebar.set_voltage_levels(None)
+        else:
+            try:
+                vls_df = list_voltage_levels_for_selector(network)
+            except Exception:
+                vls_df = None
+            self.sidebar.set_voltage_levels(vls_df)
         self.sidebar.set_loadflow_enabled(network is not None)
         self.sidebar.set_loadflow_status("")
         self.map_tab.set_network(network)
@@ -214,6 +312,12 @@ class MainWindow(QMainWindow):
         self.sld_tab.set_network(network)
         self.data_tab.set_network(network)
         self.tabs.setCurrentWidget(self.map_tab)
+
+    def _on_sidebar_vl_selected(self, vl_id: str) -> None:
+        """Forward a dropdown pick into the AppState — same path as a
+        map / NAD / SLD click. The state's listener loop fans out to
+        the data tab + the diagrams from there."""
+        self.state.set_selected_vl(vl_id)
 
     def _on_selected_vl_changed(self, vl_id: str) -> None:
         self.sidebar.set_vl(vl_id or None)
