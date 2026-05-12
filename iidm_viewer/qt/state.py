@@ -99,6 +99,32 @@ class AppState(QObject):
         self._selected_vl = new
         self.selected_vl_changed.emit(new or "")
 
+    def notify_network_changed(self) -> None:
+        """Re-broadcast the *same* network as if it had been freshly
+        loaded.
+
+        Used after irreversible in-place mutations (e.g. network
+        reduction) so the sidebar's VL picker, the diagram tabs and
+        the data explorer all refresh against the new topology
+        without having to round-trip through ``load_network_from_path``.
+        Mirrors the cache-flush effect Streamlit gets from
+        ``invalidate_on_network_replace``.
+        """
+        network = self._network
+        if network is None:
+            return
+        # Reset the selected VL + the cached LF report — neither
+        # survives an arbitrary topology change.
+        self._selected_vl = None
+        self._last_report_json = None
+        self.change_log.clear()
+        # Pick a fresh default-VL (highest nominal V) on the reduced
+        # network and broadcast the change to every listener.
+        default_vl = network_loader.pick_default_vl(network)
+        self.network_changed.emit(network)
+        if default_vl:
+            self.set_selected_vl(default_vl)
+
     def run_loadflow(
         self,
         generic_params: Optional[dict] = None,

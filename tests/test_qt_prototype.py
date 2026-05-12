@@ -1717,6 +1717,78 @@ def test_app_state_threads_import_params_into_load_network(qapp, monkeypatch):
     assert captured["post_processors"] == state.import_post_processors
 
 
+def test_network_reduction_dialog_applies_voltage_range(qapp):
+    """End-to-end NetworkReductionDialog: apply a voltage-range
+    reduction on IEEE14 and confirm the dialog reports success +
+    every VL left in the network is inside the requested band."""
+    import pypowsybl.network as pn
+    from iidm_viewer.network_reduction_actions import list_voltage_level_ids
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.network_reduction_dialog import NetworkReductionDialog
+
+    net = NetworkProxy(run(pn.create_ieee14))
+    vl_ids = list_voltage_level_ids(net)
+    dlg = NetworkReductionDialog(net, vl_ids)
+    qapp.processEvents()
+
+    dlg._v_min.setValue(100.0)
+    dlg._v_max.setValue(200.0)
+    dlg._on_apply_clicked()
+    qapp.processEvents()
+
+    assert dlg.applied is True
+    vls = net.get_voltage_levels()
+    assert not vls.empty
+    assert min(vls["nominal_v"]) >= 100.0
+
+
+def test_network_reduction_dialog_validator_errors_land_on_status(qapp):
+    """An inverted band → ValueError → status label gets the message
+    and ``applied`` stays False."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.network_reduction_dialog import NetworkReductionDialog
+
+    net = NetworkProxy(run(pn.create_ieee14))
+    dlg = NetworkReductionDialog(net, vl_ids=["VL1", "VL2"])
+    qapp.processEvents()
+    dlg._v_min.setValue(200.0)
+    dlg._v_max.setValue(100.0)
+    dlg._on_apply_clicked()
+    qapp.processEvents()
+    assert dlg.applied is False
+    assert "less than" in dlg._status.text().lower()
+
+
+def test_app_state_notify_network_changed_refires_listeners(qapp):
+    """``AppState.notify_network_changed`` re-emits ``network_changed``
+    for the same network — used by reduction to refresh listeners
+    after an in-place mutation."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.state import AppState
+
+    state = AppState()
+    state._network = NetworkProxy(run(pn.create_ieee14))
+    seen: list = []
+    state.network_changed.connect(lambda net: seen.append(net))
+
+    state.notify_network_changed()
+    qapp.processEvents()
+    assert len(seen) == 1
+    assert seen[0] is state.network
+
+
+def test_sidebar_network_reduction_button_gates_on_network(qapp, loaded_window):
+    """The "Network Reduction" button toggles with the network — same
+    contract as Save."""
+    sidebar = loaded_window.sidebar
+    assert sidebar._reduction_btn.isEnabled() is True
+    loaded_window._on_network_changed(None)
+    qapp.processEvents()
+    assert sidebar._reduction_btn.isEnabled() is False
+
+
 def test_save_network_dialog_picks_xiidm_by_default(qapp):
     """The Save-network format picker should default to XIIDM when
     that format is offered — matches Streamlit's typical use."""

@@ -124,6 +124,25 @@ class AppState:
         for listener in list(self._vl_listeners):
             listener(new)
 
+    def notify_network_changed(self) -> None:
+        """Re-broadcast the same network after an in-place mutation.
+
+        Used by the "Network Reduction" dialog so all listeners
+        (diagram caches, data explorer, VL picker) refresh against
+        the reduced topology without going through a full reload.
+        """
+        network = self._network
+        if network is None:
+            return
+        self._selected_vl = None
+        self._last_report_json = None
+        self.change_log.clear()
+        default_vl = network_loader.pick_default_vl(network)
+        for listener in list(self._network_listeners):
+            listener(network)
+        if default_vl:
+            self.set_selected_vl(default_vl)
+
     def run_loadflow(
         self,
         generic_params: Optional[dict] = None,
