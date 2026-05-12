@@ -610,30 +610,19 @@ def create_reactive_limits(
 
 
 # --- Operational limits (CURRENT / APPARENT_POWER / ACTIVE_POWER) ---
+#
+# Registry + candidate lister + validator + worker-routed dispatcher live in the
+# shared ``iidm_viewer.component_creation`` module. The Streamlit wrapper adds
+# the cache invalidation that every topology-affecting mutation needs.
 
-OPERATIONAL_LIMIT_TYPES = ["CURRENT", "APPARENT_POWER", "ACTIVE_POWER"]
-OPERATIONAL_LIMIT_SIDES = ["ONE", "TWO"]
-
-# Component label → getter method, to enumerate target elements.
-OPERATIONAL_LIMITS_TARGETS = {
-    "Lines": "get_lines",
-    "2-Winding Transformers": "get_2_windings_transformers",
-    "Dangling Lines": "get_dangling_lines",
-}
-
-# Permanent limit's acceptable_duration is -1; data-editor-friendly sentinel.
-PERMANENT_DURATION = -1
-
-
-def list_operational_limit_candidates(network, component: str) -> list[str]:
-    getter = OPERATIONAL_LIMITS_TARGETS.get(component)
-    if not getter:
-        return []
-    try:
-        df = getattr(network, getter)()
-    except Exception:
-        return []
-    return sorted(df.index.tolist())
+from iidm_viewer.component_creation import (  # noqa: E402, F401  (re-exported)
+    OPERATIONAL_LIMIT_SIDES,
+    OPERATIONAL_LIMIT_TYPES,
+    OPERATIONAL_LIMITS_TARGETS,
+    PERMANENT_DURATION,
+    list_operational_limit_candidates,
+    validate_create_operational_limits_fields,
+)
 
 
 def create_operational_limits(
@@ -644,63 +633,8 @@ def create_operational_limits(
     limits: list[dict],
     group_name: str = "DEFAULT",
 ):
-    """Create a group of operational limits on one side of an element.
-
-    ``limits`` is a list of dicts with ``name``, ``value``, and
-    ``acceptable_duration`` (use ``-1`` for the permanent limit). Exactly
-    one permanent limit is allowed per (element, side, group). pypowsybl
-    replaces any existing limits in the target group.
-    """
-    if element_id is None or element_id == "":
-        raise ValueError("Target element id is required.")
-    if side not in OPERATIONAL_LIMIT_SIDES:
-        raise ValueError(f"Side must be one of {OPERATIONAL_LIMIT_SIDES}.")
-    if limit_type not in OPERATIONAL_LIMIT_TYPES:
-        raise ValueError(f"Type must be one of {OPERATIONAL_LIMIT_TYPES}.")
-    if not limits:
-        raise ValueError("At least one limit row is required.")
-
-    rows = []
-    permanent = 0
-    for lim in limits:
-        if lim.get("value") is None:
-            raise ValueError("Every limit needs a value.")
-        if lim["value"] < 0:
-            raise ValueError("Limit values must be non-negative.")
-        duration = lim.get("acceptable_duration")
-        if duration is None:
-            raise ValueError("Every limit needs an acceptable_duration (-1 for permanent).")
-        duration = int(duration)
-        if duration == -1:
-            permanent += 1
-        elif duration < 0:
-            raise ValueError("acceptable_duration must be -1 (permanent) or >= 0.")
-        name = lim.get("name") or (
-            "permanent" if duration == -1 else f"TATL_{duration}"
-        )
-        rows.append({
-            "element_id": element_id,
-            "side": side,
-            "name": name,
-            "type": limit_type,
-            "value": float(lim["value"]),
-            "acceptable_duration": duration,
-            "fictitious": bool(lim.get("fictitious", False)),
-            "group_name": group_name,
-        })
-    if permanent != 1:
-        raise ValueError(
-            "Exactly one permanent limit (acceptable_duration = -1) is required."
-        )
-
-    # pypowsybl's create_operational_limits expects element_id as the df index.
-    df = pd.DataFrame(rows).set_index("element_id")
-    raw = object.__getattribute__(network, "_obj")
-
-    def _do_create():
-        raw.create_operational_limits(df)
-
-    run(_do_create)
+    from iidm_viewer.component_creation import create_operational_limits as _shared
+    _shared(network, element_id, side, limit_type, limits, group_name)
     invalidate_on_topology_change()
     script_recorder.record_create_operational_limits(
         element_id, side, limit_type, limits, group_name=group_name
