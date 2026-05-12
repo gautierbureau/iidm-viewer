@@ -2711,35 +2711,50 @@ def main_page() -> None:
     ui.add_body_html(f"<script>{_BRIDGE_JS}</script>")
 
     # ------------------------------------------------------------------
-    # Layout
+    # Layout — Streamlit-style left drawer holds the global controls
+    # (title, file picker, load-flow trigger); the main area below
+    # carries the diagram + data tabs.
     # ------------------------------------------------------------------
-    with ui.header().classes("items-center bg-grey-2 text-black q-py-sm"):
-        ui.label("IIDM Viewer — NiceGUI preview").classes("text-h6 q-mr-md")
-        file_lbl = ui.label("No file loaded.").classes("text-caption q-mr-md")
-        vl_lbl = ui.label("VL: —").classes("text-caption q-mr-md")
+    with ui.left_drawer(fixed=False, bordered=True) \
+            .classes("bg-grey-2 q-pa-md") \
+            .style("width: 280px"):
+        ui.label("IIDM Viewer").classes("text-h6")
+        file_lbl = ui.label("No file loaded.").classes("text-caption")
+        vl_lbl = ui.label("VL: —").classes("text-caption q-mb-sm")
 
         async def handle_upload(e):
-            tmp_path = f"/tmp/iidm_upload_{os.getpid()}_{os.path.basename(e.name)}"
-            with open(tmp_path, "wb") as fh:
-                fh.write(e.content.read())
+            # NiceGUI 3.x: the event carries a ``FileUpload`` on ``e.file``
+            # with an async ``read()`` / ``save()``; 2.x had ``e.name`` and
+            # a sync ``e.content`` stream. Support both so the prototype
+            # runs against either version.
+            upload = getattr(e, "file", None) or e
+            name = upload.name
+            tmp_path = f"/tmp/iidm_upload_{os.getpid()}_{os.path.basename(name)}"
+            if hasattr(upload, "save"):
+                await upload.save(tmp_path)
+            else:  # NiceGUI 2.x fallback
+                with open(tmp_path, "wb") as fh:
+                    fh.write(upload.content.read())
             try:
                 await asyncio.to_thread(_state.load_network_from_path, tmp_path)
             except Exception as exc:
                 ui.notify(f"Load failed: {exc}", type="negative")
                 return
-            file_lbl.set_text(os.path.basename(e.name))
+            file_lbl.set_text(os.path.basename(name))
 
         ui.upload(
             on_upload=handle_upload,
             auto_upload=True,
             label="Load network…",
-        ).props("flat dense accept='.xiidm,.iidm,.xml,.zip,.mat,.uct'").classes("q-mr-md")
+        ).props("flat dense accept='.xiidm,.iidm,.xml,.zip,.mat,.uct'") \
+         .classes("full-width q-mb-sm")
 
         # AC load-flow trigger — disabled until a network is loaded;
-        # status appears next to it via ui.notify when the run returns.
-        run_lf_btn = ui.button("Run AC Load Flow").props("flat dense")
+        # status appears below it via ui.notify when the run returns.
+        run_lf_btn = ui.button("Run AC Load Flow").props("flat dense") \
+            .classes("full-width")
         run_lf_btn.set_enabled(False)
-        lf_status_lbl = ui.label("").classes("text-caption q-ml-sm")
+        lf_status_lbl = ui.label("").classes("text-caption q-mt-sm")
 
         async def on_run_lf() -> None:
             if _state.network is None:
