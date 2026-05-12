@@ -37,14 +37,74 @@ from PySide6.QtWidgets import (
 )
 
 from iidm_viewer.component_creation import (
+    CREATABLE_BRANCHES,
     CREATABLE_COMPONENTS,
     LOCATOR_FIELDS,
+    branch_side_locator_fields,
     coerce_field_values,
+    create_branch_bay,
     create_component_bay,
     list_busbar_sections,
     list_node_breaker_voltage_levels,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy
+
+
+# ---------------------------------------------------------------------------
+# Shared widget builders — used by both ``CreateComponentPanel`` and
+# ``CreateBranchPanel``.
+# ---------------------------------------------------------------------------
+def make_field_widget(field: dict) -> QWidget:
+    """Build the right Qt widget for a field spec from the shared registry.
+
+    Knows the five widget kinds the registry uses: text / float / int /
+    bool / select. Raises ``ValueError`` on an unknown kind.
+    """
+    kind = field["kind"]
+    if kind == "text":
+        w = QLineEdit()
+        w.setText(str(field.get("default") or ""))
+        return w
+    if kind == "float":
+        w = QDoubleSpinBox()
+        w.setDecimals(6)
+        w.setRange(field.get("min_value", -1e15), 1e15)
+        w.setValue(float(field.get("default", 0.0)))
+        return w
+    if kind == "int":
+        w = QSpinBox()
+        w.setRange(field.get("min_value", -2 ** 31), 2 ** 31 - 1)
+        w.setSingleStep(int(field.get("step", 1)))
+        w.setValue(int(field.get("default", 0)))
+        return w
+    if kind == "bool":
+        w = QCheckBox()
+        w.setChecked(bool(field.get("default", False)))
+        return w
+    if kind == "select":
+        w = QComboBox()
+        options = list(field.get("options", []))
+        for opt in options:
+            w.addItem(str(opt))
+        default = field.get("default")
+        if default in options:
+            w.setCurrentIndex(options.index(default))
+        return w
+    raise ValueError(f"Unknown field kind {kind!r}")
+
+
+def read_field_widget(field: dict, widget: QWidget) -> Any:
+    """Read a widget's value typed per the field spec."""
+    kind = field["kind"]
+    if kind == "text":
+        return widget.text()
+    if kind in ("float", "int"):
+        return widget.value()
+    if kind == "bool":
+        return widget.isChecked()
+    if kind == "select":
+        return widget.currentText()
+    return None
 
 
 class CreateComponentPanel(QWidget):
@@ -226,52 +286,13 @@ class CreateComponentPanel(QWidget):
             self._field_widgets[f["name"]] = widget
 
     def _make_widget(self, field: dict) -> QWidget:
-        kind = field["kind"]
-        if kind == "text":
-            w = QLineEdit()
-            w.setText(str(field.get("default") or ""))
-            return w
-        if kind == "float":
-            w = QDoubleSpinBox()
-            w.setDecimals(6)
-            w.setRange(field.get("min_value", -1e15), 1e15)
-            w.setValue(float(field.get("default", 0.0)))
-            return w
-        if kind == "int":
-            w = QSpinBox()
-            w.setRange(field.get("min_value", -2 ** 31), 2 ** 31 - 1)
-            w.setSingleStep(int(field.get("step", 1)))
-            w.setValue(int(field.get("default", 0)))
-            return w
-        if kind == "bool":
-            w = QCheckBox()
-            w.setChecked(bool(field.get("default", False)))
-            return w
-        if kind == "select":
-            w = QComboBox()
-            options = list(field.get("options", []))
-            for opt in options:
-                w.addItem(str(opt))
-            default = field.get("default")
-            if default in options:
-                w.setCurrentIndex(options.index(default))
-            return w
-        raise ValueError(f"Unknown field kind {kind!r}")
+        return make_field_widget(field)
 
     def _read_widget(self, field: dict) -> Any:
         w = self._field_widgets.get(field["name"])
         if w is None:
             return None
-        kind = field["kind"]
-        if kind == "text":
-            return w.text()
-        if kind in ("float", "int"):
-            return w.value()
-        if kind == "bool":
-            return w.isChecked()
-        if kind == "select":
-            return w.currentText()
-        return None
+        return read_field_widget(field, w)
 
     def _on_create_clicked(self) -> None:
         if self._network is None or self._component not in CREATABLE_COMPONENTS:
@@ -295,6 +316,254 @@ class CreateComponentPanel(QWidget):
             self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
             return
 
+        created_id = str(values.get("id", ""))
+        self._status.setText(f"Created {self._component.rstrip('s')} {created_id!r}.")
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit(self._component, created_id)
+
+
+# ---------------------------------------------------------------------------
+# Branch creation panel (Lines + 2-Winding Transformers)
+# ---------------------------------------------------------------------------
+class CreateBranchPanel(QWidget):
+    """Generic creation form for any component in CREATABLE_BRANCHES.
+
+    Layout:
+
+    * Side-1 picker:   [VL 1 ▾]  [Busbar section 1 ▾]
+    * Side-2 picker:   [VL 2 ▾]  [Busbar section 2 ▾]
+    * Electrical fields (id, r, x, …)  — registry-driven, 3-column grid.
+    * Side-1 locator:  [position_order 1] [direction 1]
+    * Side-2 locator:  [position_order 2] [direction 2]
+    * Create button + status.
+
+    Same auto-hide rules as :class:`CreateComponentPanel`: hidden when
+    the component isn't in :data:`CREATABLE_BRANCHES` or the network
+    has no node-breaker voltage levels (bay creation needs busbar
+    sections).
+    """
+
+    component_created = Signal(str, str)  # (component, element_id)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+        self._field_widgets: dict[str, QWidget] = {}
+
+        self._group = QGroupBox("Create a new branch")
+        self._group.setCheckable(True)
+        self._group.setChecked(True)
+        self._group.toggled.connect(self._on_toggled)
+
+        # Side pickers.
+        self._vl1 = QComboBox(); self._vl1.setMinimumWidth(200)
+        self._vl1.currentTextChanged.connect(lambda _t: self._on_vl_changed(1))
+        self._bbs1 = QComboBox(); self._bbs1.setMinimumWidth(160)
+        self._vl2 = QComboBox(); self._vl2.setMinimumWidth(200)
+        self._vl2.currentTextChanged.connect(lambda _t: self._on_vl_changed(2))
+        self._bbs2 = QComboBox(); self._bbs2.setMinimumWidth(160)
+
+        side1_row = QHBoxLayout()
+        side1_row.addWidget(QLabel("Side 1 — VL:"))
+        side1_row.addWidget(self._vl1)
+        side1_row.addSpacing(8)
+        side1_row.addWidget(QLabel("Busbar:"))
+        side1_row.addWidget(self._bbs1)
+        side1_row.addStretch(1)
+
+        side2_row = QHBoxLayout()
+        side2_row.addWidget(QLabel("Side 2 — VL:"))
+        side2_row.addWidget(self._vl2)
+        side2_row.addSpacing(8)
+        side2_row.addWidget(QLabel("Busbar:"))
+        side2_row.addWidget(self._bbs2)
+        side2_row.addStretch(1)
+
+        # Electrical fields + per-side locators land in this grid.
+        self._fields_grid = QGridLayout()
+        self._fields_grid.setSpacing(6)
+        self._fields_widget = QWidget()
+        self._fields_widget.setLayout(self._fields_grid)
+
+        # Action row.
+        self._create_btn = QPushButton("Create")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self._create_btn)
+        action_row.addWidget(self._status, 1)
+
+        inner = QVBoxLayout()
+        inner.setContentsMargins(6, 2, 6, 6)
+        inner.setSpacing(6)
+        inner.addLayout(side1_row)
+        inner.addLayout(side2_row)
+        inner.addWidget(self._fields_widget)
+        inner.addLayout(action_row)
+        self._group.setLayout(inner)
+        self._fields_widget.setVisible(True)
+        self.setVisible(False)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_vl_combos()
+        self._refresh_visibility()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._group.setTitle(
+            f"Create a new {component.lower().rstrip('s')}"
+            if component else "Create a new branch"
+        )
+        self._rebuild_field_widgets()
+        self._refresh_visibility()
+        self._status.setText("")
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+    def _refresh_visibility(self) -> None:
+        applicable = (
+            self._network is not None
+            and self._component in CREATABLE_BRANCHES
+        )
+        self.setVisible(applicable)
+
+    def _on_toggled(self, checked: bool) -> None:
+        self._fields_widget.setVisible(checked)
+
+    def _refresh_vl_combos(self) -> None:
+        for combo in (self._vl1, self._vl2):
+            combo.blockSignals(True)
+            combo.clear()
+        for combo in (self._bbs1, self._bbs2):
+            combo.clear()
+
+        if self._network is None:
+            for combo in (self._vl1, self._vl2):
+                combo.blockSignals(False)
+            return
+        try:
+            vls = list_node_breaker_voltage_levels(self._network)
+        except Exception:
+            vls = None
+        if vls is None or vls.empty:
+            for combo in (self._vl1, self._vl2):
+                combo.addItem("(no node-breaker VLs in this network)")
+                combo.setEnabled(False)
+                combo.blockSignals(False)
+            for combo in (self._bbs1, self._bbs2):
+                combo.setEnabled(False)
+            self._create_btn.setEnabled(False)
+            return
+        for combo in (self._vl1, self._vl2):
+            combo.setEnabled(True)
+        for combo in (self._bbs1, self._bbs2):
+            combo.setEnabled(True)
+        self._create_btn.setEnabled(True)
+        for combo in (self._vl1, self._vl2):
+            for _, row in vls.iterrows():
+                combo.addItem(str(row["display"]), userData=str(row["id"]))
+        # Second VL pre-selects the next one (avoids accidental self-loop).
+        if self._vl2.count() > 1:
+            self._vl2.setCurrentIndex(1)
+        for combo in (self._vl1, self._vl2):
+            combo.blockSignals(False)
+        self._on_vl_changed(1)
+        self._on_vl_changed(2)
+
+    def _on_vl_changed(self, side: int) -> None:
+        vl_combo = self._vl1 if side == 1 else self._vl2
+        bbs_combo = self._bbs1 if side == 1 else self._bbs2
+        bbs_combo.clear()
+        if self._network is None or vl_combo.currentData() is None:
+            return
+        try:
+            ids = list_busbar_sections(self._network, str(vl_combo.currentData()))
+        except Exception:
+            ids = []
+        if not ids:
+            bbs_combo.addItem("(no busbar sections)")
+            bbs_combo.setEnabled(False)
+            self._create_btn.setEnabled(False)
+            return
+        for bid in ids:
+            bbs_combo.addItem(str(bid))
+        bbs_combo.setEnabled(True)
+        self._create_btn.setEnabled(True)
+
+    def _rebuild_field_widgets(self) -> None:
+        for w in self._field_widgets.values():
+            w.setParent(None)
+        self._field_widgets.clear()
+        while self._fields_grid.count():
+            item = self._fields_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+        if self._component not in CREATABLE_BRANCHES:
+            return
+
+        spec = CREATABLE_BRANCHES[self._component]
+        # Electrical fields first; then per-side locator fields (which
+        # carry _1 / _2 name suffixes).
+        fields = (
+            list(spec["fields"])
+            + list(branch_side_locator_fields(1))
+            + list(branch_side_locator_fields(2))
+        )
+        for i, f in enumerate(fields):
+            row, col = divmod(i, 3)
+            widget_label = f["label"] + (" *" if f.get("required") else "")
+            label = QLabel(widget_label)
+            if f.get("help"):
+                label.setToolTip(f["help"])
+            widget = make_field_widget(f)
+            cell = QWidget()
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(2)
+            cell_layout.addWidget(label)
+            cell_layout.addWidget(widget)
+            self._fields_grid.addWidget(cell, row, col)
+            self._field_widgets[f["name"]] = widget
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component not in CREATABLE_BRANCHES:
+            return
+        bbs1 = self._bbs1.currentText() if self._bbs1.isEnabled() else ""
+        bbs2 = self._bbs2.currentText() if self._bbs2.isEnabled() else ""
+        if not bbs1 or bbs1.startswith("(") or not bbs2 or bbs2.startswith("("):
+            self._status.setText("Pick a busbar section on both sides first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        spec = CREATABLE_BRANCHES[self._component]
+        all_fields = (
+            list(spec["fields"])
+            + list(branch_side_locator_fields(1))
+            + list(branch_side_locator_fields(2))
+        )
+        raw = {f["name"]: read_field_widget(f, self._field_widgets[f["name"]])
+               for f in all_fields if f["name"] in self._field_widgets}
+        values = coerce_field_values(all_fields, raw)
+        values["bus_or_busbar_section_id_1"] = bbs1
+        values["bus_or_busbar_section_id_2"] = bbs2
+        try:
+            create_branch_bay(self._network, self._component, values)
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
         created_id = str(values.get("id", ""))
         self._status.setText(f"Created {self._component.rstrip('s')} {created_id!r}.")
         self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
