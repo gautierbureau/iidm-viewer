@@ -28,7 +28,10 @@ from PySide6.QtWidgets import (
 )
 
 from iidm_viewer.network_loader import (
+    export_network,
     filter_voltage_levels,
+    get_export_formats,
+    guess_mime_for_export,
     list_voltage_levels_for_selector,
 )
 from iidm_viewer.qt.data_explorer_tab import DataExplorerTab
@@ -41,7 +44,7 @@ from iidm_viewer.qt.state import AppState
 class _Sidebar(QWidget):
     def __init__(
         self, on_load, on_run_loadflow, on_vl_selected, on_view_logs,
-        on_lf_parameters, parent=None,
+        on_lf_parameters, on_save_network, parent=None,
     ) -> None:
         super().__init__(parent)
         self.setFixedWidth(240)
@@ -52,6 +55,13 @@ class _Sidebar(QWidget):
 
         self._load_btn = QPushButton("Load network…")
         self._load_btn.clicked.connect(on_load)
+
+        # "Save network" exports the current network through pypowsybl
+        # and writes the result to a path the user picks. Disabled
+        # until a network is loaded — mirrors Streamlit's sidebar gate.
+        self._save_btn = QPushButton("Save network")
+        self._save_btn.clicked.connect(on_save_network)
+        self._save_btn.setEnabled(False)
 
         self._file_lbl = QLabel("No file loaded.")
         self._file_lbl.setWordWrap(True)
@@ -98,6 +108,7 @@ class _Sidebar(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.addWidget(title)
         layout.addWidget(self._load_btn)
+        layout.addWidget(self._save_btn)
         layout.addWidget(self._file_lbl)
         layout.addWidget(vl_filter_lbl)
         layout.addWidget(self._vl_filter)
@@ -117,6 +128,10 @@ class _Sidebar(QWidget):
     def set_view_logs_enabled(self, enabled: bool) -> None:
         """Enable the "View Logs" button once a LF report is cached."""
         self._view_logs_btn.setEnabled(enabled)
+
+    def set_save_enabled(self, enabled: bool) -> None:
+        """Enable the "Save network" button once a network is loaded."""
+        self._save_btn.setEnabled(enabled)
 
     def set_loadflow_status(self, text: str, ok: bool = True) -> None:
         if not text:
@@ -227,6 +242,7 @@ class MainWindow(QMainWindow):
             self._on_sidebar_vl_selected,
             self._on_view_logs_clicked,
             self._on_lf_parameters_clicked,
+            self._on_save_network_clicked,
         )
 
         central = QWidget()
@@ -310,6 +326,69 @@ class MainWindow(QMainWindow):
         dlg = LFReportDialog(report_json, self)
         dlg.exec()
 
+    def _on_save_network_clicked(self) -> None:
+        """Mirror Streamlit's "Save network" dialog.
+
+        Two steps:
+
+        * Pick an export format from pypowsybl's available list (uses
+          the shared :func:`network_loader.get_export_formats`).
+        * Pick a save path via ``QFileDialog`` — pre-fills the filename
+          with the source basename + the format's natural extension.
+
+        The export itself runs through the shared
+        :func:`network_loader.export_network` (worker-routed, unwraps
+        single-file ZIPs), so the bytes the user gets are the same as
+        Streamlit's download.
+        """
+        if self.state.network is None:
+            self.statusBar().showMessage("No network loaded.")
+            return
+        try:
+            formats = get_export_formats()
+        except Exception as exc:
+            QMessageBox.critical(self, "Save failed", f"Failed to list formats: {exc}")
+            return
+        if not formats:
+            QMessageBox.warning(self, "Save network", "No export formats available.")
+            return
+        from iidm_viewer.qt.save_network_dialog import SaveNetworkDialog
+        dlg = SaveNetworkDialog(formats, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        fmt = dlg.selected_format
+        if not fmt:
+            return
+
+        # File dialog. Pre-fill with the loaded filename + the natural
+        # extension for the chosen format (XIIDM → .xiidm, etc.).
+        suggested = f"network.{fmt.lower()}"
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Save network as {fmt}", suggested,
+            f"{fmt} (*.{fmt.lower()})",
+        )
+        if not path:
+            return
+
+        self.statusBar().showMessage(f"Exporting to {fmt}…")
+        try:
+            data, ext = export_network(self.state.network, fmt)
+        except Exception as exc:
+            QMessageBox.critical(self, "Save failed", f"Export failed: {exc}")
+            self.statusBar().showMessage(f"Export failed: {exc}")
+            return
+        # Reflect the natural extension reported by ``export_network``
+        # (XIIDM unwraps to ``.xiidm``, multi-file → ``.zip``).
+        if not path.lower().endswith(f".{ext.lower()}"):
+            path = f"{path}.{ext.lower()}"
+        try:
+            with open(path, "wb") as fh:
+                fh.write(data)
+        except OSError as exc:
+            QMessageBox.critical(self, "Save failed", f"Write failed: {exc}")
+            return
+        self.statusBar().showMessage(f"Network saved to {os.path.basename(path)}.")
+
     def _on_lf_parameters_clicked(self) -> None:
         """Open the LFParametersDialog and persist the result onto AppState.
 
@@ -374,6 +453,7 @@ class MainWindow(QMainWindow):
         self.sidebar.set_loadflow_status("")
         # AppState wipes ``last_report_json`` on a fresh load; reflect that.
         self.sidebar.set_view_logs_enabled(False)
+        self.sidebar.set_save_enabled(network is not None)
         self.map_tab.set_network(network)
         self.nad_tab.set_network(network)
         self.sld_tab.set_network(network)

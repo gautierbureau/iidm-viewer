@@ -187,3 +187,64 @@ def get_export_formats() -> list[str]:
         return pn.get_export_formats()
 
     return run(_do)
+
+
+def export_network(
+    network: NetworkProxy,
+    format_name: str,
+    parameters: Optional[dict] = None,
+) -> tuple[bytes, str]:
+    """Export the network; return ``(bytes, file_extension)``.
+
+    pypowsybl wraps some formats (e.g. XIIDM) in a ZIP archive.
+    Single-file ZIPs are unwrapped so the caller gets the real content
+    and the correct extension. Multi-file ZIPs are served as-is with
+    extension ``zip``. ``parameters`` is forwarded verbatim to
+    ``save_to_binary_buffer`` so callers can pass format-specific
+    options.
+
+    Shared by Streamlit's ``Save network`` dialog and the PySide6 +
+    NiceGUI prototypes' save buttons.
+    """
+    import io as _io
+    import zipfile as _zf
+
+    raw = object.__getattribute__(network, "_obj")
+    params = parameters or {}
+
+    def _export():
+        return raw.save_to_binary_buffer(format_name, parameters=params).getvalue()
+
+    data = run(_export)
+
+    if data[:2] == b'PK':
+        try:
+            with _zf.ZipFile(_io.BytesIO(data)) as zf:
+                names = zf.namelist()
+                if len(names) == 1:
+                    inner = zf.read(names[0])
+                    ext = (
+                        names[0].rsplit(".", 1)[-1]
+                        if "." in names[0]
+                        else format_name.lower()
+                    )
+                    return inner, ext
+        except Exception:
+            pass
+        return data, "zip"
+
+    return data, format_name.lower()
+
+
+def guess_mime_for_export(data: bytes) -> str:
+    """Best-effort MIME type for an exported network blob.
+
+    Sniff the first byte: ``<`` (XML) → ``text/xml``, ``{`` (JSON) →
+    ``application/json``, anything else → ``application/octet-stream``.
+    Used by all three prototypes' download paths.
+    """
+    if data[:5] == b'<?xml':
+        return "text/xml; charset=utf-8"
+    if data[:1] == b'{':
+        return "application/json"
+    return "application/octet-stream"
