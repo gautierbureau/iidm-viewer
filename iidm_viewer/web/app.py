@@ -86,7 +86,9 @@ from iidm_viewer.component_creation import (
     create_hvdc_line,
     create_operational_limits,
     create_reactive_limits,
+    create_secondary_voltage_control,
     create_tap_changer,
+    list_bus_ids,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
@@ -95,6 +97,7 @@ from iidm_viewer.component_creation import (
     list_reactive_limit_candidates,
     list_substations_df,
     list_transformers_without_tap_changer,
+    list_unit_candidates,
     next_free_node,
 )
 from iidm_viewer.data_view import (
@@ -1868,6 +1871,166 @@ def _refresh_create_operational_limits_panel(state: dict, component: str) -> Non
     expansion.visible = True
 
 
+def _build_create_secondary_voltage_control_panel_widgets(
+    state: dict, refresh_after_create,
+) -> None:
+    """Materialise the "Configure secondary voltage control" expansion.
+
+    Two editable grids — zones (name / target_v / bus_ids) and units
+    (unit_id / zone_name / participate) — sized by row-count spinners.
+    Shows when the active component is "Voltage Levels"; pypowsybl
+    replaces the whole SVC extension on submit.
+    """
+    expansion = ui.expansion(
+        "Configure secondary voltage control", icon="hub",
+    ).classes("w-full")
+    expansion.visible = False
+    state["expansion"] = expansion
+    with expansion:
+        ui.label(
+            "Define control zones and the units that participate in each. "
+            "pypowsybl replaces the whole secondaryVoltageControl extension "
+            "on submit. bus_ids is space-separated if a zone has several "
+            "pilot points."
+        ).classes("text-caption q-pa-sm")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            ui.label("Number of zones:")
+            zone_count = ui.number(value=1, min=1, max=50, step=1, format="%d") \
+                .props("dense outlined").classes("w-24")
+        zones_container = ui.column().classes("w-full q-pa-sm")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            ui.label("Number of units:")
+            unit_count = ui.number(value=1, min=1, max=200, step=1, format="%d") \
+                .props("dense outlined").classes("w-24")
+        units_container = ui.column().classes("w-full q-pa-sm")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            create_btn = ui.button("Save secondary voltage control", icon="save")
+            status_label = ui.label("").classes("text-caption q-ml-md")
+
+    state["zone_count"] = zone_count
+    state["zones_container"] = zones_container
+    state["unit_count"] = unit_count
+    state["units_container"] = units_container
+    state["create_btn"] = create_btn
+    state["status_label"] = status_label
+    state["zone_widgets"] = []  # list[dict[col -> widget]]
+    state["unit_widgets"] = []
+
+    def _rebuild_zones() -> None:
+        n = int(state["zone_count"].value or 1)
+        if n < 1:
+            n = 1
+        state["zones_container"].clear()
+        state["zone_widgets"] = []
+        with state["zones_container"]:
+            with ui.row().classes("items-center text-caption"):
+                ui.label("#").classes("w-8")
+                ui.label("name").classes("w-32")
+                ui.label("target_v (kV)").classes("w-32 text-center")
+                ui.label("bus_ids (space-separated)").classes("flex-grow text-center")
+            for r in range(n):
+                with ui.row().classes("items-center w-full"):
+                    ui.label(str(r)).classes("w-8 text-caption")
+                    name_w = ui.input(value=f"ZONE_{r + 1}") \
+                        .props("dense outlined").classes("w-32")
+                    target_w = ui.number(value=400.0, format="%.4f") \
+                        .props("dense outlined").classes("w-32")
+                    bus_w = ui.input(value="") \
+                        .props("dense outlined").classes("flex-grow")
+                    state["zone_widgets"].append({
+                        "name": name_w, "target_v": target_w, "bus_ids": bus_w,
+                    })
+
+    def _rebuild_units() -> None:
+        n = int(state["unit_count"].value or 1)
+        if n < 1:
+            n = 1
+        state["units_container"].clear()
+        state["unit_widgets"] = []
+        with state["units_container"]:
+            with ui.row().classes("items-center text-caption"):
+                ui.label("#").classes("w-8")
+                ui.label("unit_id").classes("w-40")
+                ui.label("zone_name").classes("w-32")
+                ui.label("participate").classes("w-24 text-center")
+            for r in range(n):
+                with ui.row().classes("items-center"):
+                    ui.label(str(r)).classes("w-8 text-caption")
+                    uid_w = ui.input(value="") \
+                        .props("dense outlined").classes("w-40")
+                    zone_w = ui.input(value="ZONE_1") \
+                        .props("dense outlined").classes("w-32")
+                    part_w = ui.switch(value=True).classes("w-24")
+                    state["unit_widgets"].append({
+                        "unit_id": uid_w, "zone_name": zone_w, "participate": part_w,
+                    })
+
+    state["rebuild_zones"] = _rebuild_zones
+    state["rebuild_units"] = _rebuild_units
+    zone_count.on("update:model-value", lambda *_: _rebuild_zones())
+    unit_count.on("update:model-value", lambda *_: _rebuild_units())
+
+    def _on_create_click() -> None:
+        if _state.network is None or state.get("current_component") != "Voltage Levels":
+            return
+        zones: list[dict] = []
+        for row in state["zone_widgets"]:
+            name = (row["name"].value or "").strip()
+            if not name:
+                continue
+            try:
+                target_v = float(row["target_v"].value)
+            except (TypeError, ValueError):
+                target_v = None
+            zones.append({
+                "name": name, "target_v": target_v,
+                "bus_ids": (row["bus_ids"].value or "").strip(),
+            })
+        units: list[dict] = []
+        for row in state["unit_widgets"]:
+            uid = (row["unit_id"].value or "").strip()
+            if not uid:
+                continue
+            units.append({
+                "unit_id": uid,
+                "zone_name": (row["zone_name"].value or "").strip(),
+                "participate": bool(row["participate"].value),
+            })
+        try:
+            create_secondary_voltage_control(_state.network, zones, units)
+        except Exception as exc:
+            status_label.set_text(f"Save failed — {exc}")
+            ui.notify(f"Save failed: {exc}", type="negative")
+            return
+        status_label.set_text(
+            f"Saved {len(zones)} zone(s) and {len(units)} unit(s)."
+        )
+        ui.notify(
+            f"Saved {len(zones)} zone(s) and {len(units)} unit(s).",
+            type="positive", timeout=1500,
+        )
+        refresh_after_create()
+
+    create_btn.on_click(_on_create_click)
+
+
+def _refresh_create_secondary_voltage_control_panel(
+    state: dict, component: str,
+) -> None:
+    """Toggle the SVC panel visibility on the active component."""
+    expansion = state.get("expansion")
+    if expansion is None:
+        return
+    state["current_component"] = component
+    if component != "Voltage Levels" or _state.network is None:
+        expansion.visible = False
+        return
+    state["rebuild_zones"]()
+    state["rebuild_units"]()
+    state["status_label"].set_text("")
+    expansion.visible = True
+
+
 def _build_data_explorer():
     """Materialise the Data Explorer panel and return a refresh closure.
 
@@ -1986,6 +2149,17 @@ def _build_data_explorer():
         operational_limits_create_state, refresh_after_create=lambda: refresh(),
     )
 
+    svc_create_state: dict = {
+        "zone_count": None, "zones_container": None, "zone_widgets": [],
+        "unit_count": None, "units_container": None, "unit_widgets": [],
+        "status_label": None, "expansion": None,
+        "rebuild_zones": None, "rebuild_units": None,
+        "current_component": "",
+    }
+    _build_create_secondary_voltage_control_panel_widgets(
+        svc_create_state, refresh_after_create=lambda: refresh(),
+    )
+
     grid = ui.aggrid({
         "columnDefs": [], "rowData": [],
         "defaultColDef": _DEFAULT_COL_DEF,
@@ -2097,6 +2271,7 @@ def _build_data_explorer():
         _refresh_create_coupling_device_panel(coupling_create_state, label)
         _refresh_create_reactive_limits_panel(reactive_limits_create_state, label)
         _refresh_create_operational_limits_panel(operational_limits_create_state, label)
+        _refresh_create_secondary_voltage_control_panel(svc_create_state, label)
         is_disconnectable = label in DISCONNECTABLE_COMPONENTS
         is_removable = label in REMOVABLE_COMPONENTS
         bulk_row.set_visibility(bool(cols) or is_disconnectable or is_removable)

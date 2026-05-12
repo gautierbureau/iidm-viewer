@@ -31,7 +31,9 @@ from iidm_viewer.component_creation import (
     create_hvdc_line,
     create_operational_limits,
     create_reactive_limits,
+    create_secondary_voltage_control,
     create_tap_changer,
+    list_bus_ids,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
@@ -41,6 +43,7 @@ from iidm_viewer.component_creation import (
     list_substations_df,
     list_transformers_without_tap_changer,
     list_two_winding_transformers,
+    list_unit_candidates,
     next_free_node,
     validate_create_branch_fields,
     validate_create_container_fields,
@@ -50,6 +53,7 @@ from iidm_viewer.component_creation import (
     validate_create_operational_limits_fields,
     validate_create_reactive_limits_fields,
     validate_create_tap_changer_fields,
+    validate_secondary_voltage_control,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy, run
 
@@ -1111,4 +1115,144 @@ def test_create_operational_limits_raises_on_invalid():
         create_operational_limits(
             network, "LINE_S2S3", "ONE", "CURRENT",
             [{"value": 1.0, "acceptable_duration": 60}],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Secondary voltage control (network-level extension: zones + units)
+# ---------------------------------------------------------------------------
+def test_svc_re_exported_from_streamlit_state():
+    pytest.importorskip("streamlit")
+    from iidm_viewer.state import (
+        list_bus_ids as ST_BUSES,
+        list_unit_candidates as ST_UNITS,
+        validate_secondary_voltage_control as ST_VALIDATE,
+    )
+    assert ST_BUSES is list_bus_ids
+    assert ST_UNITS is list_unit_candidates
+    assert ST_VALIDATE is validate_secondary_voltage_control
+
+
+def test_list_bus_ids_returns_bus_view_ids(node_breaker_network):
+    ids = list_bus_ids(node_breaker_network)
+    assert {"S1VL1_0", "S1VL2_0"} <= set(ids)
+
+
+def test_list_unit_candidates_includes_gens_and_svcs(node_breaker_network):
+    ids = list_unit_candidates(node_breaker_network)
+    # Four-sub demo: 5 generators + at least 1 SVC ("SVC"); no batteries.
+    assert {"GH1", "GH2", "GTH1"} <= set(ids)
+
+
+def test_validate_svc_requires_at_least_one_zone():
+    errors = validate_secondary_voltage_control([], [])
+    assert any("At least one zone" in e for e in errors)
+
+
+def test_validate_svc_zone_requires_name():
+    errors = validate_secondary_voltage_control(
+        [{"name": "", "target_v": 400.0, "bus_ids": "B1"}], [],
+    )
+    assert any("name is required" in e for e in errors)
+
+
+def test_validate_svc_zone_rejects_duplicates():
+    errors = validate_secondary_voltage_control(
+        [{"name": "Z", "target_v": 400.0, "bus_ids": "B1"},
+         {"name": "Z", "target_v": 380.0, "bus_ids": "B2"}],
+        [],
+    )
+    assert any("duplicated" in e for e in errors)
+
+
+def test_validate_svc_zone_target_v_must_be_positive():
+    errors = validate_secondary_voltage_control(
+        [{"name": "Z", "target_v": 0.0, "bus_ids": "B1"}], [],
+    )
+    assert any("must be > 0" in e for e in errors)
+
+
+def test_validate_svc_zone_requires_target_v():
+    errors = validate_secondary_voltage_control(
+        [{"name": "Z", "target_v": None, "bus_ids": "B1"}], [],
+    )
+    assert any("target_v is required" in e for e in errors)
+
+
+def test_validate_svc_zone_requires_bus_ids():
+    errors = validate_secondary_voltage_control(
+        [{"name": "Z", "target_v": 400.0, "bus_ids": ""}], [],
+    )
+    assert any("pilot bus id" in e for e in errors)
+
+
+def test_validate_svc_unit_requires_id_and_zone():
+    errors = validate_secondary_voltage_control(
+        [{"name": "Z", "target_v": 400.0, "bus_ids": "B1"}],
+        [{"unit_id": "", "zone_name": "Z", "participate": True}],
+    )
+    assert any("unit_id is required" in e for e in errors)
+
+
+def test_validate_svc_unit_zone_must_exist():
+    errors = validate_secondary_voltage_control(
+        [{"name": "Z", "target_v": 400.0, "bus_ids": "B1"}],
+        [{"unit_id": "GH1", "zone_name": "GHOST", "participate": True}],
+    )
+    assert any("not one of the defined zones" in e for e in errors)
+
+
+def test_validate_svc_unit_rejects_duplicate_ids():
+    errors = validate_secondary_voltage_control(
+        [{"name": "Z", "target_v": 400.0, "bus_ids": "B1"}],
+        [{"unit_id": "G", "zone_name": "Z", "participate": True},
+         {"unit_id": "G", "zone_name": "Z", "participate": False}],
+    )
+    assert any("Unit id 'G' is duplicated" in e for e in errors)
+
+
+def test_validate_svc_accepts_valid_payload():
+    assert validate_secondary_voltage_control(
+        [{"name": "Z1", "target_v": 400.0, "bus_ids": "S1VL1_0 S1VL2_0"}],
+        [{"unit_id": "GH1", "zone_name": "Z1", "participate": True}],
+    ) == []
+
+
+def test_create_secondary_voltage_control_end_to_end():
+    """Apply SVC to the four-sub demo and verify the network accepts it.
+
+    pypowsybl 1.14 has no view-adapter for reading SVC back via
+    ``get_extensions``; we settle for a no-exception write + a follow-up
+    write to confirm the API replaces (rather than appends).
+    """
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    create_secondary_voltage_control(
+        network,
+        [{"name": "Z1", "target_v": 400.0, "bus_ids": "S1VL1_0"}],
+        [{"unit_id": "GH1", "zone_name": "Z1", "participate": True}],
+    )
+    # Re-apply with a different definition — pypowsybl should accept the
+    # write (replace semantics).
+    create_secondary_voltage_control(
+        network,
+        [{"name": "Z2", "target_v": 380.0, "bus_ids": "S1VL2_0"}],
+        [{"unit_id": "GTH1", "zone_name": "Z2", "participate": False}],
+    )
+
+
+def test_create_svc_raises_on_invalid_payload():
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    with pytest.raises(ValueError, match="not one of the defined zones"):
+        create_secondary_voltage_control(
+            network,
+            [{"name": "Z1", "target_v": 400.0, "bus_ids": "S1VL1_0"}],
+            [{"unit_id": "GH1", "zone_name": "GHOST", "participate": True}],
         )

@@ -61,7 +61,9 @@ from iidm_viewer.component_creation import (
     create_hvdc_line,
     create_operational_limits,
     create_reactive_limits,
+    create_secondary_voltage_control,
     create_tap_changer,
+    list_bus_ids,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
@@ -70,6 +72,7 @@ from iidm_viewer.component_creation import (
     list_reactive_limit_candidates,
     list_substations_df,
     list_transformers_without_tap_changer,
+    list_unit_candidates,
     next_free_node,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy
@@ -1839,3 +1842,242 @@ class CreateOperationalLimitsPanel(QWidget):
         )
         self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
         self.component_created.emit(self._component or "", element_id)
+
+
+# ---------------------------------------------------------------------------
+# Secondary voltage control panel (network-level: zones + control units)
+# ---------------------------------------------------------------------------
+class CreateSecondaryVoltageControlPanel(QWidget):
+    """Network-level form to (re)define the secondaryVoltageControl extension.
+
+    Shows when the active component is "Voltage Levels" and the network is
+    loaded. Two editable QTableWidgets — one for zones (name / target_v /
+    bus_ids) and one for units (unit_id / zone_name / participate) — are
+    sized by row-count spinners. pypowsybl replaces the whole SVC
+    definition on submit.
+    """
+
+    component_created = Signal(str, str)  # ("Secondary Voltage Control", "")
+
+    _ZONE_COL_NAME = 0
+    _ZONE_COL_TARGET_V = 1
+    _ZONE_COL_BUS_IDS = 2
+
+    _UNIT_COL_ID = 0
+    _UNIT_COL_ZONE = 1
+    _UNIT_COL_PARTICIPATE = 2
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+
+        self._group = QGroupBox("Configure secondary voltage control")
+        self._group.setCheckable(True)
+        self._group.setChecked(True)
+        self._group.toggled.connect(self._on_toggled)
+
+        # Zones table + count spinner
+        self._zone_count = QSpinBox()
+        self._zone_count.setRange(1, 50)
+        self._zone_count.setValue(1)
+        self._zone_count.valueChanged.connect(self._resize_zones_table)
+        self._zones_table = QTableWidget(0, 3)
+        self._zones_table.setHorizontalHeaderLabels(
+            ["name", "target_v (kV)", "bus_ids (space-separated)"],
+        )
+        self._zones_table.setMinimumHeight(110)
+        self._zones_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+
+        # Units table + count spinner
+        self._unit_count = QSpinBox()
+        self._unit_count.setRange(1, 200)
+        self._unit_count.setValue(1)
+        self._unit_count.valueChanged.connect(self._resize_units_table)
+        self._units_table = QTableWidget(0, 3)
+        self._units_table.setHorizontalHeaderLabels(
+            ["unit_id", "zone_name", "participate"],
+        )
+        self._units_table.setMinimumHeight(110)
+        self._units_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+
+        row_zone_count = QHBoxLayout()
+        row_zone_count.addWidget(QLabel("Number of zones"))
+        row_zone_count.addWidget(self._zone_count)
+        row_zone_count.addStretch(1)
+
+        row_unit_count = QHBoxLayout()
+        row_unit_count.addWidget(QLabel("Number of units"))
+        row_unit_count.addWidget(self._unit_count)
+        row_unit_count.addStretch(1)
+
+        self._create_btn = QPushButton("Save secondary voltage control")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        row_action = QHBoxLayout()
+        row_action.addWidget(self._create_btn)
+        row_action.addWidget(self._status, 1)
+
+        zones_label = QLabel("<b>Zones</b>")
+        units_label = QLabel("<b>Control units</b>")
+        zones_label.setTextFormat(Qt.RichText)
+        units_label.setTextFormat(Qt.RichText)
+
+        inner = QVBoxLayout()
+        inner.addWidget(zones_label)
+        inner.addLayout(row_zone_count)
+        inner.addWidget(self._zones_table)
+        inner.addWidget(units_label)
+        inner.addLayout(row_unit_count)
+        inner.addWidget(self._units_table)
+        inner.addLayout(row_action)
+        self._group.setLayout(inner)
+
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+        self.setLayout(outer)
+        self.setVisible(False)
+
+        self._seed_zones_defaults()
+        self._seed_units_defaults()
+
+    # -- Public API ------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._refresh_for_current()
+        self._status.setText("")
+
+    # -- Internals -------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._zones_table.setVisible(checked)
+        self._units_table.setVisible(checked)
+
+    def _refresh_for_current(self) -> None:
+        show = (
+            self._network is not None
+            and self._component == "Voltage Levels"
+        )
+        self.setVisible(bool(show))
+
+    def _seed_zones_defaults(self) -> None:
+        self._zones_table.blockSignals(True)
+        self._zones_table.setRowCount(1)
+        self._zones_table.setItem(
+            0, self._ZONE_COL_NAME, QTableWidgetItem("ZONE_1"),
+        )
+        self._zones_table.setItem(
+            0, self._ZONE_COL_TARGET_V, QTableWidgetItem("400.0"),
+        )
+        self._zones_table.setItem(
+            0, self._ZONE_COL_BUS_IDS, QTableWidgetItem(""),
+        )
+        self._zones_table.blockSignals(False)
+
+    def _seed_units_defaults(self) -> None:
+        self._units_table.blockSignals(True)
+        self._units_table.setRowCount(1)
+        self._units_table.setItem(
+            0, self._UNIT_COL_ID, QTableWidgetItem(""),
+        )
+        self._units_table.setItem(
+            0, self._UNIT_COL_ZONE, QTableWidgetItem("ZONE_1"),
+        )
+        item = QTableWidgetItem()
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked)
+        self._units_table.setItem(0, self._UNIT_COL_PARTICIPATE, item)
+        self._units_table.blockSignals(False)
+
+    def _resize_zones_table(self, _n: int) -> None:
+        n = self._zone_count.value()
+        prev = self._zones_table.rowCount()
+        self._zones_table.setRowCount(n)
+        for r in range(prev, n):
+            self._zones_table.setItem(
+                r, self._ZONE_COL_NAME, QTableWidgetItem(f"ZONE_{r + 1}"),
+            )
+            self._zones_table.setItem(
+                r, self._ZONE_COL_TARGET_V, QTableWidgetItem("400.0"),
+            )
+            self._zones_table.setItem(
+                r, self._ZONE_COL_BUS_IDS, QTableWidgetItem(""),
+            )
+
+    def _resize_units_table(self, _n: int) -> None:
+        n = self._unit_count.value()
+        prev = self._units_table.rowCount()
+        self._units_table.setRowCount(n)
+        for r in range(prev, n):
+            self._units_table.setItem(r, self._UNIT_COL_ID, QTableWidgetItem(""))
+            self._units_table.setItem(
+                r, self._UNIT_COL_ZONE, QTableWidgetItem("ZONE_1"),
+            )
+            item = QTableWidgetItem()
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self._units_table.setItem(r, self._UNIT_COL_PARTICIPATE, item)
+
+    def _collect_zones(self) -> list[dict]:
+        rows: list[dict] = []
+        for r in range(self._zones_table.rowCount()):
+            name_item = self._zones_table.item(r, self._ZONE_COL_NAME)
+            target_item = self._zones_table.item(r, self._ZONE_COL_TARGET_V)
+            bus_item = self._zones_table.item(r, self._ZONE_COL_BUS_IDS)
+            name = (name_item.text() if name_item else "").strip()
+            if not name:
+                continue
+            try:
+                target_v = float(target_item.text()) if target_item else None
+            except (ValueError, AttributeError):
+                target_v = None
+            rows.append({
+                "name": name,
+                "target_v": target_v,
+                "bus_ids": (bus_item.text() if bus_item else "").strip(),
+            })
+        return rows
+
+    def _collect_units(self) -> list[dict]:
+        rows: list[dict] = []
+        for r in range(self._units_table.rowCount()):
+            uid_item = self._units_table.item(r, self._UNIT_COL_ID)
+            zone_item = self._units_table.item(r, self._UNIT_COL_ZONE)
+            part_item = self._units_table.item(r, self._UNIT_COL_PARTICIPATE)
+            uid = (uid_item.text() if uid_item else "").strip()
+            if not uid:
+                continue
+            rows.append({
+                "unit_id": uid,
+                "zone_name": (zone_item.text() if zone_item else "").strip(),
+                "participate": bool(
+                    part_item and part_item.checkState() == Qt.Checked
+                ),
+            })
+        return rows
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component != "Voltage Levels":
+            return
+        zones = self._collect_zones()
+        units = self._collect_units()
+        try:
+            create_secondary_voltage_control(self._network, zones, units)
+        except Exception as exc:
+            self._status.setText(f"Save failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        self._status.setText(
+            f"Saved {len(zones)} zone(s) and {len(units)} unit(s)."
+        )
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit("Secondary Voltage Control", "")

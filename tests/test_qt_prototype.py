@@ -1373,6 +1373,103 @@ def test_operational_limits_panel_creates_group(qapp):
     assert seen == [("Lines", "LINE_S2S3")]
 
 
+def test_svc_panel_hides_for_non_vl_component(qapp):
+    """The SVC panel renders only when the active component is Voltage Levels."""
+    from iidm_viewer.qt.create_panel import CreateSecondaryVoltageControlPanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateSecondaryVoltageControlPanel()
+    panel.set_network(network)
+    panel.set_component("Generators")
+    qapp.processEvents()
+    assert panel.isVisible() is False
+    panel.set_component("Voltage Levels")
+    qapp.processEvents()
+    assert panel.isVisible() is True
+
+
+def test_svc_panel_creates_extension_end_to_end(qapp):
+    """Drive the QTableWidgets and verify the SVC payload reaches pypowsybl."""
+    from iidm_viewer.qt.create_panel import CreateSecondaryVoltageControlPanel
+    from PySide6.QtWidgets import QTableWidgetItem
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateSecondaryVoltageControlPanel()
+    panel.set_network(network)
+    panel.set_component("Voltage Levels")
+    qapp.processEvents()
+    assert panel.isVisible() is True
+
+    # Fill in the zone row + unit row using existing demo ids.
+    panel._zones_table.setItem(
+        0, panel._ZONE_COL_NAME, QTableWidgetItem("Z1"),
+    )
+    panel._zones_table.setItem(
+        0, panel._ZONE_COL_TARGET_V, QTableWidgetItem("400.0"),
+    )
+    panel._zones_table.setItem(
+        0, panel._ZONE_COL_BUS_IDS, QTableWidgetItem("S1VL1_0"),
+    )
+    panel._units_table.setItem(
+        0, panel._UNIT_COL_ID, QTableWidgetItem("GH1"),
+    )
+    panel._units_table.setItem(
+        0, panel._UNIT_COL_ZONE, QTableWidgetItem("Z1"),
+    )
+
+    seen: list = []
+    panel.component_created.connect(lambda c, eid: seen.append((c, eid)))
+    panel._on_create_clicked()
+    qapp.processEvents()
+    assert seen == [("Secondary Voltage Control", "")]
+    assert "Saved" in panel._status.text()
+
+
+def test_svc_panel_surfaces_validator_errors(qapp):
+    """When the unit references an unknown zone, status carries the error."""
+    from iidm_viewer.qt.create_panel import CreateSecondaryVoltageControlPanel
+    from PySide6.QtWidgets import QTableWidgetItem
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateSecondaryVoltageControlPanel()
+    panel.set_network(network)
+    panel.set_component("Voltage Levels")
+    qapp.processEvents()
+
+    panel._zones_table.setItem(0, panel._ZONE_COL_NAME, QTableWidgetItem("Z1"))
+    panel._zones_table.setItem(0, panel._ZONE_COL_TARGET_V, QTableWidgetItem("400.0"))
+    panel._zones_table.setItem(0, panel._ZONE_COL_BUS_IDS, QTableWidgetItem("S1VL1_0"))
+    panel._units_table.setItem(0, panel._UNIT_COL_ID, QTableWidgetItem("GH1"))
+    panel._units_table.setItem(0, panel._UNIT_COL_ZONE, QTableWidgetItem("GHOST"))
+    panel._on_create_clicked()
+    qapp.processEvents()
+    assert "not one of the defined zones" in panel._status.text()
+
+
 def test_operational_limits_panel_rejects_zero_permanents(qapp):
     """The validator surfaces 'Exactly one permanent' via the status label."""
     from iidm_viewer.qt.create_panel import CreateOperationalLimitsPanel
