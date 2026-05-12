@@ -380,3 +380,49 @@ def test_diagram_iframes_opt_out_of_sanitize():
         "expected sanitize=False on all three diagram iframes; "
         "DOMPurify strips <iframe> tags otherwise"
     )
+
+
+def test_install_network_separates_io_from_listener_dispatch():
+    """Regression for the "slot stack is empty" upload crash:
+    ``AppState.install_network`` accepts a pre-loaded network and fires
+    the network listeners synchronously on the calling thread, so the
+    NiceGUI handler can do the load via ``asyncio.to_thread`` and
+    install the result back on the event loop where the slot is set.
+    """
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.web.state import AppState
+
+    net = NetworkProxy(run(pn.create_ieee14))
+    state = AppState()
+    seen_networks: list = []
+    seen_vls: list = []
+    state.on_network_changed(seen_networks.append)
+    state.on_selected_vl_changed(seen_vls.append)
+
+    state.install_network(net)
+    assert state.network is net
+    assert seen_networks == [net]
+    # pick_default_vl should have selected the highest-nominal-V VL.
+    assert state.selected_vl is not None
+    assert seen_vls == [state.selected_vl]
+
+
+def test_upload_handler_loads_in_worker_and_installs_on_event_loop():
+    """The upload path must split heavy IO from listener notification:
+    ``network_loader.load_from_path`` runs in ``asyncio.to_thread`` and
+    ``_state.install_network`` is called on the event loop. Inspect the
+    handler source to keep that contract from drifting back to the
+    crash-prone single-call shape."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app)
+    handler_start = src.index("async def handle_upload(e):")
+    handler_end = src.index(
+        "file_lbl.set_text(os.path.basename(name))", handler_start,
+    )
+    handler_src = src[handler_start:handler_end]
+    assert "asyncio.to_thread(" in handler_src
+    assert "network_loader.load_from_path" in handler_src
+    assert "_state.install_network" in handler_src

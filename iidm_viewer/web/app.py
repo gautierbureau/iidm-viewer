@@ -2736,7 +2736,17 @@ def main_page() -> None:
                 with open(tmp_path, "wb") as fh:
                     fh.write(upload.content.read())
             try:
-                await asyncio.to_thread(_state.load_network_from_path, tmp_path)
+                # The pypowsybl load is heavy I/O, so push it to a worker
+                # thread to keep the event loop responsive. Listener
+                # notifications (which build NiceGUI elements) MUST run
+                # back on the event loop — the slot stack is empty in
+                # the worker thread, which surfaces as
+                #   "The current slot cannot be determined…"
+                from iidm_viewer import network_loader
+                network = await asyncio.to_thread(
+                    network_loader.load_from_path, tmp_path,
+                )
+                _state.install_network(network)
             except Exception as exc:
                 ui.notify(f"Load failed: {exc}", type="negative")
                 return
