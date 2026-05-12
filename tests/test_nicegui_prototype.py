@@ -426,3 +426,26 @@ def test_upload_handler_loads_in_worker_and_installs_on_event_loop():
     assert "asyncio.to_thread(" in handler_src
     assert "network_loader.load_from_path" in handler_src
     assert "_state.install_network" in handler_src
+
+
+def test_data_explorer_refresh_preserves_aggrid_theme():
+    """AG Grid 34 (NiceGUI 3.x) throws at mount time when
+    ``options.theme`` is undefined. Replacing the whole ``grid.options``
+    dict on every refresh wipes the wrapper-set default — which is what
+    silently blanked the Data Explorer grid. The refresh path must
+    mutate ``grid.options`` (``.update(...)``) instead of replacing it.
+    """
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_data_explorer)
+    # Replacement-style assignment of grid.options inside refresh() is
+    # the regression. Only the assignment in the constructor (where
+    # ``grid = ui.aggrid({...})``) is allowed.
+    assert "grid.options =" not in src, (
+        "refresh() must mutate grid.options (use .update(...)) rather "
+        "than replace it — full replacement drops the AG Grid theme "
+        "and the grid silently fails to mount."
+    )
+    # All three refresh callsites should funnel through ``options.update``.
+    assert src.count("grid.options.update(") >= 3
