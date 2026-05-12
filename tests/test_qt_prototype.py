@@ -1610,6 +1610,60 @@ def test_lf_report_dialog_handles_malformed_json(qapp):
     assert "Failed to parse report" in dlg._empty_label.text()
 
 
+def test_lf_parameters_dialog_seeds_overrides_and_saves_changes(qapp):
+    """End-to-end Qt LF parameters: seeds the widgets from the
+    passed-in overrides, lets a programmatic edit through, and on Save
+    the trimmed dicts land on ``.generic_params`` / ``.provider_params``.
+    """
+    from iidm_viewer.qt.lf_parameters_dialog import LFParametersDialog
+
+    dlg = LFParametersDialog(
+        generic_overrides={"distributed_slack": False},
+        provider_overrides={},
+    )
+    qapp.processEvents()
+    # The seeded override is reflected in the widget.
+    w = dlg._generic_widgets["distributed_slack"]
+    assert w.isChecked() is False
+    # Flip a different generic param via the widget then save.
+    use_rl = dlg._generic_widgets["use_reactive_limits"]
+    use_rl.setChecked(False)  # default is True
+    from PySide6.QtWidgets import QDialog
+    dlg._on_save_clicked()
+    qapp.processEvents()
+    assert dlg.result() == QDialog.Accepted
+    # Both diff'd params survive; defaults are dropped.
+    assert dlg.generic_params.get("distributed_slack") is False
+    assert dlg.generic_params.get("use_reactive_limits") is False
+
+
+def test_app_state_run_loadflow_forwards_cached_params(qapp, monkeypatch):
+    """``run_loadflow`` should pick up the AppState-cached params
+    when the caller doesn't override — so the sidebar's plain
+    ``Run AC Load Flow`` click respects the dialog's last save."""
+    import pypowsybl.network as pn
+    from iidm_viewer import loadflow as lf_mod
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.state import AppState
+
+    state = AppState()
+    state._network = NetworkProxy(run(pn.create_ieee14))
+    state.lf_generic_params = {"distributed_slack": False}
+    state.lf_provider_params = {"slackBusSelectionMode": "FIRST"}
+
+    captured: dict = {}
+
+    def fake_run_ac(net, generic, provider):
+        captured["generic"] = generic
+        captured["provider"] = provider
+        return lf_mod.LoadFlowResult([], "{}")
+
+    monkeypatch.setattr("iidm_viewer.qt.state.run_ac", fake_run_ac)
+    state.run_loadflow()
+    assert captured["generic"] == {"distributed_slack": False}
+    assert captured["provider"] == {"slackBusSelectionMode": "FIRST"}
+
+
 def _flatten_tree_count(tree) -> int:
     """Total node count across the QTreeWidget — top-level + descendants."""
     def _count(item) -> int:
