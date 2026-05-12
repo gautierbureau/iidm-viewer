@@ -1329,8 +1329,13 @@ def _read_create_widget(state: dict, field: dict):
 def _refresh_create_panel(state: dict, component: str) -> None:
     """Repopulate the create panel for ``component``.
 
-    Hides the whole expansion when the component isn't creatable or
-    the network has no node-breaker voltage levels.
+    Hidden entirely when the active component isn't in
+    :data:`CREATABLE_COMPONENTS` or no network is loaded. When a
+    network *is* loaded but it has no node-breaker voltage levels (or
+    the selected VL has no busbar sections), the expansion stays
+    visible with an inline info message — same UX as Streamlit's
+    ``st.info`` placeholder. Never fires ``ui.notify`` from refresh:
+    that toast pops on every redraw and feels like the app is blocking.
     """
     expansion = state.get("expansion")
     if expansion is None:
@@ -1339,6 +1344,8 @@ def _refresh_create_panel(state: dict, component: str) -> None:
     if component not in CREATABLE_COMPONENTS or _state.network is None:
         expansion.visible = False
         return
+
+    expansion.visible = True
 
     # Populate VL dropdown.
     try:
@@ -1352,16 +1359,24 @@ def _refresh_create_panel(state: dict, component: str) -> None:
     state["vl_select"].options = vl_options
     state["vl_select"].value = next(iter(vl_options), None)
     state["vl_select"].update()
+    container = state["fields_container"]
+
     if not vl_options:
-        # No node-breaker VLs -> creation impossible.
-        expansion.visible = False
-        ui.notify("No node-breaker voltage levels — creation needs busbar sections.",
-                  type="info", timeout=2000)
+        # No node-breaker VLs — surface a friendly note inside the
+        # form rather than spamming a toast.
+        container.clear()
+        state["field_widgets"] = {}
+        with container:
+            ui.label(
+                f"{component} creation is currently limited to "
+                "node-breaker voltage levels; none were found in this network.",
+            ).classes("text-caption")
+        state["bbs_select"].options = []
+        state["bbs_select"].value = None
+        state["bbs_select"].update()
         return
 
-    # Trigger the VL-change handler to populate busbar sections.
-    # ui.select's on_value_change fires for programmatic changes too;
-    # but to be safe re-call the populate manually.
+    # Populate busbar sections for the freshly-selected VL.
     try:
         ids = list_busbar_sections(_state.network, str(state["vl_select"].value))
     except Exception:
@@ -1370,10 +1385,19 @@ def _refresh_create_panel(state: dict, component: str) -> None:
     state["bbs_select"].value = ids[0] if ids else None
     state["bbs_select"].update()
 
-    # Rebuild the field widgets.
-    container = state["fields_container"]
     container.clear()
     state["field_widgets"] = {}
+    if not ids:
+        # The selected VL exists but carries no busbar sections —
+        # creation needs one. Mirror Streamlit's inline warning.
+        with container:
+            ui.label(
+                "No busbar sections found in the selected voltage level. "
+                "Create one first to build feeders here.",
+            ).classes("text-caption")
+        return
+
+    # Rebuild the field widgets.
     spec = CREATABLE_COMPONENTS[component]
     all_fields = list(spec["fields"]) + list(LOCATOR_FIELDS)
     with container:
