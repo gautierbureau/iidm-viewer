@@ -121,6 +121,44 @@ def pick_default_vl(network: NetworkProxy) -> Optional[str]:
     return run(_pick)
 
 
+def list_voltage_levels_for_selector(network: NetworkProxy):
+    """Return ``id``/``display``/``substation_id``/``nominal_v`` columns
+    sorted by ``display``.
+
+    Shared by Streamlit's ``vl_selector`` and the PySide6 + NiceGUI
+    prototype sidebars. Falls back to an empty DataFrame for an empty
+    network so callers don't have to special-case it.
+    """
+    import pandas as pd
+    raw = object.__getattribute__(network, "_obj")
+
+    def _fetch():
+        vls = raw.get_voltage_levels(attributes=["name", "substation_id", "nominal_v"])
+        if vls is None or vls.empty:
+            return pd.DataFrame(
+                columns=["id", "name", "substation_id", "nominal_v", "display"],
+            )
+        vls = vls.reset_index()
+        vls["display"] = vls.apply(
+            lambda r: r["name"] if r["name"] else r["id"], axis=1,
+        )
+        return vls.sort_values("display").reset_index(drop=True)
+
+    return run(_fetch)
+
+
+def filter_voltage_levels(vls_df, text: str):
+    """Case-insensitive substring filter on the ``display`` column.
+
+    Used by the VL picker's "Filter" text input. ``text`` empty → return
+    the input unchanged.
+    """
+    if not text:
+        return vls_df
+    mask = vls_df["display"].str.contains(text, case=False, na=False, regex=False)
+    return vls_df[mask]
+
+
 def get_import_extensions() -> list[str]:
     """File extensions pypowsybl can import, deduplicated and with ``zip`` always included."""
 

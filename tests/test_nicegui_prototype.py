@@ -513,6 +513,51 @@ def test_tab_panels_keep_alive_props_set():
     assert 'ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")' in src
 
 
+def test_shared_vl_selector_helpers():
+    """``network_loader`` exposes the framework-agnostic VL listing +
+    filter helpers used by Streamlit's ``vl_selector`` and the
+    PySide6 + NiceGUI sidebars."""
+    import pypowsybl.network as pn
+    from iidm_viewer.network_loader import (
+        filter_voltage_levels,
+        list_voltage_levels_for_selector,
+    )
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+
+    net = NetworkProxy(run(pn.create_ieee14))
+    df = list_voltage_levels_for_selector(net)
+    assert not df.empty
+    assert set(["id", "display", "substation_id", "nominal_v"]) <= set(df.columns)
+    # The filter is a case-insensitive substring match on ``display``.
+    matches = filter_voltage_levels(df, "VL1")
+    assert not matches.empty
+    assert all("VL1" in d for d in matches["display"])
+    # Empty filter returns the input unchanged.
+    assert len(filter_voltage_levels(df, "")) == len(df)
+
+
+def test_nicegui_drawer_has_vl_filter_and_select():
+    """The left drawer must carry a VL filter input + a dropdown that
+    routes selections through ``_state.set_selected_vl``. Mirrors the
+    Streamlit ``vl_selector`` so users on either prototype can pick a
+    VL the same way."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    drawer_start = src.index("ui.left_drawer(")
+    drawer_end = src.index("with ui.tabs(", drawer_start)
+    drawer_src = src[drawer_start:drawer_end]
+    # Filter + dropdown widgets.
+    assert "Filter voltage levels" in drawer_src
+    assert 'ui.select(options=[], value=None)' in drawer_src
+    # The dropdown change must funnel into AppState.
+    assert "_state.set_selected_vl" in drawer_src
+    # Visibility flip on network load (hidden when empty).
+    assert "vl_filter_input.visible" in drawer_src
+    assert "vl_select.visible" in drawer_src
+
+
 def test_nad_depth_handler_reads_widget_value_not_event_value():
     """NiceGUI 3.x's ``.on('update:model-value', handler)`` hands back a
     ``GenericEventArguments`` whose payload lives on ``args`` (not

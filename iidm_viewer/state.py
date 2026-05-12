@@ -489,26 +489,27 @@ def create_container(network, component: str, fields: dict):
 
 
 def get_voltage_levels_df(network):
+    """Cached VL listing for the Streamlit ``vl_selector``.
+
+    The fetch + display-column derivation live in
+    :mod:`iidm_viewer.network_loader` so the PySide6 + NiceGUI
+    prototypes share them. Streamlit wraps with a per-network
+    ``st.session_state`` cache to avoid re-fetching on every rerun.
+    """
     cache = st.session_state.setdefault("_vl_lookup_cache", {})
     net_id = id(network)
     if cache.get("vl_df_id") == net_id and "vl_df" in cache:
         return cache["vl_df"]
-    vls = network.get_voltage_levels(attributes=["name", "substation_id", "nominal_v"])
-    vls = vls.reset_index()
-    vls["display"] = vls.apply(
-        lambda r: r["name"] if r["name"] else r["id"], axis=1
-    )
-    df = vls.sort_values("display")
+    from iidm_viewer.network_loader import list_voltage_levels_for_selector
+    df = list_voltage_levels_for_selector(network)
     cache["vl_df_id"] = net_id
     cache["vl_df"] = df
     return df
 
 
 def filter_voltage_levels(vls_df, text):
-    if not text:
-        return vls_df
-    mask = vls_df["display"].str.contains(text, case=False, na=False, regex=False)
-    return vls_df[mask]
+    from iidm_viewer.network_loader import filter_voltage_levels as _shared
+    return _shared(vls_df, text)
 
 
 # --- Tap changers (ratio + phase) on existing 2-winding transformers ---
