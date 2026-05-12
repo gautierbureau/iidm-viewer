@@ -23,6 +23,7 @@ set -euo pipefail
 INSTALL_DIR="$HOME/.iidm_viewer"
 VENV_DIR="$INSTALL_DIR/venv"
 LAUNCHER="$INSTALL_DIR/launch.sh"
+PIDFILE="$INSTALL_DIR/server.pid"
 ICON_FILE="$INSTALL_DIR/iidm-viewer.svg"
 DESKTOP_DIR="$HOME/.local/share/applications"
 DESKTOP_FILE="$DESKTOP_DIR/iidm-viewer.desktop"
@@ -52,7 +53,55 @@ if ! "$PYTHON_BIN" -c 'import venv' 2>/dev/null; then
 fi
 
 # -----------------------------------------------------------------------------
-# 2. Virtualenv + package install
+# 2. Detect existing installation (drives messaging + server shutdown below)
+# -----------------------------------------------------------------------------
+IS_UPDATE=0
+OLD_VERSION=""
+if [[ -x "$VENV_DIR/bin/python" ]] \
+        && "$VENV_DIR/bin/python" -c 'import iidm_viewer' 2>/dev/null; then
+    IS_UPDATE=1
+    OLD_VERSION="$("$VENV_DIR/bin/python" -c \
+        'import importlib.metadata as m; print(m.version("iidm-viewer"))' \
+        2>/dev/null || true)"
+    log "Existing installation detected (iidm-viewer ${OLD_VERSION:-unknown}) — updating in place"
+fi
+
+# A server running against the *old* venv keeps the old code loaded in memory,
+# so pip --upgrade on disk wouldn't actually reach the user until they
+# restarted it. Stop it now; the launcher will start the new version on demand.
+stop_running_server() {
+    local pid=""
+    if [[ -f "$PIDFILE" ]]; then
+        pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+    fi
+    # Fall back to port-based detection if the pidfile is missing/stale.
+    if [[ -z "$pid" || ! "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+        if command -v curl >/dev/null 2>&1 \
+                && curl -fsS --max-time 1 "http://localhost:$PORT/_stcore/health" >/dev/null 2>&1; then
+            warn "A server is responding on port $PORT but no valid pidfile was found."
+            warn "Stop it manually (iidm-viewer-stop) before re-running this installer if the update doesn't take effect."
+        fi
+        rm -f "$PIDFILE"
+        return 0
+    fi
+    log "Stopping running server (pid $pid) so the update takes effect on next launch"
+    # Negative pid → whole process group (matches how the launcher starts it via setsid).
+    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.25
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        warn "Server pid $pid did not exit cleanly; continuing anyway."
+    fi
+    rm -f "$PIDFILE"
+}
+if (( IS_UPDATE )); then
+    stop_running_server
+fi
+
+# -----------------------------------------------------------------------------
+# 3. Virtualenv + package install
 # -----------------------------------------------------------------------------
 mkdir -p "$INSTALL_DIR"
 
@@ -66,11 +115,28 @@ fi
 log "Upgrading pip"
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 
-log "Installing iidm-viewer from PyPI (this can take a few minutes)"
+if (( IS_UPDATE )); then
+    log "Updating iidm-viewer from PyPI (this can take a few minutes)"
+else
+    log "Installing iidm-viewer from PyPI (this can take a few minutes)"
+fi
 "$VENV_DIR/bin/pip" install --upgrade iidm-viewer
 
+NEW_VERSION="$("$VENV_DIR/bin/python" -c \
+    'import importlib.metadata as m; print(m.version("iidm-viewer"))' \
+    2>/dev/null || true)"
+if (( IS_UPDATE )); then
+    if [[ -n "$OLD_VERSION" && -n "$NEW_VERSION" && "$OLD_VERSION" == "$NEW_VERSION" ]]; then
+        log "Already at the latest version: iidm-viewer $NEW_VERSION"
+    else
+        log "Updated iidm-viewer ${OLD_VERSION:-unknown} → ${NEW_VERSION:-unknown}"
+    fi
+else
+    log "Installed iidm-viewer ${NEW_VERSION:-unknown}"
+fi
+
 # -----------------------------------------------------------------------------
-# 3. Launcher (reuses an already-running server on port $PORT)
+# 4. Launcher (reuses an already-running server on port $PORT)
 # -----------------------------------------------------------------------------
 log "Writing launcher to $LAUNCHER"
 cat > "$LAUNCHER" <<EOF
@@ -142,7 +208,7 @@ EOF
 chmod +x "$LAUNCHER"
 
 # -----------------------------------------------------------------------------
-# 4. Bash alias + iidm-viewer-stop function (idempotent via begin/end markers)
+# 5. Bash alias + iidm-viewer-stop function (idempotent via begin/end markers)
 # -----------------------------------------------------------------------------
 RC_FILE="$HOME/.bashrc"
 BEGIN_MARKER="# >>> iidm-viewer installer >>>"
@@ -184,7 +250,7 @@ EOF
 log "Wrote 'iidm-viewer' alias and 'iidm-viewer-stop' function to $RC_FILE"
 
 # -----------------------------------------------------------------------------
-# 5. Icon (simple SVG, no external dependency)
+# 6. Icon (simple SVG, no external dependency)
 # -----------------------------------------------------------------------------
 log "Writing icon to $ICON_FILE"
 cat > "$ICON_FILE" <<'EOF'
@@ -209,7 +275,7 @@ cat > "$ICON_FILE" <<'EOF'
 EOF
 
 # -----------------------------------------------------------------------------
-# 6. Desktop entry
+# 7. Desktop entry
 # -----------------------------------------------------------------------------
 mkdir -p "$DESKTOP_DIR"
 log "Writing desktop entry to $DESKTOP_FILE"
@@ -236,9 +302,14 @@ fi
 # -----------------------------------------------------------------------------
 # Done
 # -----------------------------------------------------------------------------
+if (( IS_UPDATE )); then
+    HEADLINE="iidm-viewer update complete${NEW_VERSION:+ (now at $NEW_VERSION)}."
+else
+    HEADLINE="iidm-viewer installation complete${NEW_VERSION:+ (version $NEW_VERSION)}."
+fi
 cat <<EOF
 
-iidm-viewer installation complete.
+$HEADLINE
 
   Launch options:
     - Terminal:           open a new shell, then run:  iidm-viewer
