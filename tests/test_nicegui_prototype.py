@@ -606,6 +606,27 @@ def test_upload_handler_forwards_import_params():
     assert "post_processors=" in handler_src
 
 
+def test_refresh_create_panel_no_notify_when_no_node_breaker_vls():
+    """Regression for "form blocks the app when no busbar sections":
+    on an empty / bus-breaker-only network the refresh path used to
+    fire ``ui.notify`` on every redraw, which felt like the UI was
+    blocking. The new contract: the expansion stays visible with an
+    inline ``ui.label`` placeholder, no toast — same UX as Streamlit's
+    ``st.info`` branch.
+    """
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._refresh_create_panel)
+    assert "ui.notify(" not in src, (
+        "_refresh_create_panel must not fire ui.notify — the toast "
+        "re-fires on every refresh and feels like the app is blocking."
+    )
+    # Inline placeholder for both empty-VL and empty-BBS cases.
+    assert "node-breaker voltage levels" in src
+    assert "No busbar sections" in src
+
+
 def test_blank_network_dialog_uses_shared_helper():
     """``_open_blank_network_dialog`` must funnel through the shared
     ``network_loader.create_empty`` + ``_state.install_network`` —
