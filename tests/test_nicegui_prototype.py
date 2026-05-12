@@ -449,3 +449,43 @@ def test_data_explorer_refresh_preserves_aggrid_theme():
     )
     # All three refresh callsites should funnel through ``options.update``.
     assert src.count("grid.options.update(") >= 3
+
+
+def test_iframes_resend_last_args_on_every_ready_event():
+    """Regression for the blank-on-tab-switch bug.
+
+    q-tab-panels defaults to ``keep-alive=false``, which destroys +
+    remounts the inactive iframe each time the user switches tabs. The
+    ready handler must resend the cached ``_last_*`` args *every* time
+    the bundle posts ``iidm-component-ready`` — not just the first time
+    a payload is queued — or the new iframe stays blank.
+    """
+    import inspect
+    from iidm_viewer.web import app
+
+    # The cache vars must exist (replacing the old single-shot _pending_*).
+    assert hasattr(app, "_last_map")
+    assert hasattr(app, "_last_nad")
+    assert hasattr(app, "_last_sld")
+
+    src = inspect.getsource(app)
+    # _pending_* must not survive (they were the source of the bug).
+    assert "_pending_map" not in src
+    assert "_pending_nad" not in src
+    assert "_pending_sld" not in src
+    # The ready handler resends from _last_*, not _pending_*.
+    handler_src = inspect.getsource(app.main_page)
+    assert "_last_map" in handler_src
+    assert "_last_nad" in handler_src
+    assert "_last_sld" in handler_src
+
+
+def test_tab_panels_keep_alive_props_set():
+    """``keep-alive`` on ``q-tab-panels`` makes Quasar preserve the
+    inactive panels' DOM. Combined with the resend-on-ready handler
+    this stops the iframes from going blank on tab switches."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert 'ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")' in src

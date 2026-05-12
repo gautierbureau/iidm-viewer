@@ -118,12 +118,14 @@ _map_data_version = 0
 _map_ready = False
 _nad_ready = False
 _sld_ready = False
-# When the corresponding iframe is not yet ready, queue the latest
-# render payload and dispatch as soon as the bundle posts its
-# 'streamlit:componentReady'.
-_pending_map: Optional[dict] = None
-_pending_nad: Optional[dict] = None
-_pending_sld: Optional[dict] = None
+# Latest render payload per component. Two purposes: (a) queue the
+# initial render when the iframe hasn't booted yet; (b) re-send when
+# Quasar destroys + remounts the panel on tab switch (q-tab-panels
+# defaults to ``keep-alive=false``), so the new iframe gets the
+# diagram back instead of staying blank.
+_last_map: Optional[dict] = None
+_last_nad: Optional[dict] = None
+_last_sld: Optional[dict] = None
 
 # Diagram caches — same idea as the PySide6 prototype.
 _sld_cache: dict[str, tuple[str, str]] = {}
@@ -224,7 +226,7 @@ def _send_render(component: str, args: dict) -> None:
 
 
 def _push_map() -> None:
-    global _pending_map, _map_data_version
+    global _last_map, _map_data_version
     if _state.network is None:
         return
     data = _extract_map_data(_state.network)
@@ -245,14 +247,13 @@ def _push_map() -> None:
             "height": 670,
         }
     _map_data_version += 1
+    _last_map = args
     if _map_ready:
         _send_render("map", args)
-    else:
-        _pending_map = args
 
 
 def _push_sld(vl_id: str) -> None:
-    global _pending_sld
+    global _last_sld
     if not vl_id or _state.network is None:
         return
     entry = _sld_cache.get(vl_id)
@@ -268,16 +269,15 @@ def _push_sld(vl_id: str) -> None:
         "svg": svg, "metadata": metadata,
         "height": 700, "svgType": "voltage-level",
     }
+    _last_sld = args
     if _sld_ready:
         _send_render("sld", args)
-    else:
-        _pending_sld = args
 
 
 def _push_map_flyto(substation_id: str, zoom: float = 11) -> None:
     """Tell the map iframe to fly to ``substation_id`` (if known)."""
     import time
-    global _pending_map
+    global _last_map
     args = {
         "version": _map_data_version,
         "height": 670,
@@ -287,10 +287,11 @@ def _push_map_flyto(substation_id: str, zoom: float = 11) -> None:
             "ts": int(time.monotonic() * 1000),
         },
     }
+    # Merge the flyTo into the latest map args so a re-mount (after tab
+    # switch) gets both the topology *and* the latest fly target.
+    _last_map = dict(_last_map or {}, **args)
     if _map_ready:
         _send_render("map", args)
-    else:
-        _pending_map = dict(_pending_map or {}, **args)
 
 
 def _handle_sld_breaker_click(value: dict) -> None:
@@ -356,7 +357,7 @@ def _handle_sld_feeder_click(value: dict, tabs, map_tab) -> None:
 
 
 def _push_nad(vl_id: str, depth: int) -> None:
-    global _pending_nad
+    global _last_nad
     if not vl_id or _state.network is None:
         return
     key = (vl_id, int(depth))
@@ -370,10 +371,9 @@ def _push_nad(vl_id: str, depth: int) -> None:
         _nad_cache[key] = entry
     svg, metadata = entry
     args = {"svg": svg, "metadata": metadata, "height": 700}
+    _last_nad = args
     if _nad_ready:
         _send_render("nad", args)
-    else:
-        _pending_nad = args
 
 
 # ---------------------------------------------------------------------------
@@ -2706,7 +2706,7 @@ def main_page() -> None:
     state above survives, but iframe-ready flags reset because the
     page DOM is new.
     """
-    global _map_ready, _nad_ready, _sld_ready, _pending_map, _pending_nad, _pending_sld
+    global _map_ready, _nad_ready, _sld_ready
     _map_ready = False
     _nad_ready = False
     _sld_ready = False
@@ -2795,18 +2795,21 @@ def main_page() -> None:
         nad_tab = ui.tab("Network Area Diagram")
         sld_tab = ui.tab("Single Line Diagram")
         data_tab = ui.tab("Data Explorer Components")
-    panels = ui.tab_panels(tabs, value=map_tab).classes("w-full")
+    panels = ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")
     with panels:
-        with ui.tab_panel(map_tab).classes("q-pa-none"):
+        with ui.tab_panel(map_tab).classes("q-pa-none w-full"):
             # ``sanitize=False`` because NiceGUI 3.x strips ``<iframe>`` tags
             # from sanitized HTML — the bundles are served from our own
-            # static mount so the iframe is trusted.
+            # static mount so the iframe is trusted. The wrapping
+            # ``ui.html`` is forced to ``w-full`` so the iframe's
+            # ``width:100%`` resolves against the full panel width
+            # instead of collapsing to its natural width.
             ui.html(
                 f'<iframe id="iidm-map-iframe" src="{_MAP_URL}/index.html" '
                 'style="width:100%;height:670px;border:none;display:block"></iframe>',
                 sanitize=False,
-            )
-        with ui.tab_panel(nad_tab).classes("q-pa-none"):
+            ).classes("w-full")
+        with ui.tab_panel(nad_tab).classes("q-pa-none w-full"):
             with ui.row().classes("q-pa-sm items-center"):
                 ui.label("Depth:")
                 depth_input = ui.number(value=_nad_depth, min=0, max=10, step=1, format="%d") \
@@ -2829,14 +2832,14 @@ def main_page() -> None:
                 f'<iframe id="iidm-nad-iframe" src="{_NAD_URL}/index.html" '
                 'style="width:100%;height:700px;border:none;display:block"></iframe>',
                 sanitize=False,
-            )
-        with ui.tab_panel(sld_tab).classes("q-pa-none"):
+            ).classes("w-full")
+        with ui.tab_panel(sld_tab).classes("q-pa-none w-full"):
             ui.html(
                 f'<iframe id="iidm-sld-iframe" src="{_SLD_URL}/index.html" '
                 'style="width:100%;height:700px;border:none;display:block"></iframe>',
                 sanitize=False,
-            )
-        with ui.tab_panel(data_tab):
+            ).classes("w-full")
+        with ui.tab_panel(data_tab).classes("w-full"):
             refresh_data_grid = _build_data_explorer()
 
     # ------------------------------------------------------------------
@@ -2883,24 +2886,24 @@ def main_page() -> None:
     # Iframe -> Python event handlers
     # ------------------------------------------------------------------
     def _on_component_ready(e):
+        # Every ``iidm-component-ready`` event resends the latest cached
+        # args. q-tab-panels defaults to ``keep-alive=false``, so each
+        # tab switch destroys and remounts the iframe; without this
+        # resend the user sees a blank diagram after the first switch.
         global _map_ready, _nad_ready, _sld_ready
-        global _pending_map, _pending_nad, _pending_sld
         component = e.args.get("component")
         if component == "map":
             _map_ready = True
-            if _pending_map is not None:
-                _send_render("map", _pending_map)
-                _pending_map = None
+            if _last_map is not None:
+                _send_render("map", _last_map)
         elif component == "nad":
             _nad_ready = True
-            if _pending_nad is not None:
-                _send_render("nad", _pending_nad)
-                _pending_nad = None
+            if _last_nad is not None:
+                _send_render("nad", _last_nad)
         elif component == "sld":
             _sld_ready = True
-            if _pending_sld is not None:
-                _send_render("sld", _pending_sld)
-                _pending_sld = None
+            if _last_sld is not None:
+                _send_render("sld", _last_sld)
 
     def _on_component_value(e):
         component = e.args.get("component")
