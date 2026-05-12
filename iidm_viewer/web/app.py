@@ -153,6 +153,11 @@ from iidm_viewer.lf_parameters_schema import (
     group_provider_params_by_category,
     parse_provider_options,
 )
+from iidm_viewer.network_loader import (
+    export_network,
+    get_export_formats,
+    guess_mime_for_export,
+)
 from iidm_viewer.lf_report import (
     SEVERITY_LEVELS,
     SEVERITY_ORDER,
@@ -625,6 +630,80 @@ def _open_lf_parameters_dialog(on_save) -> None:
                 dialog.close()
 
             ui.button("Save", on_click=_on_save_click).props("color=primary")
+
+    dialog.open()
+
+
+def _open_save_network_dialog() -> None:
+    """Open the "Save network" modal — Streamlit-style.
+
+    Two-step flow that matches the existing Streamlit dialog:
+
+    1. The user picks an export format from pypowsybl's list (XIIDM
+       by default).
+    2. They click "Download" — the dialog runs the shared
+       :func:`iidm_viewer.network_loader.export_network` and streams
+       the resulting bytes back to the browser via ``ui.download``.
+
+    The export call runs through pypowsybl's worker thread, so the
+    UI stays responsive while the bytes are being produced.
+    """
+    if _state.network is None:
+        ui.notify("No network loaded.", type="warning")
+        return
+    try:
+        formats = get_export_formats()
+    except Exception as exc:
+        ui.notify(f"Failed to list formats: {exc}", type="negative")
+        return
+    if not formats:
+        ui.notify("No export formats available.", type="warning")
+        return
+
+    default_fmt = "XIIDM" if "XIIDM" in formats else formats[0]
+    status_state: dict = {"label": None}
+
+    with ui.dialog() as dialog, ui.card().style("min-width: 420px"):
+        ui.label("Save network").classes("text-h6")
+        ui.label("Pick an export format:").classes("text-caption")
+        fmt_select = ui.select(
+            options=list(formats),
+            value=default_fmt,
+        ).props("dense outlined").classes("full-width q-mb-md")
+        status_state["label"] = ui.label("").classes("text-caption q-mb-sm")
+
+        async def _on_download_click() -> None:
+            import asyncio
+
+            fmt = fmt_select.value
+            if not fmt or _state.network is None:
+                return
+            status_state["label"].set_text(f"Exporting to {fmt}…")
+            try:
+                data, ext = await asyncio.to_thread(
+                    export_network, _state.network, fmt,
+                )
+            except Exception as exc:
+                status_state["label"].set_text(f"Export failed: {exc}")
+                ui.notify(f"Export failed: {exc}", type="negative")
+                return
+            mime = guess_mime_for_export(data)
+            ui.download.content(
+                data,
+                filename=f"network.{ext.lower()}",
+                media_type=mime,
+            )
+            status_state["label"].set_text(
+                f"Downloaded network.{ext.lower()} ({len(data):,} bytes).",
+            )
+            ui.notify(
+                f"Downloaded network.{ext.lower()}",
+                type="positive", timeout=1500,
+            )
+
+        with ui.row().classes("full-width justify-end q-mt-md"):
+            ui.button("Cancel", on_click=dialog.close).props("flat")
+            ui.button("Download", on_click=_on_download_click).props("color=primary")
 
     dialog.open()
 
@@ -3017,6 +3096,14 @@ def main_page() -> None:
         ).props("flat dense accept='.xiidm,.iidm,.xml,.zip,.mat,.uct'") \
          .classes("full-width q-mb-sm")
 
+        # "Save network" mirrors the Streamlit dialog: pops a modal
+        # with a format picker and downloads the exported bytes via
+        # ``ui.download``. Disabled until a network is loaded.
+        save_btn = ui.button(
+            "Save network", on_click=_open_save_network_dialog,
+        ).props("flat dense").classes("full-width q-mb-sm")
+        save_btn.set_enabled(False)
+
         # Voltage Level picker (mirrors Streamlit's vl_selector).
         # Hidden until a network is loaded. The "Filter" input narrows
         # the dropdown to a substring match on the display name; the
@@ -3189,6 +3276,7 @@ def main_page() -> None:
         # carries the new network's voltage levels.
         run_lf_btn.set_enabled(network is not None)
         view_logs_btn.set_enabled(False)
+        save_btn.set_enabled(network is not None)
         lf_status_lbl.set_text("")
         if network is None:
             vl_picker_state["df"] = None

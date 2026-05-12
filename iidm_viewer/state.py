@@ -49,40 +49,14 @@ def export_network(
     format_name: str,
     parameters: dict[str, str] | None = None,
 ) -> tuple[bytes, str]:
-    """Export the network; return (bytes, file_extension).
+    """Streamlit wrapper around the shared
+    :func:`iidm_viewer.network_loader.export_network`.
 
-    pypowsybl wraps some formats (e.g. XIIDM) in a ZIP archive.  Single-file
-    ZIPs are unwrapped so the caller gets the real content and the correct
-    extension.  Multi-file ZIPs are served as-is with extension ``zip``.
-
-    *parameters* is forwarded verbatim to ``save_to_binary_buffer`` so callers
-    can pass format-specific options discovered via
-    :func:`~iidm_viewer.io_options.get_format_parameters`.
+    Kept for backwards compatibility — callers go through this; the
+    actual worker-routed export + ZIP unwrap live in the shared
+    module so the PySide6 and NiceGUI prototypes reuse them.
     """
-    import io as _io
-    import zipfile as _zf
-
-    raw = object.__getattribute__(network, "_obj")
-    params = parameters or {}
-
-    def _export():
-        return raw.save_to_binary_buffer(format_name, parameters=params).getvalue()
-
-    data = run(_export)
-
-    if data[:2] == b'PK':
-        try:
-            with _zf.ZipFile(_io.BytesIO(data)) as zf:
-                names = zf.namelist()
-                if len(names) == 1:
-                    inner = zf.read(names[0])
-                    ext = names[0].rsplit(".", 1)[-1] if "." in names[0] else format_name.lower()
-                    return inner, ext
-        except Exception:
-            pass
-        return data, "zip"
-
-    return data, format_name.lower()
+    return network_loader.export_network(network, format_name, parameters)
 
 
 def load_network(

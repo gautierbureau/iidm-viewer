@@ -552,6 +552,39 @@ def test_view_logs_dialog_helper_uses_shared_parser_and_gates_empty_input():
     assert "_rebuild_tree" in src
 
 
+def test_save_network_dialog_uses_shared_helpers():
+    """The "Save network" modal must funnel through the shared
+    :func:`network_loader.export_network` and
+    :func:`network_loader.guess_mime_for_export` — guards against a
+    future refactor that re-implements either inline."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._open_save_network_dialog)
+    assert "export_network" in src
+    assert "guess_mime_for_export" in src
+    assert "get_export_formats" in src
+    # The download uses NiceGUI's ``ui.download`` API; we don't pin the
+    # exact call shape (it changed between 2.x and 3.x) but we want a
+    # download invocation present.
+    assert "ui.download" in src
+
+
+def test_save_network_button_is_gated_on_network_presence():
+    """The drawer's "Save network" button toggles with the network —
+    matches the Streamlit sidebar gate."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    drawer_start = src.index("ui.left_drawer(")
+    drawer_end = src.index("with ui.tabs(", drawer_start)
+    drawer_src = src[drawer_start:drawer_end]
+    assert "Save network" in drawer_src
+    # The on-network-change handler must flip the button.
+    assert "save_btn.set_enabled(network is not None)" in src
+
+
 def test_lf_parameters_dialog_uses_shared_helpers():
     """``_open_lf_parameters_dialog`` must funnel everything through
     the shared :mod:`iidm_viewer.lf_parameters_schema` helpers so

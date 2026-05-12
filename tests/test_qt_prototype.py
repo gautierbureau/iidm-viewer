@@ -1610,6 +1610,41 @@ def test_lf_report_dialog_handles_malformed_json(qapp):
     assert "Failed to parse report" in dlg._empty_label.text()
 
 
+def test_save_network_dialog_picks_xiidm_by_default(qapp):
+    """The Save-network format picker should default to XIIDM when
+    that format is offered — matches Streamlit's typical use."""
+    from iidm_viewer.qt.save_network_dialog import SaveNetworkDialog
+
+    dlg = SaveNetworkDialog(["UCTE", "XIIDM", "CGMES"])
+    qapp.processEvents()
+    assert dlg._combo.currentText() == "XIIDM"
+    # Result starts unset; populated only after Save is clicked.
+    assert dlg.selected_format is None
+    dlg._on_save_clicked()
+    assert dlg.selected_format == "XIIDM"
+
+
+def test_save_network_dialog_handles_missing_xiidm(qapp):
+    """When the offered formats don't include XIIDM, the picker just
+    keeps the combo's first entry as the default."""
+    from iidm_viewer.qt.save_network_dialog import SaveNetworkDialog
+
+    dlg = SaveNetworkDialog(["UCTE", "CGMES"])
+    qapp.processEvents()
+    assert dlg._combo.currentText() == "UCTE"
+
+
+def test_sidebar_save_button_gates_on_network_presence(qapp, loaded_window):
+    """``set_save_enabled`` flips the button as the network state changes.
+    The loaded window has IEEE14 in place so the button should be on."""
+    sidebar = loaded_window.sidebar
+    assert sidebar._save_btn.isEnabled() is True
+    # Simulate the network being cleared.
+    loaded_window._on_network_changed(None)
+    qapp.processEvents()
+    assert sidebar._save_btn.isEnabled() is False
+
+
 def test_lf_parameters_dialog_seeds_overrides_and_saves_changes(qapp):
     """End-to-end Qt LF parameters: seeds the widgets from the
     passed-in overrides, lets a programmatic edit through, and on Save
