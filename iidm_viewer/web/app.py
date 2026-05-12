@@ -2905,13 +2905,54 @@ def main_page() -> None:
             _push_nad(_state.selected_vl, _nad_depth)
 
 
+def _native_backend_available() -> bool:
+    """Return True if pywebview can find a usable GUI backend.
+
+    pywebview tries GTK (via PyGObject's ``gi``) on Linux first, then a
+    Qt backend (PyQt5/PyQt6/PySide2/PySide6 with QtWebEngine). On macOS
+    + Windows it uses Cocoa / EdgeChromium and the modules below aren't
+    needed, so we treat those platforms as always-supported and only
+    probe on Linux.
+    """
+    import platform
+    if platform.system() != "Linux":
+        return True
+    for mod in (
+        "gi",
+        "PySide6.QtWebEngineWidgets",
+        "PyQt6.QtWebEngineWidgets",
+        "PySide2.QtWebEngineWidgets",
+        "PyQt5.QtWebEngineWidgets",
+    ):
+        try:
+            __import__(mod)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def run_app(initial_file: Optional[str] = None, native: bool = True, port: int = 8669) -> None:
     """Boot the NiceGUI server.
 
     ``native=True`` opens in a pywebview window — desktop-app feel.
     ``native=False`` runs as a plain localhost server you connect to
     from any browser; handy for testing without GUI libs.
+
+    If ``native=True`` is requested but no pywebview backend is
+    available (e.g. Linux without PyGObject or Qt+QtWebEngine), falls
+    back to browser mode with a one-line warning so the app still runs.
     """
+    if native and not _native_backend_available():
+        import sys
+        print(
+            "warning: --native requested but no pywebview backend is "
+            "available (install PyGObject + GTK, or PySide6 + "
+            "PySide6-Addons). Falling back to browser mode; open "
+            f"http://localhost:{port}/ to use the app.",
+            file=sys.stderr,
+        )
+        native = False
     if initial_file:
         # Load before the server starts so the first page paint sees
         # a populated state.

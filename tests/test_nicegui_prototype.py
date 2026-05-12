@@ -309,3 +309,52 @@ def test_static_mounts_are_registered():
     assert any(p and p.startswith("/_iidm/map_component") for p in mounts)
     assert any(p and p.startswith("/_iidm/nad_component") for p in mounts)
     assert any(p and p.startswith("/_iidm/sld_component") for p in mounts)
+
+
+def test_run_app_falls_back_to_browser_when_no_native_backend(monkeypatch, capsys):
+    """If pywebview can't find a backend, ``run_app(native=True)`` should
+    warn and call ``ui.run`` with ``native=False`` instead of crashing."""
+    from iidm_viewer.web import app
+
+    monkeypatch.setattr(app, "_native_backend_available", lambda: False)
+    captured: dict = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(app.ui, "run", fake_run)
+    app.run_app(native=True, port=8669)
+
+    assert captured.get("native") is False
+    assert captured.get("show") is True
+    err = capsys.readouterr().err
+    assert "no pywebview backend is available" in err
+    assert "http://localhost:8669/" in err
+
+
+def test_run_app_keeps_native_when_backend_is_available(monkeypatch):
+    """When the probe says a backend is available, ``run_app`` must
+    leave ``native=True`` untouched."""
+    from iidm_viewer.web import app
+
+    monkeypatch.setattr(app, "_native_backend_available", lambda: True)
+    captured: dict = {}
+    monkeypatch.setattr(app.ui, "run", lambda **kw: captured.update(kw))
+    app.run_app(native=True, port=8669)
+    assert captured.get("native") is True
+    assert captured.get("show") is False
+
+
+def test_run_app_no_native_path_skips_probe(monkeypatch):
+    """``run_app(native=False)`` is the explicit browser-mode opt-in;
+    the backend probe shouldn't run at all in that path."""
+    from iidm_viewer.web import app
+
+    probe_calls = []
+    monkeypatch.setattr(
+        app, "_native_backend_available",
+        lambda: probe_calls.append(1) or False,
+    )
+    monkeypatch.setattr(app.ui, "run", lambda **kw: None)
+    app.run_app(native=False, port=8669)
+    assert probe_calls == []
