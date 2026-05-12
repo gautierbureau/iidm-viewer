@@ -1128,6 +1128,96 @@ def test_tap_changer_panel_hides_for_non_twt_component(qapp):
     assert panel.isVisible() is True
 
 
+def test_coupling_panel_hides_when_no_multi_bbs_vl(qapp):
+    """The coupling panel hides when no node-breaker VL has ≥2 BBS."""
+    from iidm_viewer.qt.create_panel import CreateCouplingDevicePanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        n = pn.create_empty(network_id="x")
+        n.create_substations(id="S1")
+        n.create_voltage_levels(id="VL1", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=400.0)
+        n.create_busbar_sections(id="BBS1", voltage_level_id="VL1", node=0)
+        return n
+
+    network = NetworkProxy(run(_make))
+    panel = CreateCouplingDevicePanel()
+    panel.set_network(network)
+    panel.set_component("Switches")
+    qapp.processEvents()
+    assert panel.isVisible() is False
+
+
+def test_coupling_panel_creates_coupling_device(qapp):
+    """End-to-end coupling-device creation via the Qt panel."""
+    from iidm_viewer.qt.create_panel import CreateCouplingDevicePanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        n = pn.create_empty(network_id="x")
+        n.create_substations(id="S1")
+        n.create_voltage_levels(id="VL1", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=400.0)
+        n.create_busbar_sections(id="BBS1", voltage_level_id="VL1", node=0)
+        n.create_busbar_sections(id="BBS2", voltage_level_id="VL1", node=1)
+        return n
+
+    network = NetworkProxy(run(_make))
+    panel = CreateCouplingDevicePanel()
+    panel.set_network(network)
+    panel.set_component("Switches")
+    qapp.processEvents()
+    assert panel.isVisible() is True
+    # The VL has 2 BBS — the pickers should default to distinct rows.
+    assert panel._bbs1_combo.currentText() == "BBS1"
+    assert panel._bbs2_combo.currentText() == "BBS2"
+    panel._prefix_edit.setText("CPL_QT")
+
+    switches_before = set(network.get_switches().index.tolist())
+    seen: list = []
+    panel.component_created.connect(lambda c, vl: seen.append((c, vl)))
+    panel._on_create_clicked()
+    qapp.processEvents()
+
+    switches_after = set(network.get_switches().index.tolist())
+    new_switches = switches_after - switches_before
+    assert any(s.startswith("CPL_QT") for s in new_switches)
+    assert seen == [("Coupling Devices", "VL1")]
+
+
+def test_coupling_panel_hides_for_non_switch_component(qapp):
+    """The coupling panel only renders when the active component is Switches."""
+    from iidm_viewer.qt.create_panel import CreateCouplingDevicePanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateCouplingDevicePanel()
+    panel.set_network(network)
+    panel.set_component("Generators")
+    qapp.processEvents()
+    assert panel.isVisible() is False
+    panel.set_component("Switches")
+    qapp.processEvents()
+    # The four-sub demo has S1VL2 with 2 BBS, so the panel becomes visible.
+    assert panel.isVisible() is True
+
+
 def test_change_log_panel_repaints_on_record(qapp, loaded_window):
     """The panel's title and table reflect log mutations in real time
     via the on_changed bus.

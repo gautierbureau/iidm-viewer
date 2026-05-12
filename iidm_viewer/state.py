@@ -545,47 +545,22 @@ def create_tap_changer(
 
 
 # --- Coupling device (switches tying two busbar sections together) ---
+#
+# Validator + worker-routed dispatcher live in the shared
+# ``iidm_viewer.component_creation`` module so the PySide6 and NiceGUI
+# prototypes share them. The Streamlit wrapper adds cache invalidation.
+
+from iidm_viewer.component_creation import (  # noqa: E402, F401  (re-exported)
+    list_node_breaker_vls_with_multi_bbs,
+    validate_create_coupling_device_fields,
+)
+
 
 def create_coupling_device(
     network, bbs1: str, bbs2: str, switch_prefix: str | None = None
 ):
-    """Create a coupling device between two busbar sections in the same VL.
-
-    In node-breaker topology pypowsybl inserts a closed breaker plus closed
-    disconnectors on both busbar sections, and open disconnectors on any
-    parallel busbar sections. In bus-breaker topology only a breaker is
-    added. Routed through the worker thread like every other pypowsybl call.
-    """
-    if not bbs1 or not bbs2:
-        raise ValueError("Both busbar sections are required.")
-    if bbs1 == bbs2:
-        raise ValueError("The two busbar sections must differ.")
-
-    bbs = network.get_busbar_sections()
-    if bbs1 not in bbs.index or bbs2 not in bbs.index:
-        raise ValueError("Unknown busbar section id.")
-    vl1 = bbs.loc[bbs1, "voltage_level_id"]
-    vl2 = bbs.loc[bbs2, "voltage_level_id"]
-    if vl1 != vl2:
-        raise ValueError(
-            f"A coupling device must tie busbar sections of the same voltage level "
-            f"(got {vl1!r} and {vl2!r})."
-        )
-
-    kwargs = {
-        "bus_or_busbar_section_id_1": bbs1,
-        "bus_or_busbar_section_id_2": bbs2,
-    }
-    if switch_prefix:
-        kwargs["switch_prefix_id"] = switch_prefix
-
-    raw = object.__getattribute__(network, "_obj")
-
-    def _do_create():
-        import pypowsybl.network as pn
-        pn.create_coupling_device(raw, **kwargs)
-
-    run(_do_create)
+    from iidm_viewer.component_creation import create_coupling_device as _shared
+    _shared(network, bbs1, bbs2, switch_prefix)
     invalidate_on_topology_change(affects_geography=True)
     script_recorder.record_create_coupling_device(bbs1, bbs2, switch_prefix)
 

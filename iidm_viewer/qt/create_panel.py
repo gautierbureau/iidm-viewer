@@ -51,11 +51,13 @@ from iidm_viewer.component_creation import (
     create_branch_bay,
     create_component_bay,
     create_container,
+    create_coupling_device,
     create_hvdc_line,
     create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
+    list_node_breaker_vls_with_multi_bbs,
     list_substations_df,
     list_transformers_without_tap_changer,
     next_free_node,
@@ -1244,3 +1246,153 @@ class CreateTapChangerPanel(QWidget):
         self.component_created.emit("Tap Changers", transformer_id)
         # Refresh the target picker — the transformer just got its tap changer.
         self._refresh_for_current()
+
+
+# ---------------------------------------------------------------------------
+# Coupling device creation panel (switches tying two busbar sections)
+# ---------------------------------------------------------------------------
+class CreateCouplingDevicePanel(QWidget):
+    """Sub-form to create a coupling device inside a node-breaker VL.
+
+    Auto-hides unless the active data-explorer component is "Switches"
+    and the network has at least one node-breaker voltage level carrying
+    two or more busbar sections.
+
+    Layout:
+      * VL picker (only node-breaker VLs with ≥2 BBS).
+      * Two BBS pickers (refresh when the VL changes; default to distinct rows).
+      * Optional switch-prefix text field.
+      * Create button + status label.
+    """
+
+    component_created = Signal(str, str)  # ("Coupling Devices", vl_id)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+
+        self._group = QGroupBox("Create a coupling device")
+        self._group.setCheckable(True)
+        self._group.setChecked(True)
+        self._group.toggled.connect(self._on_toggled)
+
+        self._vl_combo = QComboBox()
+        self._vl_combo.setMinimumWidth(220)
+        self._vl_combo.currentIndexChanged.connect(self._on_vl_changed)
+        self._bbs1_combo = QComboBox()
+        self._bbs1_combo.setMinimumWidth(200)
+        self._bbs2_combo = QComboBox()
+        self._bbs2_combo.setMinimumWidth(200)
+        self._prefix_edit = QLineEdit()
+        self._prefix_edit.setPlaceholderText("optional switch prefix")
+        self._prefix_edit.setMaximumWidth(220)
+
+        row_vl = QHBoxLayout()
+        row_vl.addWidget(QLabel("Voltage level"))
+        row_vl.addWidget(self._vl_combo, 1)
+
+        row_bbs = QHBoxLayout()
+        row_bbs.addWidget(QLabel("BBS 1"))
+        row_bbs.addWidget(self._bbs1_combo, 1)
+        row_bbs.addSpacing(10)
+        row_bbs.addWidget(QLabel("BBS 2"))
+        row_bbs.addWidget(self._bbs2_combo, 1)
+
+        row_prefix = QHBoxLayout()
+        row_prefix.addWidget(QLabel("Switch prefix"))
+        row_prefix.addWidget(self._prefix_edit, 1)
+
+        self._create_btn = QPushButton("Create coupling device")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        row_action = QHBoxLayout()
+        row_action.addWidget(self._create_btn)
+        row_action.addWidget(self._status, 1)
+
+        inner = QVBoxLayout()
+        inner.addLayout(row_vl)
+        inner.addLayout(row_bbs)
+        inner.addLayout(row_prefix)
+        inner.addLayout(row_action)
+        self._group.setLayout(inner)
+
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+        self.setLayout(outer)
+        self.setVisible(False)
+
+    # -- Public API ------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._refresh_for_current()
+        self._status.setText("")
+
+    # -- Internals -------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        for w in (
+            self._vl_combo, self._bbs1_combo, self._bbs2_combo, self._prefix_edit,
+        ):
+            w.setVisible(checked)
+
+    def _refresh_for_current(self) -> None:
+        show = (
+            self._network is not None
+            and self._component == "Switches"
+        )
+        vls: list[tuple[str, str, float]] = []
+        if show:
+            vls = list_node_breaker_vls_with_multi_bbs(self._network)
+        self.setVisible(bool(show and vls))
+        if not (show and vls):
+            return
+
+        self._vl_combo.blockSignals(True)
+        self._vl_combo.clear()
+        for vl_id, display, kv in vls:
+            label = f"{display} ({kv:.0f} kV)"
+            self._vl_combo.addItem(label, userData=vl_id)
+        self._vl_combo.blockSignals(False)
+        self._refresh_bbs()
+
+    def _on_vl_changed(self, _index: int) -> None:
+        self._refresh_bbs()
+
+    def _refresh_bbs(self) -> None:
+        if self._network is None:
+            return
+        vl_id = self._vl_combo.currentData()
+        if not vl_id:
+            return
+        ids = list_busbar_sections(self._network, vl_id)
+        for combo in (self._bbs1_combo, self._bbs2_combo):
+            combo.blockSignals(True)
+            combo.clear()
+            for bid in ids:
+                combo.addItem(bid)
+            combo.blockSignals(False)
+        if self._bbs2_combo.count() > 1:
+            self._bbs2_combo.setCurrentIndex(1)
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component != "Switches":
+            return
+        bbs1 = self._bbs1_combo.currentText()
+        bbs2 = self._bbs2_combo.currentText()
+        prefix = self._prefix_edit.text().strip() or None
+        try:
+            create_coupling_device(self._network, bbs1, bbs2, prefix)
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        self._status.setText(f"Created coupling device between {bbs1} and {bbs2}.")
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        vl_id = str(self._vl_combo.currentData() or "")
+        self.component_created.emit("Coupling Devices", vl_id)

@@ -76,11 +76,13 @@ from iidm_viewer.component_creation import (
     create_branch_bay,
     create_component_bay,
     create_container,
+    create_coupling_device,
     create_hvdc_line,
     create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
+    list_node_breaker_vls_with_multi_bbs,
     list_substations_df,
     list_transformers_without_tap_changer,
     next_free_node,
@@ -1384,6 +1386,128 @@ def _refresh_create_tap_changer_panel(state: dict, component: str) -> None:
     expansion.visible = True
 
 
+def _build_create_coupling_device_panel_widgets(
+    state: dict, refresh_after_create,
+) -> None:
+    """Materialise the "Create a coupling device" expansion.
+
+    A VL picker filtered to node-breaker VLs with ≥2 busbar sections,
+    two BBS pickers populated from the active VL, and an optional
+    switch-prefix input. Auto-hides when the active component isn't
+    "Switches" or no VL is eligible.
+    """
+    expansion = ui.expansion("Create a coupling device", icon="link") \
+        .classes("w-full")
+    expansion.visible = False
+    state["expansion"] = expansion
+    with expansion:
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            ui.label("Voltage level:")
+            vl_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-64")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            ui.label("BBS 1:")
+            bbs1_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-48")
+            ui.label("BBS 2:")
+            bbs2_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-48")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            ui.label("Switch prefix:")
+            prefix_input = ui.input(value="", placeholder="optional") \
+                .props("dense outlined").classes("w-64")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            create_btn = ui.button("Create coupling device", icon="add_circle")
+            status_label = ui.label("").classes("text-caption q-ml-md")
+
+    state["vl_select"] = vl_select
+    state["bbs1_select"] = bbs1_select
+    state["bbs2_select"] = bbs2_select
+    state["prefix_input"] = prefix_input
+    state["status_label"] = status_label
+    state["create_btn"] = create_btn
+
+    def _refresh_bbs() -> None:
+        if _state.network is None:
+            return
+        vl_id = state["vl_select"].value
+        if not vl_id:
+            return
+        ids = list_busbar_sections(_state.network, vl_id)
+        opts = {bid: bid for bid in ids}
+        for sel, default_idx in (
+            (state["bbs1_select"], 0),
+            (state["bbs2_select"], 1 if len(ids) > 1 else 0),
+        ):
+            sel.options = opts
+            sel.value = ids[default_idx] if ids else None
+            sel.update()
+
+    state["refresh_bbs"] = _refresh_bbs
+    vl_select.on("update:model-value", lambda *_: _refresh_bbs())
+
+    def _on_create_click() -> None:
+        if _state.network is None or state.get("current_component") != "Switches":
+            return
+        bbs1 = state["bbs1_select"].value
+        bbs2 = state["bbs2_select"].value
+        prefix = (state["prefix_input"].value or "").strip() or None
+        try:
+            create_coupling_device(_state.network, str(bbs1), str(bbs2), prefix)
+        except Exception as exc:
+            status_label.set_text(f"Create failed — {exc}")
+            ui.notify(f"Create failed: {exc}", type="negative")
+            return
+        status_label.set_text(f"Created coupling device between {bbs1} and {bbs2}.")
+        ui.notify(
+            f"Created coupling device between {bbs1} and {bbs2}",
+            type="positive", timeout=1500,
+        )
+        # Coupling devices add switches in a VL — flush diagram caches so
+        # the SLD repaints with the new breaker + disconnectors.
+        _nad_cache.clear()
+        _sld_cache.clear()
+        if _state.selected_vl:
+            _push_sld(_state.selected_vl)
+            _push_nad(_state.selected_vl, _nad_depth)
+        refresh_after_create()
+
+    create_btn.on_click(_on_create_click)
+
+
+def _refresh_create_coupling_device_panel(state: dict, component: str) -> None:
+    """Repopulate the coupling-device panel for ``component``.
+
+    Hides the expansion when the active component isn't "Switches" or
+    no node-breaker VL with ≥2 BBS is available.
+    """
+    expansion = state.get("expansion")
+    if expansion is None:
+        return
+    state["current_component"] = component
+    if component != "Switches" or _state.network is None:
+        expansion.visible = False
+        return
+
+    try:
+        vls = list_node_breaker_vls_with_multi_bbs(_state.network)
+    except Exception:
+        vls = []
+    if not vls:
+        expansion.visible = False
+        return
+
+    options = {vl_id: f"{display} ({kv:.0f} kV)" for vl_id, display, kv in vls}
+    items = list(options.keys())
+    state["vl_select"].options = options
+    if state["vl_select"].value not in items:
+        state["vl_select"].value = items[0]
+    state["vl_select"].update()
+    state["refresh_bbs"]()
+    state["status_label"].set_text("")
+    expansion.visible = True
+
+
 def _build_data_explorer():
     """Materialise the Data Explorer panel and return a refresh closure.
 
@@ -1464,6 +1588,17 @@ def _build_data_explorer():
     }
     _build_create_tap_changer_panel_widgets(
         tap_changer_create_state, refresh_after_create=lambda: refresh(),
+    )
+
+    coupling_create_state: dict = {
+        "vl_select": None, "bbs1_select": None, "bbs2_select": None,
+        "prefix_input": None,
+        "status_label": None, "expansion": None,
+        "refresh_bbs": None,
+        "current_component": "",
+    }
+    _build_create_coupling_device_panel_widgets(
+        coupling_create_state, refresh_after_create=lambda: refresh(),
     )
 
     grid = ui.aggrid({
@@ -1574,6 +1709,7 @@ def _build_data_explorer():
         _refresh_create_container_panel(container_create_state, label)
         _refresh_create_hvdc_panel(hvdc_create_state, label)
         _refresh_create_tap_changer_panel(tap_changer_create_state, label)
+        _refresh_create_coupling_device_panel(coupling_create_state, label)
         is_disconnectable = label in DISCONNECTABLE_COMPONENTS
         is_removable = label in REMOVABLE_COMPONENTS
         bulk_row.set_visibility(bool(cols) or is_disconnectable or is_removable)
