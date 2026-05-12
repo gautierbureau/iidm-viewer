@@ -2193,11 +2193,14 @@ def _build_data_explorer():
     def refresh() -> None:
         label = select.value
         if _state.network is None or not label:
-            grid.options = {
+            # ``grid.options.update`` (not ``=``) so the wrapper's
+            # ``theme`` / ``autoSizeStrategy`` defaults survive — AG Grid
+            # 34 throws when ``options.theme`` is undefined.
+            grid.options.update({
                 "columnDefs": [], "rowData": [],
                 "defaultColDef": _DEFAULT_COL_DEF,
                 "rowSelection": "multiple",
-            }
+            })
             grid.update()
             summary.set_text("No network loaded.")
             bulk_row.set_visibility(False)
@@ -2207,11 +2210,11 @@ def _build_data_explorer():
         try:
             df_full = get_enriched_dataframe(_state.network, label)
         except Exception as exc:
-            grid.options = {
+            grid.options.update({
                 "columnDefs": [], "rowData": [],
                 "defaultColDef": _DEFAULT_COL_DEF,
                 "rowSelection": "multiple",
-            }
+            })
             grid.update()
             summary.set_text(f"{label}: failed — {exc}")
             bulk_row.set_visibility(False)
@@ -2237,9 +2240,11 @@ def _build_data_explorer():
         # ``FILTERS`` whitelist narrows ag-Grid's per-column filter
         # affordance to the same set Streamlit's expander offers.
         filterable_cols = [c for c in FILTERS.get(label, []) if c in df.columns]
-        grid.options = _dataframe_to_aggrid_options(
+        # ``options.update`` keeps the wrapper-set ``theme`` /
+        # ``autoSizeStrategy``; AG Grid 34 throws if either is missing.
+        grid.options.update(_dataframe_to_aggrid_options(
             df, editable_cols=cols, filterable_cols=filterable_cols,
-        )
+        ))
         grid.update()
         current_df["df"] = df
         editable_msg = " · editable: " + ", ".join(cols) if cols else ""
