@@ -990,3 +990,91 @@ def create_tap_changer(
         getattr(raw, method_name)(main_df, steps_df)
 
     run(_do_create)
+
+
+# ---------------------------------------------------------------------------
+# Coupling devices (switches tying two busbar sections in the same VL)
+# ---------------------------------------------------------------------------
+def list_node_breaker_vls_with_multi_bbs(
+    network: NetworkProxy,
+) -> list[tuple[str, str, float]]:
+    """Return ``[(vl_id, display, nominal_v)]`` for every node-breaker VL
+    that carries at least two busbar sections.
+
+    A coupling device needs two distinct busbars to tie together, so VLs
+    with 0 or 1 BBS aren't candidates. Used by the UI to gate the picker.
+    """
+    nb_vls = list_node_breaker_voltage_levels(network)
+    if nb_vls.empty:
+        return []
+    bbs = network.get_busbar_sections()
+    if bbs.empty:
+        return []
+    counts = bbs.groupby("voltage_level_id").size()
+    out: list[tuple[str, str, float]] = []
+    for _, row in nb_vls.iterrows():
+        if counts.get(row["id"], 0) >= 2:
+            out.append((row["id"], row["display"], float(row["nominal_v"])))
+    return out
+
+
+def validate_create_coupling_device_fields(
+    network: NetworkProxy, bbs1: str, bbs2: str,
+) -> list[str]:
+    """Sanity-check a coupling-device payload before dispatching it.
+
+    Verifies both busbar section ids are non-empty, distinct, known to
+    the network, and sit in the same voltage level. Returns a list of
+    human-readable errors (empty when valid).
+    """
+    errors: list[str] = []
+    if not bbs1 or not bbs2:
+        errors.append("Both busbar sections are required.")
+        return errors
+    if bbs1 == bbs2:
+        errors.append("The two busbar sections must differ.")
+    bbs = network.get_busbar_sections()
+    if bbs1 not in bbs.index or bbs2 not in bbs.index:
+        errors.append("Unknown busbar section id.")
+        return errors
+    vl1 = bbs.loc[bbs1, "voltage_level_id"]
+    vl2 = bbs.loc[bbs2, "voltage_level_id"]
+    if vl1 != vl2:
+        errors.append(
+            "A coupling device must tie busbar sections of the same voltage "
+            f"level (got {vl1!r} and {vl2!r})."
+        )
+    return errors
+
+
+def create_coupling_device(
+    network: NetworkProxy,
+    bbs1: str,
+    bbs2: str,
+    switch_prefix: str | None = None,
+) -> None:
+    """Create a coupling device between two busbar sections in the same VL.
+
+    In node-breaker topology pypowsybl inserts a closed breaker plus closed
+    disconnectors on both busbar sections, and open disconnectors on any
+    parallel busbar sections. In bus-breaker topology only a breaker is
+    added. Routed through the worker thread like every other pypowsybl call.
+    """
+    errors = validate_create_coupling_device_fields(network, bbs1, bbs2)
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    kwargs = {
+        "bus_or_busbar_section_id_1": bbs1,
+        "bus_or_busbar_section_id_2": bbs2,
+    }
+    if switch_prefix:
+        kwargs["switch_prefix_id"] = switch_prefix
+
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_create():
+        import pypowsybl.network as pn
+        pn.create_coupling_device(raw, **kwargs)
+
+    run(_do_create)

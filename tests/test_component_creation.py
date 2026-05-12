@@ -21,17 +21,20 @@ from iidm_viewer.component_creation import (
     create_branch_bay,
     create_component_bay,
     create_container,
+    create_coupling_device,
     create_hvdc_line,
     create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
+    list_node_breaker_vls_with_multi_bbs,
     list_substations_df,
     list_transformers_without_tap_changer,
     list_two_winding_transformers,
     next_free_node,
     validate_create_branch_fields,
     validate_create_container_fields,
+    validate_create_coupling_device_fields,
     validate_create_fields,
     validate_create_hvdc_line_fields,
     validate_create_tap_changer_fields,
@@ -724,4 +727,78 @@ def test_create_tap_changer_raises_on_unknown_kind(twt_without_tap_changer_netwo
     with pytest.raises(ValueError, match="not creatable"):
         create_tap_changer(
             twt_without_tap_changer_network, "Mystery", "T1", {}, [{"rho": 1.0}],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Coupling devices (switches tying two BBS in the same node-breaker VL)
+# ---------------------------------------------------------------------------
+def test_list_node_breaker_vls_with_multi_bbs(node_breaker_network):
+    """The four-sub demo carries S1VL2 with two busbar sections."""
+    vls = list_node_breaker_vls_with_multi_bbs(node_breaker_network)
+    ids = {vl_id for vl_id, _, _ in vls}
+    assert "S1VL2" in ids
+    # VLs with a single BBS must not be listed.
+    single_bbs_vls = {"S1VL1", "S2VL1", "S3VL1", "S4VL1"}
+    assert not (single_bbs_vls & ids)
+
+
+def test_validate_create_coupling_device_fields_requires_both(node_breaker_network):
+    errors = validate_create_coupling_device_fields(node_breaker_network, "", "")
+    assert any("required" in e for e in errors)
+
+
+def test_validate_create_coupling_device_fields_rejects_same(node_breaker_network):
+    errors = validate_create_coupling_device_fields(
+        node_breaker_network, "S1VL2_BBS1", "S1VL2_BBS1",
+    )
+    assert any("must differ" in e for e in errors)
+
+
+def test_validate_create_coupling_device_fields_rejects_unknown(node_breaker_network):
+    errors = validate_create_coupling_device_fields(
+        node_breaker_network, "S1VL2_BBS1", "BOGUS",
+    )
+    assert any("Unknown busbar section" in e for e in errors)
+
+
+def test_validate_create_coupling_device_fields_rejects_cross_vl(node_breaker_network):
+    errors = validate_create_coupling_device_fields(
+        node_breaker_network, "S1VL2_BBS1", "S2VL1_BBS",
+    )
+    assert any("same voltage level" in e for e in errors)
+
+
+def test_validate_create_coupling_device_fields_accepts_valid(node_breaker_network):
+    assert validate_create_coupling_device_fields(
+        node_breaker_network, "S1VL2_BBS1", "S1VL2_BBS2",
+    ) == []
+
+
+def test_create_coupling_device_end_to_end():
+    """Create a fresh network with two BBS in the same VL and tie them."""
+    def _make():
+        import pypowsybl.network as pn
+        n = pn.create_empty(network_id="x")
+        n.create_substations(id="S1")
+        n.create_voltage_levels(id="VL1", substation_id="S1",
+                                topology_kind="NODE_BREAKER", nominal_v=400.0)
+        n.create_busbar_sections(id="BBS1", voltage_level_id="VL1", node=0)
+        n.create_busbar_sections(id="BBS2", voltage_level_id="VL1", node=1)
+        return n
+
+    network = NetworkProxy(run(_make))
+    switches_before = set(network.get_switches().index.tolist())
+    create_coupling_device(network, "BBS1", "BBS2", switch_prefix="CPL")
+    switches_after = set(network.get_switches().index.tolist())
+    new_switches = switches_after - switches_before
+    # pypowsybl adds a breaker + 2 disconnectors (one per BBS).
+    assert len(new_switches) >= 1
+    assert any(s.startswith("CPL") for s in new_switches)
+
+
+def test_create_coupling_device_raises_on_invalid(node_breaker_network):
+    with pytest.raises(ValueError, match="same voltage level"):
+        create_coupling_device(
+            node_breaker_network, "S1VL2_BBS1", "S2VL1_BBS",
         )
