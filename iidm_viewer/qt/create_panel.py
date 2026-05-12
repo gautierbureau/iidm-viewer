@@ -154,7 +154,7 @@ class CreateComponentPanel(QWidget):
         # only flips visibility of the inner widget.
         self._group = QGroupBox("Create a new component")
         self._group.setCheckable(True)
-        self._group.setChecked(True)
+        self._group.setChecked(False)  # folded by default
         self._group.toggled.connect(self._on_toggled)
 
         # VL + busbar picker row.
@@ -187,15 +187,22 @@ class CreateComponentPanel(QWidget):
         action_row.addWidget(self._create_btn)
         action_row.addWidget(self._status, 1)
 
-        inner = QVBoxLayout()
-        inner.setContentsMargins(6, 2, 6, 6)
-        inner.setSpacing(6)
-        inner.addLayout(picker_row)
-        inner.addWidget(self._fields_widget)
-        inner.addLayout(action_row)
-        self._group.setLayout(inner)
-        # Inner widget visible because the group starts checked.
-        self._fields_widget.setVisible(True)
+        # Build the entire body (pickers + fields + action) inside a
+        # single ``_body`` widget so the QGroupBox's checked toggle
+        # can fold the whole panel — matches Streamlit's ``st.expander``
+        # and NiceGUI's ``ui.expansion`` default-collapsed behaviour.
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.setSpacing(6)
+        body_inner.addLayout(picker_row)
+        body_inner.addWidget(self._fields_widget)
+        body_inner.addLayout(action_row)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+        self._body.setVisible(False)  # group starts unchecked → folded
         # Hidden until a network with node-breaker VLs is loaded.
         self.setVisible(False)
 
@@ -233,7 +240,9 @@ class CreateComponentPanel(QWidget):
         self.setVisible(applicable)
 
     def _on_toggled(self, checked: bool) -> None:
-        self._fields_widget.setVisible(checked)
+        # Fold the entire body — pickers + fields + action — to match
+        # Streamlit's collapsed ``st.expander`` UX.
+        self._body.setVisible(checked)
 
     def _refresh_vl_combo(self) -> None:
         self._vl_combo.blockSignals(True)
@@ -325,7 +334,11 @@ class CreateComponentPanel(QWidget):
     def _on_create_clicked(self) -> None:
         if self._network is None or self._component not in CREATABLE_COMPONENTS:
             return
-        bbs_id = self._bbs_combo.currentText() if self._bbs_combo.isEnabled() else ""
+        # The combo is empty when no busbar sections exist (the
+        # network either has no node-breaker VL or the picked VL has
+        # no BBS). ``currentText()`` returns "" in that case, which
+        # the next branch already treats as "no selection".
+        bbs_id = self._bbs_combo.currentText()
         if not bbs_id or bbs_id.startswith("("):
             self._status.setText("Select a busbar section first.")
             self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
@@ -381,7 +394,7 @@ class CreateBranchPanel(QWidget):
 
         self._group = QGroupBox("Create a new branch")
         self._group.setCheckable(True)
-        self._group.setChecked(True)
+        self._group.setChecked(False)  # folded by default
         self._group.toggled.connect(self._on_toggled)
 
         # Side pickers.
@@ -423,15 +436,22 @@ class CreateBranchPanel(QWidget):
         action_row.addWidget(self._create_btn)
         action_row.addWidget(self._status, 1)
 
-        inner = QVBoxLayout()
-        inner.setContentsMargins(6, 2, 6, 6)
-        inner.setSpacing(6)
-        inner.addLayout(side1_row)
-        inner.addLayout(side2_row)
-        inner.addWidget(self._fields_widget)
-        inner.addLayout(action_row)
-        self._group.setLayout(inner)
-        self._fields_widget.setVisible(True)
+        # Wrap the whole body in a single ``_body`` widget so the
+        # QGroupBox checked toggle folds everything — pickers + fields
+        # + action — matching Streamlit's collapsed-by-default expander.
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.setSpacing(6)
+        body_inner.addLayout(side1_row)
+        body_inner.addLayout(side2_row)
+        body_inner.addWidget(self._fields_widget)
+        body_inner.addLayout(action_row)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+        self._body.setVisible(False)
         self.setVisible(False)
 
         outer = QVBoxLayout(self)
@@ -467,7 +487,7 @@ class CreateBranchPanel(QWidget):
         self.setVisible(applicable)
 
     def _on_toggled(self, checked: bool) -> None:
-        self._fields_widget.setVisible(checked)
+        self._body.setVisible(checked)
 
     def _refresh_vl_combos(self) -> None:
         for combo in (self._vl1, self._vl2):
@@ -569,8 +589,8 @@ class CreateBranchPanel(QWidget):
     def _on_create_clicked(self) -> None:
         if self._network is None or self._component not in CREATABLE_BRANCHES:
             return
-        bbs1 = self._bbs1.currentText() if self._bbs1.isEnabled() else ""
-        bbs2 = self._bbs2.currentText() if self._bbs2.isEnabled() else ""
+        bbs1 = self._bbs1.currentText()
+        bbs2 = self._bbs2.currentText()
         if not bbs1 or bbs1.startswith("(") or not bbs2 or bbs2.startswith("("):
             self._status.setText("Pick a busbar section on both sides first.")
             self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
@@ -625,7 +645,7 @@ class CreateContainerPanel(QWidget):
 
         self._group = QGroupBox("Create a new container")
         self._group.setCheckable(True)
-        self._group.setChecked(True)
+        self._group.setChecked(False)  # folded by default
         self._group.toggled.connect(self._on_toggled)
 
         # Context picker — visible only when the component needs one.
@@ -655,14 +675,18 @@ class CreateContainerPanel(QWidget):
         action_row.addWidget(self._create_btn)
         action_row.addWidget(self._status, 1)
 
-        inner = QVBoxLayout()
-        inner.setContentsMargins(6, 2, 6, 6)
-        inner.setSpacing(6)
-        inner.addWidget(self._picker_widget)
-        inner.addWidget(self._fields_widget)
-        inner.addLayout(action_row)
-        self._group.setLayout(inner)
-        self._fields_widget.setVisible(True)
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.setSpacing(6)
+        body_inner.addWidget(self._picker_widget)
+        body_inner.addWidget(self._fields_widget)
+        body_inner.addLayout(action_row)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+        self._body.setVisible(False)
         self.setVisible(False)
 
         outer = QVBoxLayout(self)
@@ -689,8 +713,7 @@ class CreateContainerPanel(QWidget):
     # Internals
     # ------------------------------------------------------------------
     def _on_toggled(self, checked: bool) -> None:
-        self._fields_widget.setVisible(checked)
-        self._picker_widget.setVisible(checked and self._picker_lbl_text() is not None)
+        self._body.setVisible(checked)
 
     def _picker_lbl_text(self) -> Optional[str]:
         if self._component == "Voltage Levels":
@@ -873,7 +896,7 @@ class CreateHvdcLinePanel(QWidget):
 
         self._group = QGroupBox("Create a new HVDC line")
         self._group.setCheckable(True)
-        self._group.setChecked(True)
+        self._group.setChecked(False)  # folded by default
         self._group.toggled.connect(self._on_toggled)
 
         # Station pickers — labelled with both the id and the kind so
@@ -901,14 +924,18 @@ class CreateHvdcLinePanel(QWidget):
         action_row.addWidget(self._create_btn)
         action_row.addWidget(self._status, 1)
 
-        inner = QVBoxLayout()
-        inner.setContentsMargins(6, 2, 6, 6)
-        inner.setSpacing(6)
-        inner.addLayout(pickers)
-        inner.addWidget(self._fields_widget)
-        inner.addLayout(action_row)
-        self._group.setLayout(inner)
-        self._fields_widget.setVisible(True)
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.setSpacing(6)
+        body_inner.addLayout(pickers)
+        body_inner.addWidget(self._fields_widget)
+        body_inner.addLayout(action_row)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+        self._body.setVisible(False)
         self.setVisible(False)
 
         outer = QVBoxLayout(self)
@@ -931,7 +958,7 @@ class CreateHvdcLinePanel(QWidget):
     # Internals
     # ------------------------------------------------------------------
     def _on_toggled(self, checked: bool) -> None:
-        self._fields_widget.setVisible(checked)
+        self._body.setVisible(checked)
 
     def _refresh_for_current(self) -> None:
         applicable = (
@@ -1052,7 +1079,7 @@ class CreateTapChangerPanel(QWidget):
 
         self._group = QGroupBox("Create a tap changer on a 2-winding transformer")
         self._group.setCheckable(True)
-        self._group.setChecked(True)
+        self._group.setChecked(False)  # folded by default
         self._group.toggled.connect(self._on_toggled)
 
         # Pickers row
@@ -1099,19 +1126,25 @@ class CreateTapChangerPanel(QWidget):
         action_row.addWidget(self._create_btn)
         action_row.addWidget(self._status, 1)
 
-        inner = QVBoxLayout()
-        inner.addLayout(pickers)
-        inner.addWidget(self._main_widget)
-        inner.addLayout(steps_row)
-        inner.addWidget(self._steps_table)
-        inner.addLayout(action_row)
-        self._group.setLayout(inner)
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.addLayout(pickers)
+        body_inner.addWidget(self._main_widget)
+        body_inner.addLayout(steps_row)
+        body_inner.addWidget(self._steps_table)
+        body_inner.addLayout(action_row)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
 
         outer = QVBoxLayout()
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self._group)
         self.setLayout(outer)
 
+        self._body.setVisible(False)
         self.setVisible(False)
 
     # -- Public API ------------------------------------------------------
@@ -1126,8 +1159,7 @@ class CreateTapChangerPanel(QWidget):
 
     # -- Internals -------------------------------------------------------
     def _on_toggled(self, checked: bool) -> None:
-        self._main_widget.setVisible(checked)
-        self._steps_table.setVisible(checked)
+        self._body.setVisible(checked)
 
     def _on_kind_changed(self, _kind: str) -> None:
         self._kind = self._kind_combo.currentText()
@@ -1287,7 +1319,7 @@ class CreateCouplingDevicePanel(QWidget):
 
         self._group = QGroupBox("Create a coupling device")
         self._group.setCheckable(True)
-        self._group.setChecked(True)
+        self._group.setChecked(False)  # folded by default
         self._group.toggled.connect(self._on_toggled)
 
         self._vl_combo = QComboBox()
@@ -1324,17 +1356,23 @@ class CreateCouplingDevicePanel(QWidget):
         row_action.addWidget(self._create_btn)
         row_action.addWidget(self._status, 1)
 
-        inner = QVBoxLayout()
-        inner.addLayout(row_vl)
-        inner.addLayout(row_bbs)
-        inner.addLayout(row_prefix)
-        inner.addLayout(row_action)
-        self._group.setLayout(inner)
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.addLayout(row_vl)
+        body_inner.addLayout(row_bbs)
+        body_inner.addLayout(row_prefix)
+        body_inner.addLayout(row_action)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
 
         outer = QVBoxLayout()
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self._group)
         self.setLayout(outer)
+        self._body.setVisible(False)
         self.setVisible(False)
 
     # -- Public API ------------------------------------------------------
@@ -1349,10 +1387,7 @@ class CreateCouplingDevicePanel(QWidget):
 
     # -- Internals -------------------------------------------------------
     def _on_toggled(self, checked: bool) -> None:
-        for w in (
-            self._vl_combo, self._bbs1_combo, self._bbs2_combo, self._prefix_edit,
-        ):
-            w.setVisible(checked)
+        self._body.setVisible(checked)
 
     def _refresh_for_current(self) -> None:
         show = (
@@ -1439,7 +1474,7 @@ class CreateReactiveLimitsPanel(QWidget):
 
         self._group = QGroupBox("Attach reactive limits")
         self._group.setCheckable(True)
-        self._group.setChecked(True)
+        self._group.setChecked(False)  # folded by default
         self._group.toggled.connect(self._on_toggled)
 
         # Target + mode pickers
@@ -1499,17 +1534,23 @@ class CreateReactiveLimitsPanel(QWidget):
         row_action.addWidget(self._create_btn)
         row_action.addWidget(self._status, 1)
 
-        inner = QVBoxLayout()
-        inner.addLayout(row_pickers)
-        inner.addWidget(self._minmax_widget)
-        inner.addWidget(self._curve_widget)
-        inner.addLayout(row_action)
-        self._group.setLayout(inner)
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.addLayout(row_pickers)
+        body_inner.addWidget(self._minmax_widget)
+        body_inner.addWidget(self._curve_widget)
+        body_inner.addLayout(row_action)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
 
         outer = QVBoxLayout()
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self._group)
         self.setLayout(outer)
+        self._body.setVisible(False)
         self.setVisible(False)
 
         # Seed curve defaults so the table shows two sensible rows from the start.
@@ -1528,8 +1569,10 @@ class CreateReactiveLimitsPanel(QWidget):
 
     # -- Internals -------------------------------------------------------
     def _on_toggled(self, checked: bool) -> None:
-        self._minmax_widget.setVisible(checked and self._current_mode() == "minmax")
-        self._curve_widget.setVisible(checked and self._current_mode() == "curve")
+        self._body.setVisible(checked)
+        if checked:
+            # Mode-specific sub-views only one of which is shown at a time.
+            self._apply_mode_visibility()
 
     def _current_mode(self) -> str:
         return str(self._mode_combo.currentData() or "minmax")
@@ -1656,7 +1699,7 @@ class CreateOperationalLimitsPanel(QWidget):
 
         self._group = QGroupBox("Attach operational limits")
         self._group.setCheckable(True)
-        self._group.setChecked(True)
+        self._group.setChecked(False)  # folded by default
         self._group.toggled.connect(self._on_toggled)
 
         # Target + side + type + group
@@ -1711,17 +1754,23 @@ class CreateOperationalLimitsPanel(QWidget):
         row_action.addWidget(self._create_btn)
         row_action.addWidget(self._status, 1)
 
-        inner = QVBoxLayout()
-        inner.addLayout(row_pickers)
-        inner.addLayout(row_count)
-        inner.addWidget(self._rows_table)
-        inner.addLayout(row_action)
-        self._group.setLayout(inner)
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.addLayout(row_pickers)
+        body_inner.addLayout(row_count)
+        body_inner.addWidget(self._rows_table)
+        body_inner.addLayout(row_action)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
 
         outer = QVBoxLayout()
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self._group)
         self.setLayout(outer)
+        self._body.setVisible(False)
         self.setVisible(False)
 
         self._seed_rows_defaults()
@@ -1738,7 +1787,7 @@ class CreateOperationalLimitsPanel(QWidget):
 
     # -- Internals -------------------------------------------------------
     def _on_toggled(self, checked: bool) -> None:
-        self._rows_table.setVisible(checked)
+        self._body.setVisible(checked)
 
     def _refresh_for_current(self) -> None:
         show = (
@@ -1874,7 +1923,7 @@ class CreateSecondaryVoltageControlPanel(QWidget):
 
         self._group = QGroupBox("Configure secondary voltage control")
         self._group.setCheckable(True)
-        self._group.setChecked(True)
+        self._group.setChecked(False)  # folded by default
         self._group.toggled.connect(self._on_toggled)
 
         # Zones table + count spinner
@@ -1928,20 +1977,26 @@ class CreateSecondaryVoltageControlPanel(QWidget):
         zones_label.setTextFormat(Qt.RichText)
         units_label.setTextFormat(Qt.RichText)
 
-        inner = QVBoxLayout()
-        inner.addWidget(zones_label)
-        inner.addLayout(row_zone_count)
-        inner.addWidget(self._zones_table)
-        inner.addWidget(units_label)
-        inner.addLayout(row_unit_count)
-        inner.addWidget(self._units_table)
-        inner.addLayout(row_action)
-        self._group.setLayout(inner)
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.addWidget(zones_label)
+        body_inner.addLayout(row_zone_count)
+        body_inner.addWidget(self._zones_table)
+        body_inner.addWidget(units_label)
+        body_inner.addLayout(row_unit_count)
+        body_inner.addWidget(self._units_table)
+        body_inner.addLayout(row_action)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
 
         outer = QVBoxLayout()
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self._group)
         self.setLayout(outer)
+        self._body.setVisible(False)
         self.setVisible(False)
 
         self._seed_zones_defaults()
@@ -1959,8 +2014,7 @@ class CreateSecondaryVoltageControlPanel(QWidget):
 
     # -- Internals -------------------------------------------------------
     def _on_toggled(self, checked: bool) -> None:
-        self._zones_table.setVisible(checked)
-        self._units_table.setVisible(checked)
+        self._body.setVisible(checked)
 
     def _refresh_for_current(self) -> None:
         show = (

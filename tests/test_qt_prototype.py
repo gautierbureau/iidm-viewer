@@ -768,6 +768,10 @@ def test_create_panel_creates_load_on_node_breaker_network(qapp):
     panel = CreateComponentPanel()
     panel.set_network(network)
     panel.set_component("Loads")
+    # Panels are folded by default (matches Streamlit's collapsed
+    # ``st.expander``). Simulate the user click that expands the
+    # form so the test can drive the widgets.
+    panel._group.setChecked(True)
     qapp.processEvents()
 
     # Sanity: the panel detected node-breaker VLs.
@@ -892,6 +896,12 @@ def test_container_panel_creates_vl_attached_to_substation(qapp):
     panel = CreateContainerPanel()
     panel.set_network(network)
     panel.set_component("Voltage Levels")
+    # Panels are folded by default — simulate the user click that
+    # expands the form so isVisible() reflects the picker's intended
+    # presence rather than the panel's folded state.
+    panel._group.setChecked(True)
+    panel.setVisible(True)
+    panel.show()
     qapp.processEvents()
     # Picker visible; the substation S_QT is in the dropdown
     # (item 0 is "(none — no substation)", item 1 is S_QT).
@@ -1540,6 +1550,66 @@ def test_app_state_emits_signal_only_on_change(qapp):
     s.set_selected_vl("VL_B")
     s.set_selected_vl(None)
     assert seen == ["VL_A", "VL_B", ""]
+
+
+def test_create_panel_unfolds_when_group_checked(qapp):
+    """Programmatic ``_group.setChecked(True)`` unfolds the body —
+    simulates the user clicking the QGroupBox header to expand."""
+    from iidm_viewer.qt.create_panel import CreateComponentPanel
+
+    panel = CreateComponentPanel()
+    # The panel itself starts hidden (waits for a network); make it
+    # visible so isVisible() on _body reflects only the fold state.
+    panel.setVisible(True)
+    panel.show()
+    qapp.processEvents()
+    assert panel._body.isVisible() is False
+    panel._group.setChecked(True)
+    qapp.processEvents()
+    assert panel._body.isVisible() is True
+    panel.hide()
+
+
+def test_all_create_panels_start_folded(qapp):
+    """Every PySide6 create panel must start collapsed — same UX as
+    Streamlit's default-collapsed ``st.expander`` and NiceGUI's
+    ``ui.expansion``. Construct each one and assert the QGroupBox is
+    unchecked + its ``_body`` widget hidden."""
+    from iidm_viewer.qt.create_panel import (
+        CreateBranchPanel,
+        CreateComponentPanel,
+        CreateContainerPanel,
+        CreateCouplingDevicePanel,
+        CreateHvdcLinePanel,
+        CreateOperationalLimitsPanel,
+        CreateReactiveLimitsPanel,
+        CreateSecondaryVoltageControlPanel,
+        CreateTapChangerPanel,
+    )
+
+    classes = [
+        CreateComponentPanel,
+        CreateBranchPanel,
+        CreateContainerPanel,
+        CreateHvdcLinePanel,
+        CreateTapChangerPanel,
+        CreateCouplingDevicePanel,
+        CreateReactiveLimitsPanel,
+        CreateOperationalLimitsPanel,
+        CreateSecondaryVoltageControlPanel,
+    ]
+    for cls in classes:
+        panel = cls()
+        qapp.processEvents()
+        # The checkable QGroupBox starts unchecked → the user sees a
+        # collapsed form. Toggling it expands.
+        assert panel._group.isCheckable() is True, f"{cls.__name__} should be checkable"
+        assert panel._group.isChecked() is False, (
+            f"{cls.__name__} should start folded (group unchecked)"
+        )
+        assert panel._body.isVisible() is False, (
+            f"{cls.__name__} should start with its body hidden"
+        )
 
 
 def test_app_state_caches_last_report_json_for_view_logs(qapp):
