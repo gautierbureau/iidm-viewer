@@ -841,6 +841,74 @@ def test_branch_panel_creates_line_on_node_breaker_network(qapp):
     assert seen == [("Lines", "QT_NEW_LINE")]
 
 
+def test_container_panel_creates_substation_on_blank_network(qapp):
+    """End-to-end Substation creation via the Qt CreateContainerPanel."""
+    from iidm_viewer.qt.create_panel import CreateContainerPanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_empty(network_id="x")
+
+    network = NetworkProxy(run(_make))
+    panel = CreateContainerPanel()
+    panel.set_network(network)
+    panel.set_component("Substations")
+    qapp.processEvents()
+    # Substations have no context picker.
+    assert panel._picker_widget.isVisible() is False
+
+    panel._field_widgets["id"].setText("QT_SUB_NEW")
+    panel._field_widgets["country"].setText("FR")
+    seen: list = []
+    panel.component_created.connect(lambda c, eid: seen.append((c, eid)))
+    panel._on_create_clicked()
+    qapp.processEvents()
+
+    assert "QT_SUB_NEW" in network.get_substations().index
+    assert seen == [("Substations", "QT_SUB_NEW")]
+
+
+def test_container_panel_creates_vl_attached_to_substation(qapp):
+    """VL creation needs an optional substation picker; this test
+    drives the create path with a chosen substation."""
+    from iidm_viewer.qt.create_panel import CreateContainerPanel
+    from iidm_viewer.component_creation import create_container
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_empty(network_id="x")
+
+    network = NetworkProxy(run(_make))
+    create_container(network, "Substations", {"id": "S_QT"})
+
+    panel = CreateContainerPanel()
+    panel.set_network(network)
+    panel.set_component("Voltage Levels")
+    qapp.processEvents()
+    # Picker visible; the substation S_QT is in the dropdown
+    # (item 0 is "(none — no substation)", item 1 is S_QT).
+    assert panel._picker_widget.isVisible() is True
+    assert panel._context_combo.count() >= 2
+    panel._context_combo.setCurrentIndex(1)
+
+    panel._field_widgets["id"].setText("VL_QT")
+    panel._field_widgets["nominal_v"].setValue(225.0)
+    panel._on_create_clicked()
+    qapp.processEvents()
+
+    vls = network.get_voltage_levels()
+    assert "VL_QT" in vls.index
+    assert str(vls.at["VL_QT", "substation_id"]) == "S_QT"
+
+
 def test_branch_panel_hides_for_non_branch_component(qapp):
     """The branch panel only renders for components in CREATABLE_BRANCHES."""
     from iidm_viewer.qt.create_panel import CreateBranchPanel
