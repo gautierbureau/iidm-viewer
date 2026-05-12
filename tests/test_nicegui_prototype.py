@@ -358,3 +358,25 @@ def test_run_app_no_native_path_skips_probe(monkeypatch):
     monkeypatch.setattr(app.ui, "run", lambda **kw: None)
     app.run_app(native=False, port=8669)
     assert probe_calls == []
+
+
+def test_diagram_iframes_opt_out_of_sanitize():
+    """NiceGUI 3.x's ``ui.html`` sanitizes by default and DOMPurify
+    strips ``<iframe>`` tags — which would empty the Map / NAD / SLD
+    tabs. The fix: pass ``sanitize=False`` to those three callsites so
+    the bundles' iframes survive. This grep-style check guards the fix."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app)
+    # Locate the tab-panels block that mounts the iframes.
+    tabs_start = src.index("with panels:")
+    data_start = src.index("with ui.tab_panel(data_tab)")
+    region = src[tabs_start:data_start]
+    # Each of the three iframes must opt out of sanitisation.
+    for iframe_id in ("iidm-map-iframe", "iidm-nad-iframe", "iidm-sld-iframe"):
+        assert iframe_id in region, f"{iframe_id} should be wired"
+    assert region.count("sanitize=False") >= 3, (
+        "expected sanitize=False on all three diagram iframes; "
+        "DOMPurify strips <iframe> tags otherwise"
+    )

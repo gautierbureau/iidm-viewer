@@ -2783,9 +2783,13 @@ def main_page() -> None:
     panels = ui.tab_panels(tabs, value=map_tab).classes("w-full")
     with panels:
         with ui.tab_panel(map_tab).classes("q-pa-none"):
+            # ``sanitize=False`` because NiceGUI 3.x strips ``<iframe>`` tags
+            # from sanitized HTML — the bundles are served from our own
+            # static mount so the iframe is trusted.
             ui.html(
                 f'<iframe id="iidm-map-iframe" src="{_MAP_URL}/index.html" '
-                'style="width:100%;height:670px;border:none;display:block"></iframe>'
+                'style="width:100%;height:670px;border:none;display:block"></iframe>',
+                sanitize=False,
             )
         with ui.tab_panel(nad_tab).classes("q-pa-none"):
             with ui.row().classes("q-pa-sm items-center"):
@@ -2808,12 +2812,14 @@ def main_page() -> None:
                 depth_input.on("update:model-value", _on_depth_changed)
             ui.html(
                 f'<iframe id="iidm-nad-iframe" src="{_NAD_URL}/index.html" '
-                'style="width:100%;height:700px;border:none;display:block"></iframe>'
+                'style="width:100%;height:700px;border:none;display:block"></iframe>',
+                sanitize=False,
             )
         with ui.tab_panel(sld_tab).classes("q-pa-none"):
             ui.html(
                 f'<iframe id="iidm-sld-iframe" src="{_SLD_URL}/index.html" '
-                'style="width:100%;height:700px;border:none;display:block"></iframe>'
+                'style="width:100%;height:700px;border:none;display:block"></iframe>',
+                sanitize=False,
             )
         with ui.tab_panel(data_tab):
             refresh_data_grid = _build_data_explorer()
