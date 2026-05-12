@@ -162,6 +162,7 @@ from iidm_viewer.io_options_schema import (
     parse_possible_values,
 )
 from iidm_viewer.network_loader import (
+    create_empty as _create_empty_network,
     export_network,
     get_export_formats,
     guess_mime_for_export,
@@ -841,6 +842,41 @@ def _open_load_options_dialog() -> None:
         with ui.row().classes("w-full justify-end q-mt-md"):
             ui.button("Cancel", on_click=dialog.close).props("flat")
             ui.button("Save", on_click=_on_save_click).props("color=primary")
+
+    dialog.open()
+
+
+def _open_blank_network_dialog(file_lbl) -> None:
+    """Mirror Streamlit's "Start with empty network" dialog.
+
+    Prompts for a network id (default ``"network"``) then installs a
+    fresh pypowsybl ``create_empty`` Network through the AppState.
+    Users build it up via the Data Explorer's "Create a new …" forms.
+    """
+    with ui.dialog() as dialog, ui.card().style("min-width: 360px"):
+        ui.label("Start with empty network").classes("text-h6")
+        ui.label("Pick an id for the new network:").classes("text-caption")
+        nid_input = ui.input(value="network") \
+            .props("dense outlined").classes("full-width q-mb-md")
+
+        def _on_create() -> None:
+            network_id = (nid_input.value or "network").strip() or "network"
+            try:
+                network = _create_empty_network(network_id)
+                _state.install_network(network)
+            except Exception as exc:
+                ui.notify(f"Empty network failed: {exc}", type="negative")
+                return
+            file_lbl.set_text(f"(empty: {network_id})")
+            ui.notify(
+                f"Started empty network — id: {network_id}.",
+                type="positive", timeout=1500,
+            )
+            dialog.close()
+
+        with ui.row().classes("full-width justify-end"):
+            ui.button("Cancel", on_click=dialog.close).props("flat")
+            ui.button("Create", on_click=_on_create).props("color=primary")
 
     dialog.open()
 
@@ -3491,6 +3527,15 @@ def main_page() -> None:
             label="Load network…",
         ).props("flat dense accept='.xiidm,.iidm,.xml,.zip,.mat,.uct'") \
          .classes("full-width q-mb-sm")
+
+        # "Start with empty network" mirrors the Streamlit dialog —
+        # prompts for an id and installs a blank pypowsybl Network so
+        # the user can build a model from scratch via the Data
+        # Explorer's "Create a new …" forms.
+        ui.button(
+            "Start with empty network",
+            on_click=lambda: _open_blank_network_dialog(file_lbl),
+        ).props("flat dense").classes("full-width q-mb-sm")
 
         # "Import options…" opens the load-options modal — sets the
         # format / params / post-processors used on the next upload.

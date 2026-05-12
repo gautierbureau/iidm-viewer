@@ -82,6 +82,29 @@ class AppState(QObject):
             parameters=self.import_params or None,
             post_processors=self.import_post_processors or None,
         )
+        self.install_network(network)
+        return network
+
+    def create_empty_network(self, network_id: str = "network") -> NetworkProxy:
+        """Build a blank pypowsybl network and install it.
+
+        Mirrors Streamlit's ``create_empty_network`` so the PySide6
+        sidebar's "Start with empty network" button can bootstrap a
+        model from scratch. Users then build it up via the Data
+        Explorer's "Create a new …" forms.
+        """
+        network = network_loader.create_empty(network_id)
+        self.install_network(network)
+        return network
+
+    def install_network(self, network: NetworkProxy) -> None:
+        """Make ``network`` the active one + broadcast listeners.
+
+        Shared by :meth:`load_network_from_path` and
+        :meth:`create_empty_network` so both flows go through the
+        same state-reset + listener-fire sequence — keeps caches +
+        listeners in lockstep.
+        """
         default_vl = network_loader.pick_default_vl(network)
         self._network = network
         self._selected_vl = None  # cleared first so set_selected_vl emits below
@@ -90,7 +113,6 @@ class AppState(QObject):
         self.network_changed.emit(network)
         if default_vl:
             self.set_selected_vl(default_vl)
-        return network
 
     def set_selected_vl(self, vl_id: Optional[str]) -> None:
         new = vl_id or None
