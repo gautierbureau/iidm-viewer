@@ -25,7 +25,11 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
+from PySide6.QtWebEngineCore import (
+    QWebEnginePage,
+    QWebEngineScript,
+    QWebEngineSettings,
+)
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 
@@ -102,6 +106,19 @@ class PowsyblWebView(QWebEngineView):
 
         page = QWebEnginePage(self)
         page.setWebChannel(self._channel)
+        # The bundle loads over ``file://`` (QUrl.fromLocalFile below).
+        # Chromium's default policy denies fetch() from a file:// origin
+        # to remote URLs, which breaks the map's OpenStreetMap tile
+        # loads with "TypeError: Failed to fetch". Opening these two
+        # access flags lets the bundle pull tiles + remote CSS while
+        # staying inside its own file:// origin for everything else.
+        settings = page.settings()
+        settings.setAttribute(
+            QWebEngineSettings.LocalContentCanAccessRemoteUrls, True,
+        )
+        settings.setAttribute(
+            QWebEngineSettings.LocalContentCanAccessFileUrls, True,
+        )
         # qwebchannel.js is shipped inside the QtWebChannel resource
         # bundle. Concatenate it with the local bridge.js and inject as a
         # single user script at DocumentCreation so ``window.iidmRender``
