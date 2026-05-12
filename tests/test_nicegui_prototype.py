@@ -606,6 +606,58 @@ def test_upload_handler_forwards_import_params():
     assert "post_processors=" in handler_src
 
 
+def test_network_reduction_dialog_uses_shared_actions():
+    """``_open_network_reduction_dialog`` must funnel everything
+    through the shared reduction module — no inline pypowsybl calls."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._open_network_reduction_dialog)
+    for token in (
+        "list_voltage_level_ids",
+        "reduce_by_voltage_range",
+        "reduce_by_ids",
+        "reduce_by_ids_and_depths",
+        "_state.notify_network_changed",
+        "REDUCTION_METHODS",
+    ):
+        assert token in src, f"NiceGUI reduction dialog should reference {token}"
+
+
+def test_network_reduction_button_lives_in_left_drawer():
+    """The drawer must carry the "Network Reduction" button. Gated on
+    network presence — flipped by ``_on_state_network``."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    drawer_start = src.index("ui.left_drawer(")
+    drawer_end = src.index("with ui.tabs(", drawer_start)
+    drawer_src = src[drawer_start:drawer_end]
+    assert "Network Reduction" in drawer_src
+    assert "_open_network_reduction_dialog" in drawer_src
+    # The on-network-change handler must flip the button.
+    assert "reduction_btn.set_enabled(network is not None)" in src
+
+
+def test_app_state_notify_network_changed_refires_listeners():
+    """``notify_network_changed`` re-fires the network listener for
+    the same network — used by reduction to refresh listeners after
+    an in-place mutation."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.web.state import AppState
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    seen: list = []
+    state.on_network_changed(seen.append)
+
+    state.notify_network_changed()
+    assert len(seen) == 1
+    assert seen[0] is state.network
+
+
 def test_save_network_dialog_uses_shared_helpers():
     """The "Save network" modal must funnel through the shared
     :func:`network_loader.export_network` and

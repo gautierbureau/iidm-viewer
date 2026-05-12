@@ -166,6 +166,13 @@ from iidm_viewer.network_loader import (
     get_export_formats,
     guess_mime_for_export,
 )
+from iidm_viewer.network_reduction_actions import (
+    REDUCTION_METHODS,
+    list_voltage_level_ids,
+    reduce_by_ids,
+    reduce_by_ids_and_depths,
+    reduce_by_voltage_range,
+)
 from iidm_viewer.lf_report import (
     SEVERITY_LEVELS,
     SEVERITY_ORDER,
@@ -943,6 +950,148 @@ def _open_save_network_dialog() -> None:
         with ui.row().classes("full-width justify-end q-mt-md"):
             ui.button("Cancel", on_click=dialog.close).props("flat")
             ui.button("Download", on_click=_on_download_click).props("color=primary")
+
+    dialog.open()
+
+
+def _open_network_reduction_dialog() -> None:
+    """Modal for the three pypowsybl reduction methods.
+
+    Irreversible — the warning banner at the top mirrors Streamlit's.
+    On a successful Apply the helper calls
+    :meth:`AppState.notify_network_changed` so every listener
+    (diagram caches, data explorer, VL picker) refreshes against the
+    reduced topology.
+    """
+    if _state.network is None:
+        ui.notify("No network loaded.", type="warning")
+        return
+    try:
+        vl_ids = list_voltage_level_ids(_state.network)
+    except Exception:
+        vl_ids = []
+
+    panels_state: dict = {"applied": False}
+
+    with ui.dialog() as dialog, ui.card().style(
+        "min-width: 640px; max-width: 95vw; max-height: 90vh",
+    ):
+        ui.label("Network Reduction").classes("text-h6")
+        ui.label(
+            "⚠ Irreversible operation. The network will be permanently "
+            "modified. To recover the original, reload the file.",
+        ).classes("text-body2 q-pa-sm").style(
+            "background: #fde3e3; color: #5a0000; border-radius: 3px; "
+            "border: 1px solid #f5a5a5;",
+        )
+
+        method_select = ui.select(
+            options=list(REDUCTION_METHODS),
+            value=REDUCTION_METHODS[0],
+            label="Reduction method",
+        ).props("dense outlined").classes("full-width q-mt-md")
+        with_boundary = ui.checkbox(
+            "Replace cut lines with boundary lines",
+        ).tooltip(
+            "Lines cut at the reduction boundary are replaced by boundary lines.",
+        )
+
+        # One container per mode; toggled via method_select.
+        range_box = ui.column().classes("full-width q-mt-sm")
+        ids_box = ui.column().classes("full-width q-mt-sm")
+        depths_box = ui.column().classes("full-width q-mt-sm")
+
+        with range_box:
+            ui.label(
+                "Keep all elements whose nominal voltage is within the "
+                "specified range (kV).",
+            ).classes("text-caption")
+            with ui.row().classes("full-width items-center"):
+                ui.label("Minimum (kV)")
+                v_min_input = ui.number(value=0.0, min=0.0, format="%.2f") \
+                    .props("dense outlined").classes("w-32")
+                ui.label("Maximum (kV)").classes("q-ml-md")
+                v_max_input = ui.number(value=9999.0, min=0.0, format="%.2f") \
+                    .props("dense outlined").classes("w-32")
+
+        with ids_box:
+            ui.label(
+                "Keep only the specified voltage levels and all elements "
+                "between them.",
+            ).classes("text-caption")
+            ids_select = ui.select(
+                options=list(vl_ids),
+                value=[], multiple=True,
+                label="Voltage levels to keep",
+            ).props("dense outlined use-chips").classes("full-width")
+
+        with depths_box:
+            ui.label(
+                "Keep the specified voltage levels and their neighbours up to "
+                "the given depth (applied to every selected voltage level).",
+            ).classes("text-caption")
+            depth_ids_select = ui.select(
+                options=list(vl_ids),
+                value=[], multiple=True,
+                label="Voltage levels",
+            ).props("dense outlined use-chips").classes("full-width")
+            with ui.row().classes("items-center"):
+                ui.label("Depth")
+                depth_input = ui.number(
+                    value=1, min=0, max=100, step=1, format="%d",
+                ).props("dense outlined").classes("w-24")
+
+        status_lbl = ui.label("").classes("text-caption text-negative q-mt-sm")
+
+        def _refresh_panels() -> None:
+            method = method_select.value
+            range_box.visible = method == "By Voltage Range"
+            ids_box.visible = method == "By Voltage Level IDs"
+            depths_box.visible = method == "By Voltage Level IDs and Depths"
+            status_lbl.set_text("")
+
+        method_select.on("update:model-value", lambda *_: _refresh_panels())
+        _refresh_panels()
+
+        def _on_apply_click() -> None:
+            status_lbl.set_text("")
+            method = method_select.value
+            wbl = bool(with_boundary.value)
+            try:
+                if method == "By Voltage Range":
+                    reduce_by_voltage_range(
+                        _state.network,
+                        v_min_input.value, v_max_input.value,
+                        with_boundary_lines=wbl,
+                    )
+                elif method == "By Voltage Level IDs":
+                    reduce_by_ids(
+                        _state.network,
+                        ids_select.value or [],
+                        with_boundary_lines=wbl,
+                    )
+                else:
+                    reduce_by_ids_and_depths(
+                        _state.network,
+                        depth_ids_select.value or [],
+                        depth_input.value or 0,
+                        with_boundary_lines=wbl,
+                    )
+            except ValueError as exc:
+                status_lbl.set_text(str(exc))
+                return
+            except Exception as exc:
+                status_lbl.set_text(f"Reduction failed: {exc}")
+                return
+            panels_state["applied"] = True
+            ui.notify("Network reduction applied.", type="positive", timeout=1500)
+            dialog.close()
+            _state.notify_network_changed()
+
+        with ui.row().classes("full-width justify-end q-mt-md"):
+            ui.button("Close", on_click=dialog.close).props("flat")
+            ui.button("Apply Reduction", on_click=_on_apply_click) \
+                .props("color=primary")
 
     dialog.open()
 
@@ -3357,6 +3506,13 @@ def main_page() -> None:
         ).props("flat dense").classes("full-width q-mb-sm")
         save_btn.set_enabled(False)
 
+        # "Network Reduction" opens the three-mode irreversible
+        # reduction modal. Disabled until a network is loaded.
+        reduction_btn = ui.button(
+            "Network Reduction", on_click=_open_network_reduction_dialog,
+        ).props("flat dense").classes("full-width q-mb-sm")
+        reduction_btn.set_enabled(False)
+
         # Voltage Level picker (mirrors Streamlit's vl_selector).
         # Hidden until a network is loaded. The "Filter" input narrows
         # the dropdown to a substring match on the display name; the
@@ -3530,6 +3686,7 @@ def main_page() -> None:
         run_lf_btn.set_enabled(network is not None)
         view_logs_btn.set_enabled(False)
         save_btn.set_enabled(network is not None)
+        reduction_btn.set_enabled(network is not None)
         lf_status_lbl.set_text("")
         if network is None:
             vl_picker_state["df"] = None

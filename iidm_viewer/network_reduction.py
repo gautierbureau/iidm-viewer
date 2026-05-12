@@ -1,12 +1,25 @@
+"""Streamlit "Network Reduction" dialog.
+
+The three reduction modes (voltage-range, IDs, IDs+depths), their
+validators, and the worker-routed pypowsybl calls live in
+:mod:`iidm_viewer.network_reduction_actions` so the PySide6 + NiceGUI
+prototypes share them. This file holds only the Streamlit widgets +
+the session-state housekeeping the existing app expects.
+"""
+from __future__ import annotations
+
 import streamlit as st
 
-from .caches import get_vl_nominal_v, invalidate_on_network_replace
+from iidm_viewer.network_reduction_actions import (
+    REDUCTION_METHODS,
+    list_voltage_level_ids,
+    reduce_by_ids,
+    reduce_by_ids_and_depths,
+    reduce_by_voltage_range,
+)
+
+from .caches import invalidate_on_network_replace
 from .state import get_network
-
-
-def _get_voltage_level_ids(network):
-    df = get_vl_nominal_v(network)
-    return df["voltage_level_id"].tolist()
 
 
 def _clear_caches():
@@ -47,11 +60,7 @@ def show_network_reduction_dialog():
 
     method = st.radio(
         "Reduction method",
-        options=[
-            "By Voltage Range",
-            "By Voltage Level IDs",
-            "By Voltage Level IDs and Depths",
-        ],
+        options=REDUCTION_METHODS,
         horizontal=True,
         key="nr_method",
     )
@@ -74,13 +83,11 @@ def show_network_reduction_dialog():
             v_max = st.number_input("Maximum voltage (kV)", min_value=0.0, value=9999.0, step=1.0, key="nr_v_max")
 
         if st.button("Apply Reduction", type="primary", key="nr_apply_range"):
-            if v_min >= v_max:
-                st.error("Minimum voltage must be less than maximum voltage.")
-                return
             try:
                 with st.spinner("Reducing network..."):
-                    network.reduce_by_voltage_range(
-                        v_min=v_min, v_max=v_max, with_boundary_lines=with_boundary_lines
+                    reduce_by_voltage_range(
+                        network, v_min, v_max,
+                        with_boundary_lines=with_boundary_lines,
                     )
             except Exception as exc:
                 st.error(f"Reduction failed: {exc}")
@@ -90,7 +97,7 @@ def show_network_reduction_dialog():
 
     elif method == "By Voltage Level IDs":
         st.caption("Keep only the specified voltage levels and all elements between them.")
-        vl_ids = _get_voltage_level_ids(network)
+        vl_ids = list_voltage_level_ids(network)
         selected = st.multiselect(
             "Voltage levels to keep",
             options=vl_ids,
@@ -98,12 +105,12 @@ def show_network_reduction_dialog():
         )
 
         if st.button("Apply Reduction", type="primary", key="nr_apply_ids"):
-            if not selected:
-                st.error("Select at least one voltage level.")
-                return
             try:
                 with st.spinner("Reducing network..."):
-                    network.reduce_by_ids(ids=selected, with_boundary_lines=with_boundary_lines)
+                    reduce_by_ids(
+                        network, selected,
+                        with_boundary_lines=with_boundary_lines,
+                    )
             except Exception as exc:
                 st.error(f"Reduction failed: {exc}")
                 return
@@ -115,7 +122,7 @@ def show_network_reduction_dialog():
             "Keep the specified voltage levels and their neighbours up to the given depth. "
             "Each entry specifies a voltage level and how many hops away to keep."
         )
-        vl_ids = _get_voltage_level_ids(network)
+        vl_ids = list_voltage_level_ids(network)
         selected = st.multiselect(
             "Voltage levels",
             options=vl_ids,
@@ -131,14 +138,11 @@ def show_network_reduction_dialog():
         )
 
         if st.button("Apply Reduction", type="primary", key="nr_apply_depths"):
-            if not selected:
-                st.error("Select at least one voltage level.")
-                return
-            vl_depths = [(vl, int(depth)) for vl in selected]
             try:
                 with st.spinner("Reducing network..."):
-                    network.reduce_by_ids_and_depths(
-                        vl_depths=vl_depths, with_boundary_lines=with_boundary_lines
+                    reduce_by_ids_and_depths(
+                        network, selected, depth,
+                        with_boundary_lines=with_boundary_lines,
                     )
             except Exception as exc:
                 st.error(f"Reduction failed: {exc}")

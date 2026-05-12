@@ -44,7 +44,8 @@ from iidm_viewer.qt.state import AppState
 class _Sidebar(QWidget):
     def __init__(
         self, on_load, on_run_loadflow, on_vl_selected, on_view_logs,
-        on_lf_parameters, on_save_network, on_import_options, parent=None,
+        on_lf_parameters, on_save_network, on_import_options,
+        on_network_reduction, parent=None,
     ) -> None:
         super().__init__(parent)
         self.setFixedWidth(240)
@@ -69,6 +70,12 @@ class _Sidebar(QWidget):
         self._save_btn = QPushButton("Save network")
         self._save_btn.clicked.connect(on_save_network)
         self._save_btn.setEnabled(False)
+
+        # "Network Reduction" opens the three-mode reduction modal.
+        # Irreversible — only enabled once a network is loaded.
+        self._reduction_btn = QPushButton("Network Reduction")
+        self._reduction_btn.clicked.connect(on_network_reduction)
+        self._reduction_btn.setEnabled(False)
 
         self._file_lbl = QLabel("No file loaded.")
         self._file_lbl.setWordWrap(True)
@@ -117,6 +124,7 @@ class _Sidebar(QWidget):
         layout.addWidget(self._load_btn)
         layout.addWidget(self._import_opts_btn)
         layout.addWidget(self._save_btn)
+        layout.addWidget(self._reduction_btn)
         layout.addWidget(self._file_lbl)
         layout.addWidget(vl_filter_lbl)
         layout.addWidget(self._vl_filter)
@@ -140,6 +148,10 @@ class _Sidebar(QWidget):
     def set_save_enabled(self, enabled: bool) -> None:
         """Enable the "Save network" button once a network is loaded."""
         self._save_btn.setEnabled(enabled)
+
+    def set_reduction_enabled(self, enabled: bool) -> None:
+        """Enable the "Network Reduction" button once a network is loaded."""
+        self._reduction_btn.setEnabled(enabled)
 
     def set_loadflow_status(self, text: str, ok: bool = True) -> None:
         if not text:
@@ -252,6 +264,7 @@ class MainWindow(QMainWindow):
             self._on_lf_parameters_clicked,
             self._on_save_network_clicked,
             self._on_import_options_clicked,
+            self._on_network_reduction_clicked,
         )
 
         central = QWidget()
@@ -334,6 +347,31 @@ class MainWindow(QMainWindow):
         from iidm_viewer.qt.lf_report_dialog import LFReportDialog
         dlg = LFReportDialog(report_json, self)
         dlg.exec()
+
+    def _on_network_reduction_clicked(self) -> None:
+        """Open the three-mode reduction dialog.
+
+        On a successful Apply, the dialog calls
+        :meth:`AppState.notify_network_changed` so every listener
+        (diagram caches, data explorer, sidebar VL picker) refreshes
+        against the reduced topology — same effect as Streamlit's
+        ``invalidate_on_network_replace``.
+        """
+        if self.state.network is None:
+            self.statusBar().showMessage("No network loaded.")
+            return
+        from iidm_viewer.network_reduction_actions import list_voltage_level_ids
+        from iidm_viewer.qt.network_reduction_dialog import NetworkReductionDialog
+
+        try:
+            vl_ids = list_voltage_level_ids(self.state.network)
+        except Exception:
+            vl_ids = []
+        dlg = NetworkReductionDialog(self.state.network, vl_ids, parent=self)
+        dlg.exec()
+        if dlg.applied:
+            self.state.notify_network_changed()
+            self.statusBar().showMessage("Network reduction applied.")
 
     def _on_import_options_clicked(self) -> None:
         """Mirror Streamlit's "Import options…" dialog.
@@ -509,6 +547,7 @@ class MainWindow(QMainWindow):
         # AppState wipes ``last_report_json`` on a fresh load; reflect that.
         self.sidebar.set_view_logs_enabled(False)
         self.sidebar.set_save_enabled(network is not None)
+        self.sidebar.set_reduction_enabled(network is not None)
         self.map_tab.set_network(network)
         self.nad_tab.set_network(network)
         self.sld_tab.set_network(network)
