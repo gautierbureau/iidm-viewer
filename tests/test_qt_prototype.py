@@ -1313,6 +1313,92 @@ def test_reactive_limits_panel_curve_creates_curve(qapp):
     assert gens.at["GH1", "reactive_limits_kind"] == "CURVE"
 
 
+def test_operational_limits_panel_hides_for_non_target_component(qapp):
+    """The operational-limits panel hides when component isn't in
+    :data:`OPERATIONAL_LIMITS_TARGETS`."""
+    from iidm_viewer.qt.create_panel import CreateOperationalLimitsPanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateOperationalLimitsPanel()
+    panel.set_network(network)
+    panel.set_component("Generators")
+    qapp.processEvents()
+    assert panel.isVisible() is False
+    panel.set_component("Lines")
+    qapp.processEvents()
+    assert panel.isVisible() is True
+
+
+def test_operational_limits_panel_creates_group(qapp):
+    """End-to-end operational-limits creation via the Qt panel."""
+    from iidm_viewer.qt.create_panel import CreateOperationalLimitsPanel
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateOperationalLimitsPanel()
+    panel.set_network(network)
+    panel.set_component("Lines")
+    qapp.processEvents()
+    assert panel.isVisible() is True
+    panel._target_combo.setCurrentText("LINE_S2S3")
+    panel._side_combo.setCurrentText("ONE")
+    panel._type_combo.setCurrentText("CURRENT")
+    panel._group_edit.setText("QT_GRP")
+
+    seen: list = []
+    panel.component_created.connect(lambda c, eid: seen.append((c, eid)))
+    panel._on_create_clicked()
+    qapp.processEvents()
+
+    ol = network.get_operational_limits(show_inactive_sets=True)
+    mask = ol.index.get_level_values("element_id") == "LINE_S2S3"
+    rows = ol[mask]
+    groups = set(rows.index.get_level_values("group_name").tolist())
+    assert "QT_GRP" in groups
+    assert seen == [("Lines", "LINE_S2S3")]
+
+
+def test_operational_limits_panel_rejects_zero_permanents(qapp):
+    """The validator surfaces 'Exactly one permanent' via the status label."""
+    from iidm_viewer.qt.create_panel import CreateOperationalLimitsPanel
+    from PySide6.QtWidgets import QTableWidgetItem
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    panel = CreateOperationalLimitsPanel()
+    panel.set_network(network)
+    panel.set_component("Lines")
+    qapp.processEvents()
+    panel._target_combo.setCurrentText("LINE_S2S3")
+    # Replace the seeded permanent row with another TATL → 0 permanents.
+    panel._rows_table.setItem(0, panel._COL_DURATION, QTableWidgetItem("30"))
+    panel._on_create_clicked()
+    qapp.processEvents()
+    assert "Exactly one permanent" in panel._status.text()
+
+
 def test_change_log_panel_repaints_on_record(qapp, loaded_window):
     """The panel's title and table reflect log mutations in real time
     via the on_changed bus.

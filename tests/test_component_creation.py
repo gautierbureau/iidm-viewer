@@ -11,6 +11,10 @@ from iidm_viewer.component_creation import (
     CREATABLE_HVDC_LINES,
     CREATABLE_TAP_CHANGERS,
     LOCATOR_FIELDS,
+    OPERATIONAL_LIMIT_SIDES,
+    OPERATIONAL_LIMIT_TYPES,
+    OPERATIONAL_LIMITS_TARGETS,
+    PERMANENT_DURATION,
     PTC_REGULATION_MODES,
     REACTIVE_LIMITS_MODES,
     REACTIVE_LIMITS_TARGETS,
@@ -25,12 +29,14 @@ from iidm_viewer.component_creation import (
     create_container,
     create_coupling_device,
     create_hvdc_line,
+    create_operational_limits,
     create_reactive_limits,
     create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
     list_node_breaker_vls_with_multi_bbs,
+    list_operational_limit_candidates,
     list_reactive_limit_candidates,
     list_substations_df,
     list_transformers_without_tap_changer,
@@ -41,6 +47,7 @@ from iidm_viewer.component_creation import (
     validate_create_coupling_device_fields,
     validate_create_fields,
     validate_create_hvdc_line_fields,
+    validate_create_operational_limits_fields,
     validate_create_reactive_limits_fields,
     validate_create_tap_changer_fields,
 )
@@ -933,4 +940,175 @@ def test_create_reactive_limits_raises_on_invalid():
         create_reactive_limits(
             network, "GH1", "minmax",
             [{"min_q": 100.0, "max_q": -50.0}],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Operational limits (CURRENT / APPARENT_POWER / ACTIVE_POWER groups)
+# ---------------------------------------------------------------------------
+def test_operational_limits_constants():
+    assert OPERATIONAL_LIMIT_TYPES == ["CURRENT", "APPARENT_POWER", "ACTIVE_POWER"]
+    assert OPERATIONAL_LIMIT_SIDES == ["ONE", "TWO"]
+    assert PERMANENT_DURATION == -1
+    assert set(OPERATIONAL_LIMITS_TARGETS) == {
+        "Lines", "2-Winding Transformers", "Dangling Lines",
+    }
+
+
+def test_operational_limits_re_exported_from_streamlit_state():
+    pytest.importorskip("streamlit")
+    from iidm_viewer.state import (
+        OPERATIONAL_LIMIT_SIDES as ST_SIDES,
+        OPERATIONAL_LIMIT_TYPES as ST_TYPES,
+        OPERATIONAL_LIMITS_TARGETS as ST_TARGETS,
+        PERMANENT_DURATION as ST_PERM,
+    )
+    assert ST_SIDES is OPERATIONAL_LIMIT_SIDES
+    assert ST_TYPES is OPERATIONAL_LIMIT_TYPES
+    assert ST_TARGETS is OPERATIONAL_LIMITS_TARGETS
+    assert ST_PERM == PERMANENT_DURATION
+
+
+def test_list_operational_limit_candidates_for_lines(node_breaker_network):
+    ids = list_operational_limit_candidates(node_breaker_network, "Lines")
+    assert {"LINE_S2S3", "LINE_S3S4"} <= set(ids)
+
+
+def test_list_operational_limit_candidates_for_unknown_component(node_breaker_network):
+    assert list_operational_limit_candidates(node_breaker_network, "Mystery") == []
+
+
+def test_validate_operational_limits_requires_element_id():
+    errors = validate_create_operational_limits_fields(
+        "", "ONE", "CURRENT",
+        [{"value": 1.0, "acceptable_duration": -1}],
+    )
+    assert any("Target element id is required" in e for e in errors)
+
+
+def test_validate_operational_limits_rejects_bad_side():
+    errors = validate_create_operational_limits_fields(
+        "L1", "THREE", "CURRENT",
+        [{"value": 1.0, "acceptable_duration": -1}],
+    )
+    assert any("Side must be one of" in e for e in errors)
+
+
+def test_validate_operational_limits_rejects_bad_type():
+    errors = validate_create_operational_limits_fields(
+        "L1", "ONE", "REACTIVE_POWER",
+        [{"value": 1.0, "acceptable_duration": -1}],
+    )
+    assert any("Type must be one of" in e for e in errors)
+
+
+def test_validate_operational_limits_requires_nonempty_rows():
+    errors = validate_create_operational_limits_fields(
+        "L1", "ONE", "CURRENT", [],
+    )
+    assert any("At least one limit row" in e for e in errors)
+
+
+def test_validate_operational_limits_requires_value():
+    errors = validate_create_operational_limits_fields(
+        "L1", "ONE", "CURRENT",
+        [{"value": None, "acceptable_duration": -1}],
+    )
+    assert any("Every limit needs a value" in e for e in errors)
+
+
+def test_validate_operational_limits_rejects_negative_value():
+    errors = validate_create_operational_limits_fields(
+        "L1", "ONE", "CURRENT",
+        [{"value": -1.0, "acceptable_duration": -1}],
+    )
+    assert any("non-negative" in e for e in errors)
+
+
+def test_validate_operational_limits_rejects_negative_duration():
+    errors = validate_create_operational_limits_fields(
+        "L1", "ONE", "CURRENT",
+        [{"value": 1.0, "acceptable_duration": -5}],
+    )
+    assert any("must be -1 (permanent) or >= 0" in e for e in errors)
+
+
+def test_validate_operational_limits_requires_exactly_one_permanent():
+    # Zero permanents (all TATL)
+    errors = validate_create_operational_limits_fields(
+        "L1", "ONE", "CURRENT",
+        [{"value": 1.0, "acceptable_duration": 60}],
+    )
+    assert any("Exactly one permanent" in e for e in errors)
+    # Two permanents
+    errors = validate_create_operational_limits_fields(
+        "L1", "ONE", "CURRENT",
+        [{"value": 1.0, "acceptable_duration": -1},
+         {"value": 2.0, "acceptable_duration": -1}],
+    )
+    assert any("Exactly one permanent" in e for e in errors)
+
+
+def test_validate_operational_limits_accepts_valid():
+    assert validate_create_operational_limits_fields(
+        "L1", "ONE", "CURRENT",
+        [{"value": 1000.0, "acceptable_duration": -1},
+         {"value": 1200.0, "acceptable_duration": 60}],
+    ) == []
+
+
+def test_create_operational_limits_end_to_end():
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    create_operational_limits(
+        network, "LINE_S2S3", "ONE", "CURRENT",
+        [{"name": "permanent", "value": 950.0, "acceptable_duration": -1},
+         {"name": "TATL_60", "value": 1100.0, "acceptable_duration": 60}],
+        group_name="GRPX",
+    )
+    ol = network.get_operational_limits(show_inactive_sets=True)
+    mask = ol.index.get_level_values("element_id") == "LINE_S2S3"
+    rows = ol[mask]
+    assert not rows.empty
+    # Both rows (permanent + TATL) made it in.
+    assert len(rows) == 2
+
+
+def test_create_operational_limits_autonames_default():
+    """When ``name`` is omitted, the dispatcher fills in 'permanent' /
+    'TATL_<dur>'. pypowsybl normalises the permanent row to
+    'permanent_limit'; the TATL row keeps the dispatcher-supplied name."""
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    create_operational_limits(
+        network, "LINE_S2S3", "TWO", "APPARENT_POWER",
+        [{"value": 950.0, "acceptable_duration": -1},
+         {"value": 1100.0, "acceptable_duration": 30}],
+        group_name="AUTONAME",
+    )
+    ol = network.get_operational_limits(show_inactive_sets=True)
+    mask = ol.index.get_level_values("element_id") == "LINE_S2S3"
+    rows = ol[mask]
+    names = set(rows["name"].tolist())
+    assert "TATL_30" in names
+    # pypowsybl renames the permanent row.
+    assert any(n.startswith("permanent") for n in names)
+
+
+def test_create_operational_limits_raises_on_invalid():
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    network = NetworkProxy(run(_make))
+    with pytest.raises(ValueError, match="Exactly one permanent"):
+        create_operational_limits(
+            network, "LINE_S2S3", "ONE", "CURRENT",
+            [{"value": 1.0, "acceptable_duration": 60}],
         )

@@ -1081,6 +1081,139 @@ def create_coupling_device(
 
 
 # ---------------------------------------------------------------------------
+# Operational limits (CURRENT / APPARENT_POWER / ACTIVE_POWER limit groups)
+# ---------------------------------------------------------------------------
+OPERATIONAL_LIMIT_TYPES = ["CURRENT", "APPARENT_POWER", "ACTIVE_POWER"]
+OPERATIONAL_LIMIT_SIDES = ["ONE", "TWO"]
+
+OPERATIONAL_LIMITS_TARGETS = {
+    "Lines": "get_lines",
+    "2-Winding Transformers": "get_2_windings_transformers",
+    "Dangling Lines": "get_dangling_lines",
+}
+
+# Permanent limit's acceptable_duration is -1; data-editor-friendly sentinel.
+PERMANENT_DURATION = -1
+
+
+def list_operational_limit_candidates(
+    network: NetworkProxy, component: str,
+) -> list[str]:
+    """Return ids of elements that can carry operational limits for ``component``."""
+    getter = OPERATIONAL_LIMITS_TARGETS.get(component)
+    if not getter:
+        return []
+    try:
+        df = getattr(network, getter)()
+    except Exception:
+        return []
+    return sorted(df.index.tolist())
+
+
+def validate_create_operational_limits_fields(
+    element_id: str,
+    side: str,
+    limit_type: str,
+    limits: list[dict],
+) -> list[str]:
+    """Validate a limit-group payload before dispatching it.
+
+    Checks the element id, side / type enums, that ``limits`` is non-empty
+    and contains exactly one permanent row (``acceptable_duration = -1``),
+    and that every row carries a non-negative numeric value plus a valid
+    duration (``-1`` or non-negative integer).
+    """
+    errors: list[str] = []
+    if not element_id:
+        errors.append("Target element id is required.")
+    if side not in OPERATIONAL_LIMIT_SIDES:
+        errors.append(f"Side must be one of {OPERATIONAL_LIMIT_SIDES}.")
+    if limit_type not in OPERATIONAL_LIMIT_TYPES:
+        errors.append(f"Type must be one of {OPERATIONAL_LIMIT_TYPES}.")
+    if not limits:
+        errors.append("At least one limit row is required.")
+        return errors
+
+    permanent = 0
+    for lim in limits:
+        value = lim.get("value")
+        if value is None:
+            errors.append("Every limit needs a value.")
+            return errors
+        if value < 0:
+            errors.append("Limit values must be non-negative.")
+            return errors
+        duration = lim.get("acceptable_duration")
+        if duration is None:
+            errors.append(
+                "Every limit needs an acceptable_duration (-1 for permanent)."
+            )
+            return errors
+        try:
+            duration = int(duration)
+        except (TypeError, ValueError):
+            errors.append("acceptable_duration must be an integer.")
+            return errors
+        if duration == -1:
+            permanent += 1
+        elif duration < 0:
+            errors.append("acceptable_duration must be -1 (permanent) or >= 0.")
+            return errors
+    if permanent != 1:
+        errors.append(
+            "Exactly one permanent limit (acceptable_duration = -1) is required."
+        )
+    return errors
+
+
+def create_operational_limits(
+    network: NetworkProxy,
+    element_id: str,
+    side: str,
+    limit_type: str,
+    limits: list[dict],
+    group_name: str = "DEFAULT",
+) -> None:
+    """Create a group of operational limits on one side of an element.
+
+    ``limits`` is a list of dicts with ``name``, ``value``, and
+    ``acceptable_duration`` (use ``-1`` for the permanent limit). Exactly
+    one permanent limit is allowed per (element, side, group). pypowsybl
+    replaces any existing limits in the target group.
+    """
+    errors = validate_create_operational_limits_fields(
+        element_id, side, limit_type, limits,
+    )
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    rows = []
+    for lim in limits:
+        duration = int(lim["acceptable_duration"])
+        name = lim.get("name") or (
+            "permanent" if duration == -1 else f"TATL_{duration}"
+        )
+        rows.append({
+            "element_id": element_id,
+            "side": side,
+            "name": name,
+            "type": limit_type,
+            "value": float(lim["value"]),
+            "acceptable_duration": duration,
+            "fictitious": bool(lim.get("fictitious", False)),
+            "group_name": group_name or "DEFAULT",
+        })
+
+    df = pd.DataFrame(rows).set_index("element_id")
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do_create():
+        raw.create_operational_limits(df)
+
+    run(_do_create)
+
+
+# ---------------------------------------------------------------------------
 # Reactive limits (min/max or per-P capability curve)
 # ---------------------------------------------------------------------------
 REACTIVE_LIMITS_TARGETS = {

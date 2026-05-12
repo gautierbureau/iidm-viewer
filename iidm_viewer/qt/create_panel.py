@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -46,6 +46,10 @@ from iidm_viewer.component_creation import (
     CREATABLE_HVDC_LINES,
     CREATABLE_TAP_CHANGERS,
     LOCATOR_FIELDS,
+    OPERATIONAL_LIMIT_SIDES,
+    OPERATIONAL_LIMIT_TYPES,
+    OPERATIONAL_LIMITS_TARGETS,
+    PERMANENT_DURATION,
     REACTIVE_LIMITS_MODES,
     REACTIVE_LIMITS_TARGETS,
     branch_side_locator_fields,
@@ -55,12 +59,14 @@ from iidm_viewer.component_creation import (
     create_container,
     create_coupling_device,
     create_hvdc_line,
+    create_operational_limits,
     create_reactive_limits,
     create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
     list_node_breaker_vls_with_multi_bbs,
+    list_operational_limit_candidates,
     list_reactive_limit_candidates,
     list_substations_df,
     list_transformers_without_tap_changer,
@@ -1612,3 +1618,224 @@ class CreateReactiveLimitsPanel(QWidget):
         self._status.setText(f"Saved {label} reactive limits on {target_id!r}.")
         self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
         self.component_created.emit(self._component or "", target_id)
+
+
+# ---------------------------------------------------------------------------
+# Operational-limits panel (CURRENT / APPARENT_POWER / ACTIVE_POWER groups)
+# ---------------------------------------------------------------------------
+class CreateOperationalLimitsPanel(QWidget):
+    """Sub-form to attach an operational-limits group to a line/2WT/dangling line.
+
+    Auto-hides unless the active component is one of
+    :data:`OPERATIONAL_LIMITS_TARGETS` and the network carries at least
+    one candidate element.
+
+    Layout:
+      * Target picker (filtered by the active component).
+      * Side + type pickers + group-name text input.
+      * QTableWidget of rows (name / value / acceptable_duration / fictitious)
+        sized by a "Number of rows" spinner, seeded with one permanent
+        and one TATL row.
+      * Save button + status label.
+    """
+
+    component_created = Signal(str, str)  # (component, element_id)
+
+    _COL_NAME = 0
+    _COL_VALUE = 1
+    _COL_DURATION = 2
+    _COL_FICTITIOUS = 3
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+
+        self._group = QGroupBox("Attach operational limits")
+        self._group.setCheckable(True)
+        self._group.setChecked(True)
+        self._group.toggled.connect(self._on_toggled)
+
+        # Target + side + type + group
+        self._target_combo = QComboBox()
+        self._target_combo.setMinimumWidth(220)
+        self._side_combo = QComboBox()
+        for s in OPERATIONAL_LIMIT_SIDES:
+            self._side_combo.addItem(s)
+        self._type_combo = QComboBox()
+        for t in OPERATIONAL_LIMIT_TYPES:
+            self._type_combo.addItem(t)
+        self._group_edit = QLineEdit("DEFAULT")
+        self._group_edit.setMaximumWidth(160)
+
+        row_pickers = QHBoxLayout()
+        row_pickers.addWidget(QLabel("Target"))
+        row_pickers.addWidget(self._target_combo, 1)
+        row_pickers.addSpacing(8)
+        row_pickers.addWidget(QLabel("Side"))
+        row_pickers.addWidget(self._side_combo)
+        row_pickers.addSpacing(8)
+        row_pickers.addWidget(QLabel("Type"))
+        row_pickers.addWidget(self._type_combo)
+        row_pickers.addSpacing(8)
+        row_pickers.addWidget(QLabel("Group"))
+        row_pickers.addWidget(self._group_edit)
+
+        # Rows table + count spinner
+        self._row_count = QSpinBox()
+        self._row_count.setRange(1, 50)
+        self._row_count.setValue(2)
+        self._row_count.valueChanged.connect(self._resize_rows_table)
+        self._rows_table = QTableWidget(0, 4)
+        self._rows_table.setHorizontalHeaderLabels(
+            ["name", "value", "acceptable_duration", "fictitious"],
+        )
+        self._rows_table.setMinimumHeight(140)
+        self._rows_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+
+        row_count = QHBoxLayout()
+        row_count.addWidget(QLabel("Number of rows"))
+        row_count.addWidget(self._row_count)
+        row_count.addStretch(1)
+
+        self._create_btn = QPushButton("Save operational limits")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        row_action = QHBoxLayout()
+        row_action.addWidget(self._create_btn)
+        row_action.addWidget(self._status, 1)
+
+        inner = QVBoxLayout()
+        inner.addLayout(row_pickers)
+        inner.addLayout(row_count)
+        inner.addWidget(self._rows_table)
+        inner.addLayout(row_action)
+        self._group.setLayout(inner)
+
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+        self.setLayout(outer)
+        self.setVisible(False)
+
+        self._seed_rows_defaults()
+
+    # -- Public API ------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._refresh_for_current()
+        self._status.setText("")
+
+    # -- Internals -------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._rows_table.setVisible(checked)
+
+    def _refresh_for_current(self) -> None:
+        show = (
+            self._network is not None
+            and self._component in OPERATIONAL_LIMITS_TARGETS
+        )
+        ids = list_operational_limit_candidates(
+            self._network, self._component
+        ) if show else []
+        self.setVisible(bool(show and ids))
+        if not (show and ids):
+            return
+        self._target_combo.blockSignals(True)
+        self._target_combo.clear()
+        for eid in ids:
+            self._target_combo.addItem(eid)
+        self._target_combo.blockSignals(False)
+
+    def _seed_rows_defaults(self) -> None:
+        """Two rows: one permanent + one 60-second TATL."""
+        defaults = [
+            ("permanent", "1000.0", str(PERMANENT_DURATION), False),
+            ("TATL_60", "1200.0", "60", False),
+        ]
+        self._rows_table.blockSignals(True)
+        self._rows_table.setRowCount(len(defaults))
+        for r, (name, value, duration, fict) in enumerate(defaults):
+            self._rows_table.setItem(r, self._COL_NAME, QTableWidgetItem(name))
+            self._rows_table.setItem(r, self._COL_VALUE, QTableWidgetItem(value))
+            self._rows_table.setItem(r, self._COL_DURATION, QTableWidgetItem(duration))
+            item = QTableWidgetItem()
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if fict else Qt.Unchecked)
+            self._rows_table.setItem(r, self._COL_FICTITIOUS, item)
+        self._rows_table.blockSignals(False)
+
+    def _resize_rows_table(self, _n: int) -> None:
+        n = self._row_count.value()
+        prev = self._rows_table.rowCount()
+        self._rows_table.setRowCount(n)
+        for r in range(prev, n):
+            # Linearly bump the duration (300, 600, ...) so subsequent TATL
+            # rows are easy to tell apart in the editor.
+            duration = 300 * (r - prev + 2)
+            self._rows_table.setItem(r, self._COL_NAME, QTableWidgetItem(f"TATL_{duration}"))
+            self._rows_table.setItem(r, self._COL_VALUE, QTableWidgetItem("1200.0"))
+            self._rows_table.setItem(r, self._COL_DURATION, QTableWidgetItem(str(duration)))
+            item = QTableWidgetItem()
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            self._rows_table.setItem(r, self._COL_FICTITIOUS, item)
+
+    def _collect_limits(self) -> list[dict]:
+        rows: list[dict] = []
+        for r in range(self._rows_table.rowCount()):
+            name_item = self._rows_table.item(r, self._COL_NAME)
+            value_item = self._rows_table.item(r, self._COL_VALUE)
+            dur_item = self._rows_table.item(r, self._COL_DURATION)
+            fict_item = self._rows_table.item(r, self._COL_FICTITIOUS)
+            if value_item is None or value_item.text().strip() == "":
+                continue
+            try:
+                value = float(value_item.text())
+                duration = int(dur_item.text()) if dur_item else 0
+            except (ValueError, AttributeError):
+                continue
+            rows.append({
+                "name": (name_item.text() if name_item else "") or None,
+                "value": value,
+                "acceptable_duration": duration,
+                "fictitious": bool(fict_item and fict_item.checkState() == Qt.Checked),
+            })
+        return rows
+
+    def _on_create_clicked(self) -> None:
+        if (
+            self._network is None
+            or self._component not in OPERATIONAL_LIMITS_TARGETS
+        ):
+            return
+        element_id = self._target_combo.currentText()
+        if not element_id:
+            self._status.setText("Pick a target first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        side = self._side_combo.currentText()
+        limit_type = self._type_combo.currentText()
+        group_name = self._group_edit.text().strip() or "DEFAULT"
+        limits = self._collect_limits()
+        try:
+            create_operational_limits(
+                self._network, element_id, side, limit_type, limits, group_name,
+            )
+        except Exception as exc:
+            self._status.setText(f"Save failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        self._status.setText(
+            f"Saved {len(limits)} {limit_type.lower()} limit(s) on "
+            f"{element_id} (side {side}, group {group_name!r})."
+        )
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit(self._component or "", element_id)

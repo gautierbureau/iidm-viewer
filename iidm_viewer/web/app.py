@@ -71,6 +71,10 @@ from iidm_viewer.component_creation import (
     CREATABLE_HVDC_LINES,
     CREATABLE_TAP_CHANGERS,
     LOCATOR_FIELDS,
+    OPERATIONAL_LIMIT_SIDES,
+    OPERATIONAL_LIMIT_TYPES,
+    OPERATIONAL_LIMITS_TARGETS,
+    PERMANENT_DURATION,
     REACTIVE_LIMITS_MODES,
     REACTIVE_LIMITS_TARGETS,
     branch_side_locator_fields,
@@ -80,12 +84,14 @@ from iidm_viewer.component_creation import (
     create_container,
     create_coupling_device,
     create_hvdc_line,
+    create_operational_limits,
     create_reactive_limits,
     create_tap_changer,
     list_busbar_sections,
     list_converter_stations,
     list_node_breaker_voltage_levels,
     list_node_breaker_vls_with_multi_bbs,
+    list_operational_limit_candidates,
     list_reactive_limit_candidates,
     list_substations_df,
     list_transformers_without_tap_changer,
@@ -1692,6 +1698,176 @@ def _refresh_create_reactive_limits_panel(state: dict, component: str) -> None:
     expansion.visible = True
 
 
+def _build_create_operational_limits_panel_widgets(
+    state: dict, refresh_after_create,
+) -> None:
+    """Materialise the "Attach operational limits" expansion.
+
+    A target picker (Line / 2WT / Dangling Line), side + type pickers, a
+    group-name input, and a dynamic grid of limit rows (name / value /
+    acceptable_duration / fictitious). Sized by a "Number of rows"
+    spinner that grows the editor with linearly-bumped TATL defaults.
+    Auto-hides when the active component isn't in
+    :data:`OPERATIONAL_LIMITS_TARGETS` or no candidate exists.
+    """
+    expansion = ui.expansion("Attach operational limits", icon="speed") \
+        .classes("w-full")
+    expansion.visible = False
+    state["expansion"] = expansion
+    with expansion:
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            ui.label("Target:")
+            target_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-64")
+            ui.label("Side:")
+            side_select = ui.select(
+                options=list(OPERATIONAL_LIMIT_SIDES),
+                value=OPERATIONAL_LIMIT_SIDES[0],
+            ).props("dense outlined").classes("w-24")
+            ui.label("Type:")
+            type_select = ui.select(
+                options=list(OPERATIONAL_LIMIT_TYPES),
+                value=OPERATIONAL_LIMIT_TYPES[0],
+            ).props("dense outlined").classes("w-48")
+            ui.label("Group:")
+            group_input = ui.input(value="DEFAULT") \
+                .props("dense outlined").classes("w-40")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            ui.label("Number of rows:")
+            row_count = ui.number(value=2, min=1, max=50, step=1, format="%d") \
+                .props("dense outlined").classes("w-24")
+        rows_container = ui.column().classes("w-full q-pa-sm")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            create_btn = ui.button("Save operational limits", icon="save")
+            status_label = ui.label("").classes("text-caption q-ml-md")
+
+    state["target_select"] = target_select
+    state["side_select"] = side_select
+    state["type_select"] = type_select
+    state["group_input"] = group_input
+    state["row_count"] = row_count
+    state["rows_container"] = rows_container
+    state["create_btn"] = create_btn
+    state["status_label"] = status_label
+    state["limit_widgets"] = []  # list[dict[col -> widget]]
+
+    def _row_default(r: int) -> tuple[str, float, int, bool]:
+        if r == 0:
+            return ("permanent", 1000.0, PERMANENT_DURATION, False)
+        if r == 1:
+            return ("TATL_60", 1200.0, 60, False)
+        duration = 300 * r
+        return (f"TATL_{duration}", 1200.0, duration, False)
+
+    def _rebuild_rows() -> None:
+        n = int(state["row_count"].value or 1)
+        if n < 1:
+            n = 1
+        state["rows_container"].clear()
+        state["limit_widgets"] = []
+        with state["rows_container"]:
+            with ui.row().classes("items-center text-caption"):
+                ui.label("#").classes("w-8")
+                ui.label("name").classes("w-32")
+                ui.label("value").classes("w-32 text-center")
+                ui.label("acceptable_duration").classes("w-40 text-center")
+                ui.label("fictitious").classes("w-24 text-center")
+            for r in range(n):
+                name_d, value_d, dur_d, fict_d = _row_default(r)
+                with ui.row().classes("items-center"):
+                    ui.label(str(r)).classes("w-8 text-caption")
+                    name_w = ui.input(value=name_d) \
+                        .props("dense outlined").classes("w-32")
+                    value_w = ui.number(value=value_d, format="%.4f") \
+                        .props("dense outlined").classes("w-32")
+                    dur_w = ui.number(value=dur_d, step=1, format="%d") \
+                        .props("dense outlined").classes("w-40")
+                    fict_w = ui.switch(value=fict_d).classes("w-24")
+                    state["limit_widgets"].append({
+                        "name": name_w, "value": value_w,
+                        "acceptable_duration": dur_w, "fictitious": fict_w,
+                    })
+
+    state["rebuild_rows"] = _rebuild_rows
+    row_count.on("update:model-value", lambda *_: _rebuild_rows())
+
+    def _on_create_click() -> None:
+        if (
+            _state.network is None
+            or state.get("current_component") not in OPERATIONAL_LIMITS_TARGETS
+        ):
+            return
+        element_id = state["target_select"].value
+        if not element_id:
+            status_label.set_text("Pick a target first.")
+            return
+        side = state["side_select"].value
+        limit_type = state["type_select"].value
+        group_name = (state["group_input"].value or "DEFAULT").strip() or "DEFAULT"
+        limits: list[dict] = []
+        for row in state["limit_widgets"]:
+            try:
+                value = float(row["value"].value)
+                duration = int(row["acceptable_duration"].value)
+            except (TypeError, ValueError):
+                continue
+            name = (row["name"].value or "").strip() or None
+            limits.append({
+                "name": name, "value": value,
+                "acceptable_duration": duration,
+                "fictitious": bool(row["fictitious"].value),
+            })
+        try:
+            create_operational_limits(
+                _state.network, str(element_id), side, limit_type, limits, group_name,
+            )
+        except Exception as exc:
+            status_label.set_text(f"Save failed — {exc}")
+            ui.notify(f"Save failed: {exc}", type="negative")
+            return
+        status_label.set_text(
+            f"Saved {len(limits)} {limit_type.lower()} limit(s) on "
+            f"{element_id} (side {side}, group {group_name!r})."
+        )
+        ui.notify(
+            f"Saved {len(limits)} {limit_type.lower()} limit(s) on {element_id!r}",
+            type="positive", timeout=1500,
+        )
+        refresh_after_create()
+
+    create_btn.on_click(_on_create_click)
+
+
+def _refresh_create_operational_limits_panel(state: dict, component: str) -> None:
+    """Repopulate the operational-limits panel for ``component``.
+
+    Hides the expansion when the active component isn't in
+    :data:`OPERATIONAL_LIMITS_TARGETS` or no candidate target is available.
+    """
+    expansion = state.get("expansion")
+    if expansion is None:
+        return
+    state["current_component"] = component
+    if (
+        component not in OPERATIONAL_LIMITS_TARGETS
+        or _state.network is None
+    ):
+        expansion.visible = False
+        return
+    ids = list_operational_limit_candidates(_state.network, component)
+    if not ids:
+        expansion.visible = False
+        return
+    options = {i: i for i in ids}
+    state["target_select"].options = options
+    if state["target_select"].value not in ids:
+        state["target_select"].value = ids[0]
+    state["target_select"].update()
+    state["rebuild_rows"]()
+    state["status_label"].set_text("")
+    expansion.visible = True
+
+
 def _build_data_explorer():
     """Materialise the Data Explorer panel and return a refresh closure.
 
@@ -1796,6 +1972,18 @@ def _build_data_explorer():
     }
     _build_create_reactive_limits_panel_widgets(
         reactive_limits_create_state, refresh_after_create=lambda: refresh(),
+    )
+
+    operational_limits_create_state: dict = {
+        "target_select": None, "side_select": None, "type_select": None,
+        "group_input": None, "row_count": None,
+        "rows_container": None, "limit_widgets": [],
+        "status_label": None, "expansion": None,
+        "rebuild_rows": None,
+        "current_component": "",
+    }
+    _build_create_operational_limits_panel_widgets(
+        operational_limits_create_state, refresh_after_create=lambda: refresh(),
     )
 
     grid = ui.aggrid({
@@ -1908,6 +2096,7 @@ def _build_data_explorer():
         _refresh_create_tap_changer_panel(tap_changer_create_state, label)
         _refresh_create_coupling_device_panel(coupling_create_state, label)
         _refresh_create_reactive_limits_panel(reactive_limits_create_state, label)
+        _refresh_create_operational_limits_panel(operational_limits_create_state, label)
         is_disconnectable = label in DISCONNECTABLE_COMPONENTS
         is_removable = label in REMOVABLE_COMPONENTS
         bulk_row.set_visibility(bool(cols) or is_disconnectable or is_removable)
