@@ -489,3 +489,32 @@ def test_tab_panels_keep_alive_props_set():
 
     src = inspect.getsource(app.main_page)
     assert 'ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")' in src
+
+
+def test_map_substation_click_routes_to_sld_tab_and_selected_vl():
+    """End-to-end check of the killer interaction.
+
+    The map bundle emits ``{ type: 'map-substation-click', vlIds: [...] }``
+    via ``setComponentValue``; the bridge JS relays it as the NiceGUI
+    event ``iidm-component-value`` with ``{component: 'map', value: ...}``;
+    ``main_page._on_component_value`` should switch the active tab to
+    the SLD panel and set the highest-V VL as the selected VL.
+
+    Driving the bridge here is brittle (we'd need a real browser), so
+    we exercise the Python handler directly by inspecting its source
+    and confirming the routing rule. The Qt side has the deeper end-to-end
+    test (`test_map_substation_click_jumps_to_sld`) — this guards the
+    NiceGUI handler from quietly drifting away from the same contract.
+    """
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    # Locate _on_component_value's body and assert the routing line.
+    handler_idx = src.index("def _on_component_value(e):")
+    handler_end = src.index("ui.on(", handler_idx)
+    handler_src = src[handler_idx:handler_end]
+    assert 'value.get("type") == "map-substation-click"' in handler_src
+    assert "vlIds" in handler_src
+    assert "tabs.set_value(sld_tab)" in handler_src
+    assert "_state.set_selected_vl(vl_ids[0])" in handler_src
