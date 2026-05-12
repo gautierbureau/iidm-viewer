@@ -2818,10 +2818,15 @@ def main_page() -> None:
                     "Click any node to jump to its Single Line Diagram."
                 ).classes("text-caption q-ml-md")
 
-                def _on_depth_changed(e):
+                def _on_depth_changed(_e=None):
+                    # NiceGUI 3.x's ``.on('update:model-value', …)`` hands
+                    # back a ``GenericEventArguments`` (with ``args``) — not
+                    # the 2.x ``ValueChangeEventArguments`` (with ``value``).
+                    # Read the new value off the widget itself; that works
+                    # on every NiceGUI version and ignores the event shape.
                     global _nad_depth
                     try:
-                        _nad_depth = max(0, int(e.value))
+                        _nad_depth = max(0, int(depth_input.value))
                     except (TypeError, ValueError):
                         return
                     if _state.selected_vl:

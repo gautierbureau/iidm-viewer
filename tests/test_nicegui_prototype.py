@@ -491,6 +491,28 @@ def test_tab_panels_keep_alive_props_set():
     assert 'ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")' in src
 
 
+def test_nad_depth_handler_reads_widget_value_not_event_value():
+    """NiceGUI 3.x's ``.on('update:model-value', handler)`` hands back a
+    ``GenericEventArguments`` whose payload lives on ``args`` (not
+    ``value`` like the 2.x ``ValueChangeEventArguments``). The depth
+    handler should read ``depth_input.value`` directly to stay
+    compatible with both versions — guards against a future "simplify"
+    pass folding ``e.value`` back in."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    handler_idx = src.index("def _on_depth_changed(")
+    handler_end = src.index("depth_input.on(", handler_idx)
+    handler_src = src[handler_idx:handler_end]
+    assert "e.value" not in handler_src, (
+        "_on_depth_changed must not call ``e.value`` — NiceGUI 3.x's "
+        "GenericEventArguments has no such attribute. Read the widget "
+        "value (``depth_input.value``) instead."
+    )
+    assert "depth_input.value" in handler_src
+
+
 def test_map_substation_click_routes_to_sld_tab_and_selected_vl():
     """End-to-end check of the killer interaction.
 
