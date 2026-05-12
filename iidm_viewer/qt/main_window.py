@@ -38,7 +38,7 @@ from iidm_viewer.qt.state import AppState
 
 
 class _Sidebar(QWidget):
-    def __init__(self, on_load, on_run_loadflow, on_vl_selected, parent=None) -> None:
+    def __init__(self, on_load, on_run_loadflow, on_vl_selected, on_view_logs, parent=None) -> None:
         super().__init__(parent)
         self.setFixedWidth(240)
         self.setStyleSheet("background: #f6f6f6;")
@@ -73,6 +73,12 @@ class _Sidebar(QWidget):
         self._lf_status = QLabel("")
         self._lf_status.setWordWrap(True)
         self._lf_status.setStyleSheet("padding: 4px 10px; font-size: 11px;")
+        # "View Logs" opens the LFReportDialog with the cached report
+        # from the most recent run. Disabled until a LF has produced a
+        # report_json — mirrors Streamlit's gated button.
+        self._view_logs_btn = QPushButton("View Logs")
+        self._view_logs_btn.clicked.connect(on_view_logs)
+        self._view_logs_btn.setEnabled(False)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -84,6 +90,7 @@ class _Sidebar(QWidget):
         layout.addWidget(self._vl_combo)
         layout.addWidget(self._run_lf_btn)
         layout.addWidget(self._lf_status)
+        layout.addWidget(self._view_logs_btn)
         layout.addStretch(1)
 
     # -- File / status labels --------------------------------------------
@@ -92,6 +99,10 @@ class _Sidebar(QWidget):
 
     def set_loadflow_enabled(self, enabled: bool) -> None:
         self._run_lf_btn.setEnabled(enabled)
+
+    def set_view_logs_enabled(self, enabled: bool) -> None:
+        """Enable the "View Logs" button once a LF report is cached."""
+        self._view_logs_btn.setEnabled(enabled)
 
     def set_loadflow_status(self, text: str, ok: bool = True) -> None:
         if not text:
@@ -200,6 +211,7 @@ class MainWindow(QMainWindow):
             self._on_load_clicked,
             self._on_run_loadflow_clicked,
             self._on_sidebar_vl_selected,
+            self._on_view_logs_clicked,
         )
 
         central = QWidget()
@@ -266,6 +278,23 @@ class MainWindow(QMainWindow):
             self.sidebar.set_loadflow_status(f"Failed: {exc}", ok=False)
             self.statusBar().showMessage(f"Load flow failed: {exc}")
 
+    def _on_view_logs_clicked(self) -> None:
+        """Open the LFReportDialog with the cached ``report_json``.
+
+        The button is gated by ``set_view_logs_enabled``, but the
+        AppState may have been cleared between enable and click — fall
+        back to a status-bar hint rather than throwing.
+        """
+        report_json = self.state.last_report_json
+        if not report_json:
+            self.statusBar().showMessage(
+                "No load flow report available. Run a load flow first.",
+            )
+            return
+        from iidm_viewer.qt.lf_report_dialog import LFReportDialog
+        dlg = LFReportDialog(report_json, self)
+        dlg.exec()
+
     def _on_loadflow_completed(self, result) -> None:
         """Refresh peripheral views once the flow returns.
 
@@ -277,6 +306,9 @@ class MainWindow(QMainWindow):
         ok = bool(result and result.converged)
         status = result.status if result else "UNKNOWN"
         self.sidebar.set_loadflow_status(f"Status: {status}", ok=ok)
+        # AppState now holds ``last_report_json`` — enable "View Logs"
+        # whenever a non-empty report was produced.
+        self.sidebar.set_view_logs_enabled(bool(self.state.last_report_json))
         self.statusBar().showMessage(
             f"AC load flow: {status}",
         )
@@ -307,6 +339,8 @@ class MainWindow(QMainWindow):
             self.sidebar.set_voltage_levels(vls_df)
         self.sidebar.set_loadflow_enabled(network is not None)
         self.sidebar.set_loadflow_status("")
+        # AppState wipes ``last_report_json`` on a fresh load; reflect that.
+        self.sidebar.set_view_logs_enabled(False)
         self.map_tab.set_network(network)
         self.nad_tab.set_network(network)
         self.sld_tab.set_network(network)

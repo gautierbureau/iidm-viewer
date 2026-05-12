@@ -34,6 +34,10 @@ class AppState(QObject):
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
         self._selected_vl: Optional[str] = None
+        # Last AC-LF report payload — cached so the sidebar's
+        # "View Logs" button can open the dialog without re-running
+        # the load flow. Cleared on every new network load.
+        self._last_report_json: Optional[str] = None
         # One ChangeLog per process. Reset on every network reload so
         # entries don't leak between unrelated networks.
         self.change_log = ChangeLog()
@@ -46,6 +50,12 @@ class AppState(QObject):
     def selected_vl(self) -> Optional[str]:
         return self._selected_vl
 
+    @property
+    def last_report_json(self) -> Optional[str]:
+        """JSON-encoded report from the most recent ``run_loadflow()`` —
+        ``None`` when no LF has been run for the current network."""
+        return self._last_report_json
+
     def load_network_from_path(self, path: str) -> NetworkProxy:
         """Load a network and auto-select the highest-nominal-V VL.
 
@@ -56,6 +66,7 @@ class AppState(QObject):
         default_vl = network_loader.pick_default_vl(network)
         self._network = network
         self._selected_vl = None  # cleared first so set_selected_vl emits below
+        self._last_report_json = None
         self.change_log.clear()
         self.network_changed.emit(network)
         if default_vl:
@@ -84,5 +95,6 @@ class AppState(QObject):
         if self._network is None:
             return None
         result = run_ac(self._network, generic_params, provider_params)
+        self._last_report_json = getattr(result, "report_json", None)
         self.loadflow_completed.emit(result)
         return result

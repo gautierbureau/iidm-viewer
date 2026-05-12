@@ -31,6 +31,10 @@ class AppState:
         self._network_listeners: list[_NetworkListener] = []
         self._vl_listeners: list[_VlListener] = []
         self._loadflow_listeners: list[_LoadFlowListener] = []
+        # Last AC-LF report payload — cached so the sidebar's "View
+        # Logs" button can open the dialog without re-running the LF.
+        # Cleared on every new network load.
+        self._last_report_json: Optional[str] = None
         # One ChangeLog per process. Reset on every network reload.
         self.change_log = ChangeLog()
 
@@ -44,6 +48,12 @@ class AppState:
     @property
     def selected_vl(self) -> Optional[str]:
         return self._selected_vl
+
+    @property
+    def last_report_json(self) -> Optional[str]:
+        """JSON-encoded report from the most recent ``run_loadflow()`` —
+        ``None`` when no LF has been run for the current network."""
+        return self._last_report_json
 
     # ------------------------------------------------------------------
     # Listener registration
@@ -87,6 +97,7 @@ class AppState:
         default_vl = network_loader.pick_default_vl(network)
         self._network = network
         self._selected_vl = None
+        self._last_report_json = None
         self.change_log.clear()
         for listener in list(self._network_listeners):
             listener(network)
@@ -113,6 +124,7 @@ class AppState:
         if self._network is None:
             return None
         result = run_ac(self._network, generic_params, provider_params)
+        self._last_report_json = getattr(result, "report_json", None)
         for listener in list(self._loadflow_listeners):
             listener(result)
         return result

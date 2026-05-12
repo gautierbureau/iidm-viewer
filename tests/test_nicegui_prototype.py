@@ -513,6 +513,45 @@ def test_tab_panels_keep_alive_props_set():
     assert 'ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")' in src
 
 
+def test_app_state_caches_last_report_json_for_view_logs():
+    """The "View Logs" button needs ``AppState.last_report_json`` —
+    cleared on a fresh network load, populated after every LF run."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.web.state import AppState
+
+    state = AppState()
+    assert state.last_report_json is None
+
+    net = NetworkProxy(run(pn.create_ieee14))
+    state.install_network(net)
+    assert state.last_report_json is None
+
+    result = state.run_loadflow()
+    assert result is not None
+    assert state.last_report_json
+    # Loading a fresh network resets the cached report.
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    assert state.last_report_json is None
+
+
+def test_view_logs_dialog_helper_uses_shared_parser_and_gates_empty_input():
+    """``_open_lf_report_dialog`` notifies the user when no report is
+    available and runs the shared parser otherwise. We inspect the
+    function source so the contract can't drift to inline parsing."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._open_lf_report_dialog)
+    assert "parse_report_to_tree" in src
+    assert "No load flow report available" in src
+    # The dialog renders a severity multiselect populated from the shared
+    # SEVERITY_LEVELS constant — guards against hard-coded lists.
+    assert "SEVERITY_LEVELS" in src
+    # Re-parse on every severity change.
+    assert "_rebuild_tree" in src
+
+
 def test_shared_vl_selector_helpers():
     """``network_loader`` exposes the framework-agnostic VL listing +
     filter helpers used by Streamlit's ``vl_selector`` and the

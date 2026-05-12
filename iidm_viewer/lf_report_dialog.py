@@ -1,58 +1,36 @@
-import json
-import re
+"""Streamlit "Load Flow Logs" dialog.
+
+The actual parsing — message-template interpolation, severity filter,
+"expand subtrees containing WARN/ERROR" heuristic — lives in the
+framework-agnostic :mod:`iidm_viewer.lf_report` module so the PySide6
+and NiceGUI prototypes share it. This file holds only the Streamlit
+rendering glue.
+"""
+from __future__ import annotations
+
 import streamlit as st
 
-_SEVERITY_ORDER = {"TRACE": 0, "DEBUG": 1, "INFO": 2, "WARN": 3, "ERROR": 4}
-_SEVERITY_ICON = {"TRACE": "🔍", "DEBUG": "🐛", "INFO": "ℹ️", "WARN": "⚠️", "ERROR": "🔴"}
+from iidm_viewer.lf_report import (
+    SEVERITY_LEVELS,
+    SEVERITY_ORDER,
+    parse_report_to_tree,
+)
 
 
-def _interpolate(template: str, values: dict) -> str:
-    def _sub(m):
-        key = m.group(1)
-        entry = values.get(key, {})
-        return str(entry.get("value", m.group(0)))
-    return re.sub(r"\$\{([^}]+)\}", _sub, template)
-
-
-def _node_message(node: dict, dictionaries: dict) -> str:
-    key = node.get("messageKey", "")
-    template = dictionaries.get("default", {}).get(key, key)
-    return _interpolate(template, node.get("values", {}))
-
-
-def _node_severity(node: dict) -> str:
-    sev = node.get("values", {}).get("reportSeverity", {})
-    return sev.get("value", "INFO") if sev else "INFO"
-
-
-def _subtree_max_severity_level(node: dict) -> int:
-    level = _SEVERITY_ORDER.get(_node_severity(node), 2)
-    for child in node.get("children", []):
-        level = max(level, _subtree_max_severity_level(child))
-    return level
-
-
-def _render_node(node: dict, dictionaries: dict, min_level: int) -> None:
-    children = node.get("children", [])
-    message = _node_message(node, dictionaries)
-    sev = _node_severity(node)
-    sev_level = _SEVERITY_ORDER.get(sev, 2)
-    icon = _SEVERITY_ICON.get(sev, "")
+def _render_node(node: dict) -> None:
+    """Walk one branch of the tree returned by ``parse_report_to_tree``."""
+    icon = node["icon"]
+    message = node["message"]
+    children = node["children"]
 
     if not children:
-        if sev_level >= min_level:
-            st.markdown(f"{icon} {message}")
+        st.markdown(f"{icon} {message}" if icon else message)
         return
 
-    subtree_max = _subtree_max_severity_level(node)
-    if subtree_max < min_level and sev_level < min_level:
-        return
-
-    expanded = subtree_max >= _SEVERITY_ORDER.get("WARN", 3)
     label = f"{icon} {message}" if icon else message
-    with st.expander(label, expanded=expanded):
+    with st.expander(label, expanded=node["expanded"]):
         for child in children:
-            _render_node(child, dictionaries, min_level)
+            _render_node(child)
 
 
 @st.dialog("Load Flow Logs", width="large")
@@ -62,19 +40,9 @@ def show_lf_report_dialog() -> None:
         st.info("No load flow report available. Run a load flow first.")
         return
 
-    try:
-        data = json.loads(report_json)
-    except Exception as exc:
-        st.error(f"Failed to parse report: {exc}")
-        return
-
-    dictionaries = data.get("dictionaries", {})
-    root = data.get("reportRoot", {})
-
-    severity_options = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]
     selected = st.multiselect(
         "Minimum severity",
-        options=severity_options,
+        options=SEVERITY_LEVELS,
         default=["INFO", "WARN", "ERROR"],
         key="_lf_report_severity_filter",
     )
@@ -82,8 +50,17 @@ def show_lf_report_dialog() -> None:
         st.warning("Select at least one severity level.")
         return
 
-    min_level = min(_SEVERITY_ORDER.get(s, 2) for s in selected)
+    min_severity = min(selected, key=lambda s: SEVERITY_ORDER.get(s, 2))
+
+    try:
+        nodes = parse_report_to_tree(report_json, min_severity=min_severity)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
 
     st.divider()
-    for child in root.get("children", [root]):
-        _render_node(child, dictionaries, min_level)
+    if not nodes:
+        st.info("No log entries match the selected severity filter.")
+        return
+    for node in nodes:
+        _render_node(node)

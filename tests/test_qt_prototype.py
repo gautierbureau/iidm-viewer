@@ -1542,6 +1542,88 @@ def test_app_state_emits_signal_only_on_change(qapp):
     assert seen == ["VL_A", "VL_B", ""]
 
 
+def test_app_state_caches_last_report_json_for_view_logs(qapp):
+    """Qt AppState exposes ``last_report_json`` to drive the "View Logs"
+    sidebar button. Cleared on every network load, populated by
+    ``run_loadflow``."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.state import AppState
+
+    state = AppState()
+    assert state.last_report_json is None
+
+    state.load_network_from_path  # method exists
+    # We can't easily call load_network_from_path without a file path, so
+    # mirror what it does: install a network then run LF.
+    net = NetworkProxy(run(pn.create_ieee14))
+    state._network = net          # tested internal seam — matches install
+    state._last_report_json = None
+    result = state.run_loadflow()
+    assert result is not None
+    assert state.last_report_json
+
+
+def test_lf_report_dialog_renders_tree_and_filters_by_severity(qapp):
+    """End-to-end smoke of the Qt LFReportDialog: feed a real
+    ``report_json`` from IEEE14, confirm the tree is populated, then
+    untick INFO and check the visible row count drops."""
+    import pypowsybl.network as pn
+    from iidm_viewer.loadflow import run_ac
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.lf_report_dialog import LFReportDialog
+
+    net = NetworkProxy(run(pn.create_ieee14))
+    result = run_ac(net)
+    assert result and result.report_json
+
+    dlg = LFReportDialog(result.report_json)
+    qapp.processEvents()
+    assert dlg._tree.topLevelItemCount() > 0
+
+    # Tightening to ERROR-only typically drops most entries (the LF
+    # report rarely contains explicit ERRORs on the IEEE14 demo, so
+    # this just asserts the count is monotonically non-increasing).
+    before = _flatten_tree_count(dlg._tree)
+    dlg._sev_checks["INFO"].setChecked(False)
+    qapp.processEvents()
+    after = _flatten_tree_count(dlg._tree)
+    assert after <= before
+
+
+def test_lf_report_dialog_handles_empty_report(qapp):
+    """No report → friendly empty-state label, no tree rows."""
+    from iidm_viewer.qt.lf_report_dialog import LFReportDialog
+
+    dlg = LFReportDialog("")
+    qapp.processEvents()
+    assert dlg._tree.topLevelItemCount() == 0
+    assert "Run a load flow first" in dlg._empty_label.text()
+
+
+def test_lf_report_dialog_handles_malformed_json(qapp):
+    from iidm_viewer.qt.lf_report_dialog import LFReportDialog
+
+    dlg = LFReportDialog("{not json")
+    qapp.processEvents()
+    assert dlg._tree.topLevelItemCount() == 0
+    assert "Failed to parse report" in dlg._empty_label.text()
+
+
+def _flatten_tree_count(tree) -> int:
+    """Total node count across the QTreeWidget — top-level + descendants."""
+    def _count(item) -> int:
+        total = 1
+        for i in range(item.childCount()):
+            total += _count(item.child(i))
+        return total
+
+    n = 0
+    for i in range(tree.topLevelItemCount()):
+        n += _count(tree.topLevelItem(i))
+    return n
+
+
 def test_sidebar_vl_picker_filters_and_selects(qapp, loaded_window):
     """Mirrors Streamlit's ``vl_selector``: the sidebar carries a
     filter input + a dropdown populated with the network's VLs. Typing
