@@ -2811,6 +2811,204 @@ def _refresh_create_secondary_voltage_control_panel(
     expansion.visible = True
 
 
+def _build_create_extension_panel_widgets(state: dict, refresh_after_create) -> None:
+    """Materialise the "Attach extension" expansion.
+
+    Mirrors the Streamlit ``_render_create_extension_form``: an
+    extension picker (filtered to entries whose ``targets`` map
+    contains the active component), a target picker (existing element
+    ids), and the per-field widgets built from the registry. The
+    framework-agnostic registry + dispatcher live in
+    :mod:`iidm_viewer.extension_creation`.
+    """
+    from iidm_viewer.extension_creation import CREATABLE_EXTENSIONS
+
+    expansion = ui.expansion("Attach extension", icon="extension") \
+        .classes("w-full")
+    expansion.visible = False
+    state["expansion"] = expansion
+    state["current_component"] = ""
+    state["extension"] = None
+    state["field_widgets"] = {}
+
+    with expansion:
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            ui.label("Extension:")
+            ext_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-64")
+            ui.label("Target:")
+            target_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-64")
+        detail_label = ui.label("") \
+            .classes("text-caption q-px-sm q-mb-sm text-italic")
+        fields_container = ui.row().classes("items-start w-full q-pa-sm flex-wrap")
+        with ui.row().classes("items-center w-full q-pa-sm"):
+            create_btn = ui.button("Create", icon="add_circle")
+            status_label = ui.label("").classes("text-caption q-ml-md")
+
+    state["ext_select"] = ext_select
+    state["target_select"] = target_select
+    state["detail_label"] = detail_label
+    state["fields_container"] = fields_container
+    state["status_label"] = status_label
+    state["create_btn"] = create_btn
+
+    def _on_extension_changed(_e=None) -> None:
+        # Rebuild the field widgets + target picker for the new pick.
+        component = state.get("current_component") or ""
+        _populate_for_extension(state, component, ext_select.value)
+
+    def _on_create_click() -> None:
+        from iidm_viewer.extension_creation import create_extension
+
+        if _state.network is None:
+            return
+        ext_name = state.get("extension")
+        if not ext_name:
+            return
+        target_id = state["target_select"].value
+        if not target_id:
+            status_label.set_text("Pick a target first.")
+            return
+        schema = CREATABLE_EXTENSIONS.get(ext_name)
+        if schema is None:
+            return
+        values: dict = {}
+        for f in schema["fields"]:
+            widget = state["field_widgets"].get(f["name"])
+            if widget is None:
+                continue
+            values[f["name"]] = getattr(widget, "value", None)
+        try:
+            create_extension(_state.network, ext_name, str(target_id), values)
+        except Exception as exc:
+            status_label.set_text(f"Create failed — {exc}")
+            ui.notify(f"Create failed: {exc}", type="negative")
+            return
+        status_label.set_text(
+            f"Created {ext_name!r} on {target_id!r}.",
+        )
+        ui.notify(
+            f"Created {ext_name!r} on {target_id!r}",
+            type="positive", timeout=1500,
+        )
+        # Topology / extension change — flush diagram caches + refresh data.
+        _nad_cache.clear()
+        _sld_cache.clear()
+        if _state.selected_vl:
+            _push_sld(_state.selected_vl)
+            _push_nad(_state.selected_vl, _nad_depth)
+        refresh_after_create()
+
+    ext_select.on("update:model-value", _on_extension_changed)
+    create_btn.on_click(_on_create_click)
+
+
+def _populate_for_extension(state: dict, component: str, ext_name) -> None:
+    """Rebuild the target picker + per-field widgets for the picked
+    extension. Pulled out so :func:`_refresh_create_extension_panel`
+    can call it after switching the active component."""
+    from iidm_viewer.extension_creation import (
+        CREATABLE_EXTENSIONS,
+        list_extension_candidates,
+    )
+
+    state["extension"] = str(ext_name) if ext_name else None
+    schema = CREATABLE_EXTENSIONS.get(state["extension"] or "")
+    if schema is None or _state.network is None or not component:
+        state["detail_label"].set_text("")
+        state["target_select"].options = []
+        state["target_select"].value = None
+        state["target_select"].update()
+        state["fields_container"].clear()
+        state["field_widgets"] = {}
+        return
+
+    state["detail_label"].set_text(str(schema.get("detail") or ""))
+
+    # Target candidates.
+    try:
+        ids = list_extension_candidates(
+            _state.network, state["extension"], component,
+        )
+    except Exception:
+        ids = []
+    state["target_select"].options = list(ids)
+    state["target_select"].value = ids[0] if ids else None
+    state["target_select"].update()
+
+    # Per-field widgets.
+    container = state["fields_container"]
+    container.clear()
+    state["field_widgets"] = {}
+    with container:
+        for f in schema["fields"]:
+            label_text = f["name"] + (" *" if f.get("required") else "")
+            help_text = f.get("help") or ""
+            with ui.column().classes("q-mr-md q-mb-md"):
+                ui.label(label_text).classes("text-caption")
+                kind = f["kind"]
+                default = f.get("default")
+                if kind == "bool":
+                    w = ui.switch(value=bool(default))
+                elif kind == "int":
+                    w = ui.number(
+                        value=int(default) if default is not None else 0,
+                        step=1, format="%d",
+                    ).props("dense outlined")
+                elif kind == "float":
+                    try:
+                        v = float(default) if default is not None else 0.0
+                    except (TypeError, ValueError):
+                        v = 0.0
+                    w = ui.number(value=v, format="%g") \
+                        .props("dense outlined")
+                elif kind == "choice":
+                    options = list(f.get("options") or [])
+                    value = (
+                        str(default) if str(default) in options
+                        else (options[0] if options else None)
+                    )
+                    w = ui.select(options=options, value=value) \
+                        .props("dense outlined").classes("w-40")
+                else:  # str (and any unknown kind)
+                    w = ui.input(value="" if default in (None,) else str(default)) \
+                        .props("dense outlined")
+                if help_text:
+                    w.tooltip(help_text)
+                state["field_widgets"][f["name"]] = w
+
+
+def _refresh_create_extension_panel(state: dict, component: str) -> None:
+    """Repopulate the extensions panel for ``component``.
+
+    Hides the expansion when the component isn't a target of any
+    creatable extension or no network is loaded.
+    """
+    from iidm_viewer.extension_creation import list_extensions_for_component
+
+    expansion = state.get("expansion")
+    if expansion is None:
+        return
+    state["current_component"] = component
+    if _state.network is None or not component:
+        expansion.visible = False
+        return
+    names = list_extensions_for_component(component)
+    if not names:
+        expansion.visible = False
+        return
+    expansion.visible = True
+    # Repopulate the extension dropdown — preserve the prior pick when
+    # the new component still offers it.
+    current = state["ext_select"].value if state["ext_select"].value in names else names[0]
+    state["ext_select"].options = names
+    state["ext_select"].value = current
+    state["ext_select"].update()
+    _populate_for_extension(state, component, current)
+    state["status_label"].set_text("")
+
+
 def _build_data_explorer():
     """Materialise the Data Explorer panel and return a refresh closure.
 
@@ -2940,6 +3138,22 @@ def _build_data_explorer():
         svc_create_state, refresh_after_create=lambda: refresh(),
     )
 
+    extension_create_state: dict = {
+        "expansion": None,
+        "ext_select": None,
+        "target_select": None,
+        "detail_label": None,
+        "fields_container": None,
+        "status_label": None,
+        "create_btn": None,
+        "field_widgets": {},
+        "extension": None,
+        "current_component": "",
+    }
+    _build_create_extension_panel_widgets(
+        extension_create_state, refresh_after_create=lambda: refresh(),
+    )
+
     grid = ui.aggrid({
         "columnDefs": [], "rowData": [],
         "defaultColDef": _DEFAULT_COL_DEF,
@@ -3057,6 +3271,7 @@ def _build_data_explorer():
         _refresh_create_reactive_limits_panel(reactive_limits_create_state, label)
         _refresh_create_operational_limits_panel(operational_limits_create_state, label)
         _refresh_create_secondary_voltage_control_panel(svc_create_state, label)
+        _refresh_create_extension_panel(extension_create_state, label)
         is_disconnectable = label in DISCONNECTABLE_COMPONENTS
         is_removable = label in REMOVABLE_COMPONENTS
         bulk_row.set_visibility(bool(cols) or is_disconnectable or is_removable)

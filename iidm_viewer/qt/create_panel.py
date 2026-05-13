@@ -2135,3 +2135,284 @@ class CreateSecondaryVoltageControlPanel(QWidget):
         )
         self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
         self.component_created.emit("Secondary Voltage Control", "")
+
+
+# ---------------------------------------------------------------------------
+# Extension creation panel — sub-form attached to creatable components
+# ---------------------------------------------------------------------------
+class CreateExtensionPanel(QWidget):
+    """Sub-form to attach a pypowsybl extension to an existing element.
+
+    Auto-hides unless the active data-explorer component is in the
+    targets map of *at least one* entry in :data:`CREATABLE_EXTENSIONS`.
+
+    Layout:
+      * Extension picker — narrowed to extensions whose ``targets``
+        include the current component (e.g. on Generators it offers
+        ``position`` / ``activePowerControl`` / ``entsoeCategory``).
+      * Target picker — existing element ids fetched via
+        :func:`list_extension_candidates`.
+      * Per-field widgets built from the extension's ``fields`` list
+        — kinds map to ``QCheckBox`` / ``QSpinBox`` / ``QDoubleSpinBox``
+        / ``QLineEdit`` / ``QComboBox``.
+      * Create button + status label.
+
+    Emits :pyattr:`component_created` with ``("Extension", target_id)``
+    on success so the host can flush diagram caches + refresh tabs.
+    """
+
+    component_created = Signal(str, str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+        # Currently-rendered extension name (drives the per-field widgets).
+        self._extension: Optional[str] = None
+        self._field_widgets: dict[str, QWidget] = {}
+
+        self._group = QGroupBox("Attach extension")
+        self._group.setCheckable(True)
+        self._group.setChecked(False)  # folded by default
+        self._group.toggled.connect(self._on_toggled)
+
+        # Pickers row — extension + target.
+        self._ext_combo = QComboBox()
+        self._ext_combo.setMinimumWidth(280)
+        self._ext_combo.currentIndexChanged.connect(self._on_extension_changed)
+        self._target_combo = QComboBox()
+        self._target_combo.setMinimumWidth(220)
+        picker_row = QHBoxLayout()
+        picker_row.addWidget(QLabel("Extension:"))
+        picker_row.addWidget(self._ext_combo, 1)
+        picker_row.addSpacing(8)
+        picker_row.addWidget(QLabel("Target:"))
+        picker_row.addWidget(self._target_combo, 1)
+
+        # Caption — the extension's ``detail`` text from the registry.
+        self._detail_lbl = QLabel("")
+        self._detail_lbl.setWordWrap(True)
+        self._detail_lbl.setStyleSheet("color: #555; font-style: italic;")
+
+        # Field grid — repopulated on every extension change.
+        self._fields_grid = QGridLayout()
+        self._fields_grid.setSpacing(6)
+        self._fields_widget = QWidget()
+        self._fields_widget.setLayout(self._fields_grid)
+
+        self._create_btn = QPushButton("Create")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self._create_btn)
+        action_row.addWidget(self._status, 1)
+
+        # Wrap the whole body so the QGroupBox checked toggle folds
+        # everything — same pattern as the other create panels.
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.setSpacing(6)
+        body_inner.addLayout(picker_row)
+        body_inner.addWidget(self._detail_lbl)
+        body_inner.addWidget(self._fields_widget)
+        body_inner.addLayout(action_row)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+        self._body.setVisible(False)
+        self.setVisible(False)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._status.setText("")
+        self._refresh_for_current()
+
+    # ------------------------------------------------------------------
+    # Internals — visibility + extension picker
+    # ------------------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._body.setVisible(checked)
+
+    def _available_extensions(self) -> list[str]:
+        if not self._component:
+            return []
+        from iidm_viewer.extension_creation import list_extensions_for_component
+        return list_extensions_for_component(self._component)
+
+    def _refresh_for_current(self) -> None:
+        names = self._available_extensions()
+        applicable = bool(self._network is not None and names)
+        self.setVisible(applicable)
+        if not applicable:
+            return
+        # Repopulate the extension dropdown — preserve selection when
+        # the new component still offers the previously-chosen one.
+        current = self._ext_combo.currentText() if self._ext_combo.count() else ""
+        self._ext_combo.blockSignals(True)
+        self._ext_combo.clear()
+        for n in names:
+            self._ext_combo.addItem(n)
+        target_idx = self._ext_combo.findText(current) if current else -1
+        if target_idx >= 0:
+            self._ext_combo.setCurrentIndex(target_idx)
+        else:
+            self._ext_combo.setCurrentIndex(0)
+        self._ext_combo.blockSignals(False)
+        self._rebuild_for_selected_extension()
+
+    def _on_extension_changed(self, _idx: int) -> None:
+        self._rebuild_for_selected_extension()
+
+    def _rebuild_for_selected_extension(self) -> None:
+        from iidm_viewer.extension_creation import (
+            CREATABLE_EXTENSIONS,
+            list_extension_candidates,
+        )
+        self._extension = self._ext_combo.currentText() or None
+        if not self._extension or self._network is None or not self._component:
+            self._detail_lbl.setText("")
+            self._target_combo.clear()
+            self._rebuild_field_widgets([])
+            return
+        schema = CREATABLE_EXTENSIONS.get(self._extension)
+        if schema is None:
+            self._detail_lbl.setText("")
+            self._target_combo.clear()
+            self._rebuild_field_widgets([])
+            return
+        self._detail_lbl.setText(str(schema.get("detail") or ""))
+        # Target picker — eligible element ids for this (extension, component).
+        try:
+            ids = list_extension_candidates(
+                self._network, self._extension, self._component,
+            )
+        except Exception:
+            ids = []
+        self._target_combo.blockSignals(True)
+        self._target_combo.clear()
+        for eid in ids:
+            self._target_combo.addItem(eid)
+        self._target_combo.blockSignals(False)
+        self._rebuild_field_widgets(schema["fields"])
+
+    # ------------------------------------------------------------------
+    # Internals — fields
+    # ------------------------------------------------------------------
+    def _rebuild_field_widgets(self, fields: list[dict]) -> None:
+        for w in self._field_widgets.values():
+            w.deleteLater()
+        self._field_widgets.clear()
+        while self._fields_grid.count():
+            item = self._fields_grid.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        for idx, f in enumerate(fields):
+            widget = self._make_widget_for_field(f)
+            self._field_widgets[f["name"]] = widget
+            label = QLabel(f["name"])
+            if f.get("help"):
+                label.setToolTip(str(f["help"]))
+                widget.setToolTip(str(f["help"]))
+            row = idx
+            self._fields_grid.addWidget(label, row, 0)
+            self._fields_grid.addWidget(widget, row, 1)
+
+    @staticmethod
+    def _make_widget_for_field(field: dict) -> QWidget:
+        kind = field["kind"]
+        default = field.get("default")
+        if kind == "bool":
+            w = QCheckBox()
+            w.setChecked(bool(default))
+            return w
+        if kind == "int":
+            w = QSpinBox()
+            w.setRange(-2 ** 31, 2 ** 31 - 1)
+            try:
+                w.setValue(int(default) if default is not None else 0)
+            except (TypeError, ValueError):
+                w.setValue(0)
+            return w
+        if kind == "float":
+            w = QDoubleSpinBox()
+            w.setDecimals(6)
+            w.setRange(-1e15, 1e15)
+            try:
+                w.setValue(float(default) if default is not None else 0.0)
+            except (TypeError, ValueError):
+                w.setValue(0.0)
+            return w
+        if kind == "choice":
+            w = QComboBox()
+            for opt in field.get("options") or []:
+                w.addItem(str(opt))
+            if default is not None:
+                idx = w.findText(str(default))
+                if idx >= 0:
+                    w.setCurrentIndex(idx)
+            return w
+        # ``str`` (and any unknown kind).
+        return QLineEdit("" if default in (None, "") else str(default))
+
+    def _read_widget(self, field: dict):
+        widget = self._field_widgets.get(field["name"])
+        if widget is None:
+            return None
+        kind = field["kind"]
+        if kind == "bool" and isinstance(widget, QCheckBox):
+            return widget.isChecked()
+        if kind == "int" and isinstance(widget, QSpinBox):
+            return widget.value()
+        if kind == "float" and isinstance(widget, QDoubleSpinBox):
+            return widget.value()
+        if kind == "choice" and isinstance(widget, QComboBox):
+            return widget.currentText()
+        if isinstance(widget, QLineEdit):
+            text = widget.text()
+            return text if text != "" else None
+        return None
+
+    # ------------------------------------------------------------------
+    # Create
+    # ------------------------------------------------------------------
+    def _on_create_clicked(self) -> None:
+        from iidm_viewer.extension_creation import (
+            CREATABLE_EXTENSIONS,
+            create_extension,
+        )
+        if self._network is None or not self._extension:
+            return
+        schema = CREATABLE_EXTENSIONS.get(self._extension)
+        if schema is None:
+            return
+        target_id = self._target_combo.currentText()
+        if not target_id:
+            self._status.setText("Pick a target first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        values = {f["name"]: self._read_widget(f) for f in schema["fields"]}
+        try:
+            create_extension(self._network, self._extension, target_id, values)
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        self._status.setText(
+            f"Created {self._extension!r} on {target_id!r}.",
+        )
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit("Extension", target_id)

@@ -1594,6 +1594,59 @@ def test_extensions_tab_set_network_to_none_resets(qapp):
     assert "No network" in tab._summary_lbl.text()
 
 
+def test_create_extension_panel_hides_for_non_target_component(qapp):
+    """The panel must auto-hide when the active component isn't a
+    target of any creatable extension."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.create_panel import CreateExtensionPanel
+
+    panel = CreateExtensionPanel()
+    panel.set_network(NetworkProxy(run(pn.create_ieee14)))
+    # ``Lines`` are not a target of any creatable extension.
+    panel.set_component("Lines")
+    qapp.processEvents()
+    assert panel.isVisible() is False
+    # ``Generators`` are targets for activePowerControl + position +
+    # entsoeCategory — panel should surface.
+    panel.set_component("Generators")
+    qapp.processEvents()
+    assert panel.isVisible() is True
+
+
+def test_create_extension_panel_creates_active_power_control_end_to_end(qapp):
+    """End-to-end: pick ``activePowerControl``, fill the form, click
+    Create, and confirm pypowsybl persisted the row."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.create_panel import CreateExtensionPanel
+
+    network = NetworkProxy(run(pn.create_ieee14))
+    panel = CreateExtensionPanel()
+    panel.set_network(network)
+    panel.set_component("Generators")
+    qapp.processEvents()
+    # Pick the extension explicitly so the test isn't tied to the
+    # registry iteration order.
+    idx = panel._ext_combo.findText("activePowerControl")
+    assert idx >= 0
+    panel._ext_combo.setCurrentIndex(idx)
+    qapp.processEvents()
+    panel._target_combo.setCurrentText("B1-G")
+    panel._field_widgets["droop"].setValue(5.0)
+    panel._field_widgets["participation_factor"].setValue(2.0)
+
+    seen: list = []
+    panel.component_created.connect(lambda c, eid: seen.append((c, eid)))
+    panel._on_create_clicked()
+    qapp.processEvents()
+
+    df = network.get_extensions("activePowerControl")
+    assert df is not None
+    assert "B1-G" in df.index
+    assert seen == [("Extension", "B1-G")]
+
+
 def test_main_window_carries_an_extensions_tab(qapp):
     """The PySide6 main window must surface the Extensions Explorer as
     a top-level tab — same UX as Streamlit's two data-explorer tabs."""
@@ -1648,6 +1701,7 @@ def test_all_create_panels_start_folded(qapp):
         CreateComponentPanel,
         CreateContainerPanel,
         CreateCouplingDevicePanel,
+        CreateExtensionPanel,
         CreateHvdcLinePanel,
         CreateOperationalLimitsPanel,
         CreateReactiveLimitsPanel,
@@ -1665,6 +1719,7 @@ def test_all_create_panels_start_folded(qapp):
         CreateReactiveLimitsPanel,
         CreateOperationalLimitsPanel,
         CreateSecondaryVoltageControlPanel,
+        CreateExtensionPanel,
     ]
     for cls in classes:
         panel = cls()
