@@ -1,15 +1,19 @@
-"""Tests for lf_report_dialog helpers and dialog rendering."""
-import json
-from unittest.mock import MagicMock, patch
+"""Tests for the message-template / severity helpers ``lf_report_dialog``
+re-uses from the shared parser.
 
+The dialog body itself is a thin Streamlit shell around
+:mod:`iidm_viewer.lf_report` — the framework-agnostic parser. These
+tests pin the helper API the dialog imports; the parser's end-to-end
+behaviour is covered by ``tests/test_lf_report.py``.
+"""
 import pytest
 
-from iidm_viewer.lf_report_dialog import (
-    _SEVERITY_ORDER,
-    _interpolate,
-    _node_message,
-    _node_severity,
-    _subtree_max_severity_level,
+from iidm_viewer.lf_report import (
+    SEVERITY_ORDER as _SEVERITY_ORDER,
+    interpolate as _interpolate,
+    node_message as _node_message,
+    node_severity as _node_severity,
+    subtree_max_severity_level as _subtree_max_severity_level,
 )
 
 
@@ -139,126 +143,6 @@ class TestSubtreeMaxSeverityLevel:
         assert _subtree_max_severity_level({}) == _SEVERITY_ORDER["INFO"]
 
 
-# ---------------------------------------------------------------------------
-# _render_node
-# ---------------------------------------------------------------------------
-
-class TestRenderNode:
-    """Tests for _render_node branching logic.
-
-    All Streamlit widget calls are patched out — we only verify which
-    rendering paths are taken (markdown vs expander, expanded flag).
-    """
-
-    def _node(self, sev=None, children=None, msg_key="k"):
-        values = {}
-        if sev is not None:
-            values["reportSeverity"] = {"value": sev}
-        n = {"messageKey": msg_key, "values": values}
-        if children is not None:
-            n["children"] = children
-        return n
-
-    def _expander_cm(self, mock_st):
-        """Return a MagicMock that works as a context manager for st.expander."""
-        cm = MagicMock()
-        cm.__enter__ = MagicMock(return_value=None)
-        cm.__exit__ = MagicMock(return_value=False)
-        mock_st.expander.return_value = cm
-        return cm
-
-    def test_leaf_at_or_above_min_level_renders_markdown(self):
-        from iidm_viewer.lf_report_dialog import _render_node
-
-        node = self._node("WARN")
-        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
-            _render_node(node, {}, min_level=_SEVERITY_ORDER["INFO"])
-            mock_st.markdown.assert_called_once()
-            mock_st.expander.assert_not_called()
-
-    def test_leaf_below_min_level_renders_nothing(self):
-        from iidm_viewer.lf_report_dialog import _render_node
-
-        node = self._node("TRACE")
-        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
-            _render_node(node, {}, min_level=_SEVERITY_ORDER["ERROR"])
-            mock_st.markdown.assert_not_called()
-
-    def test_leaf_message_interpolated_via_dictionaries(self):
-        from iidm_viewer.lf_report_dialog import _render_node
-
-        node = {
-            "messageKey": "greet",
-            "values": {
-                "name": {"value": "World"},
-                "reportSeverity": {"value": "INFO"},
-            },
-        }
-        dicts = {"default": {"greet": "Hello ${name}"}}
-        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
-            _render_node(node, dicts, min_level=0)
-            args = mock_st.markdown.call_args[0][0]
-            assert "Hello World" in args
-
-    def test_parent_skipped_when_entire_subtree_below_min_level(self):
-        from iidm_viewer.lf_report_dialog import _render_node
-
-        child = self._node("TRACE")
-        node = self._node("TRACE", children=[child])
-        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
-            _render_node(node, {}, min_level=_SEVERITY_ORDER["ERROR"])
-            mock_st.expander.assert_not_called()
-            mock_st.markdown.assert_not_called()
-
-    def test_parent_with_warn_child_renders_expanded_expander(self):
-        from iidm_viewer.lf_report_dialog import _render_node
-
-        child = self._node("WARN")
-        node = self._node("INFO", children=[child])
-        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
-            self._expander_cm(mock_st)
-            _render_node(node, {}, min_level=_SEVERITY_ORDER["INFO"])
-            mock_st.expander.assert_called_once()
-            _, kwargs = mock_st.expander.call_args
-            assert kwargs.get("expanded") is True
-
-    def test_parent_with_info_only_child_renders_collapsed_expander(self):
-        from iidm_viewer.lf_report_dialog import _render_node
-
-        child = self._node("INFO")
-        node = self._node("INFO", children=[child])
-        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
-            self._expander_cm(mock_st)
-            _render_node(node, {}, min_level=_SEVERITY_ORDER["INFO"])
-            mock_st.expander.assert_called_once()
-            _, kwargs = mock_st.expander.call_args
-            assert kwargs.get("expanded") is False
-
-    def test_parent_icon_and_message_used_as_expander_label(self):
-        from iidm_viewer.lf_report_dialog import _render_node, _SEVERITY_ICON
-
-        child = self._node("INFO")
-        node = self._node("INFO", children=[child], msg_key="net")
-        dicts = {"default": {"net": "Network"}}
-        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
-            self._expander_cm(mock_st)
-            _render_node(node, dicts, min_level=0)
-            label_arg = mock_st.expander.call_args[0][0]
-            assert "Network" in label_arg
-            assert _SEVERITY_ICON["INFO"] in label_arg
-
-    def test_render_node_recurses_into_children(self):
-        """Children of the expander are rendered via recursive calls."""
-        from iidm_viewer.lf_report_dialog import _render_node
-
-        leaf = self._node("INFO")
-        node = self._node("INFO", children=[leaf])
-        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
-            self._expander_cm(mock_st)
-            _render_node(node, {}, min_level=0)
-            # The leaf child renders via st.markdown inside the expander
-            mock_st.markdown.assert_called_once()
-
 
 # ---------------------------------------------------------------------------
 # Integration: parse a realistic ReportNode JSON snapshot
@@ -330,59 +214,3 @@ def test_sample_report_subtree_max_is_info():
     root = _SAMPLE_REPORT["reportRoot"]
     assert _subtree_max_severity_level(root) == _SEVERITY_ORDER["INFO"]
 
-
-# ---------------------------------------------------------------------------
-# show_lf_report_dialog body — accessed via __wrapped__ (functools.wraps)
-# ---------------------------------------------------------------------------
-
-
-def _dialog_inner():
-    from iidm_viewer.lf_report_dialog import show_lf_report_dialog
-    inner = getattr(show_lf_report_dialog, "__wrapped__", None)
-    if inner is None:
-        pytest.skip("@st.dialog does not expose __wrapped__")
-    return inner
-
-
-class TestDialogBody:
-    def test_no_report_in_session_state_shows_info(self):
-        """Lines 60-63: missing report_json → st.info and return."""
-        inner = _dialog_inner()
-        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
-            mock_st.session_state = {}
-            inner()
-            mock_st.info.assert_called_once()
-
-    def test_invalid_json_shows_error(self):
-        """Lines 65-69: JSON parse failure → st.error and return."""
-        inner = _dialog_inner()
-        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
-            mock_st.session_state = {"_lf_report_json": "{not valid json"}
-            inner()
-            mock_st.error.assert_called_once()
-
-    def test_empty_severity_selection_shows_warning(self):
-        """Lines 81-83: no severity selected → st.warning and return."""
-        inner = _dialog_inner()
-        report_json = json.dumps({"dictionaries": {}, "reportRoot": {}})
-        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
-            mock_st.session_state = {"_lf_report_json": report_json}
-            mock_st.multiselect.return_value = []
-            inner()
-            mock_st.warning.assert_called_once()
-
-    def test_valid_report_renders_divider_and_tree(self):
-        """Lines 85-89: valid JSON + severity → st.divider called."""
-        inner = _dialog_inner()
-        report = {
-            "dictionaries": {"default": {"k": "Hello"}},
-            "reportRoot": {
-                "messageKey": "k",
-                "children": [{"messageKey": "k", "values": {}}],
-            },
-        }
-        with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
-            mock_st.session_state = {"_lf_report_json": json.dumps(report)}
-            mock_st.multiselect.return_value = ["INFO"]
-            inner()
-            mock_st.divider.assert_called_once()
