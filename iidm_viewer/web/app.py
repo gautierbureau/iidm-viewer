@@ -4012,6 +4012,314 @@ def _build_extensions_explorer():
     return refresh
 
 
+def _build_reactive_curves():
+    """Materialise the "Reactive Capability Curves" tab.
+
+    Renders the shared :class:`~iidm_viewer.reactive_curves.ReactiveCurvesViewModel`
+    + :class:`GeneratorPlotData` + :class:`ContainmentSummary` against
+    NiceGUI widgets:
+
+    * a "Only generators in <VL>" checkbox when an upstream VL is
+      selected,
+    * a generator picker (the same list the view model exposes),
+    * a metrics row (target_p / target_q / min_q / max_q / type),
+    * a ``ui.plotly`` chart with the closed polygon + operating point
+      + status-coloured target diamond,
+    * a containment summary expansion with the four sub-frames the
+      shared helper bucketises.
+
+    Returns a closure the page-wide listeners call when the network or
+    load-flow state changes.
+    """
+    import plotly.graph_objects as go
+
+    from iidm_viewer.reactive_curves import (
+        STATUS_DIAMOND_COLOR,
+        build_containment_summary,
+        build_generator_plot_data,
+        build_reactive_curves_view_model,
+    )
+
+    state: dict = {"vm": None, "gen_id": None}
+
+    only_vl_row = ui.row().classes("items-center q-pa-sm w-full")
+    with only_vl_row:
+        only_vl_checkbox = ui.checkbox(
+            "Only generators in selected VL", value=False,
+        )
+    only_vl_row.visible = False
+
+    gen_row = ui.row().classes("items-center q-pa-sm w-full")
+    with gen_row:
+        ui.label("Generator:")
+        gen_select = ui.select(options=[], value=None) \
+            .props("dense outlined").classes("w-64")
+        gen_count_lbl = ui.label("").classes("text-caption q-ml-md")
+
+    metrics_row = ui.row().classes("items-stretch q-pa-sm w-full no-wrap")
+    with metrics_row:
+        target_p_lbl = ui.label("target_p: —").classes("col")
+        target_q_lbl = ui.label("target_q: —").classes("col")
+        min_q_lbl = ui.label("min_q @ tp: —").classes("col")
+        max_q_lbl = ui.label("max_q @ tp: —").classes("col")
+        type_lbl = ui.label("Type: —").classes("col")
+    sensitivity_caption = ui.label("").classes("text-caption q-pa-sm")
+    sensitivity_caption.visible = False
+
+    plot = ui.plotly(go.Figure()).classes("w-full").style("height: 500px")
+    plot_caption = ui.label("").classes("text-caption q-pa-sm")
+    placeholder = ui.label(
+        "No generators with reactive limits in this network."
+    ).classes("text-caption q-pa-md")
+    placeholder.visible = False
+
+    summary_expansion = ui.expansion(
+        "Target P/Q containment", icon="rule", value=False,
+    ).classes("w-full")
+    with summary_expansion:
+        summary_metrics = ui.row().classes("q-pa-sm w-full")
+        with summary_metrics:
+            inside_lbl = ui.label("Inside: —")
+            warning_lbl = ui.label("Edge/Near: —")
+            action_lbl = ui.label("Outside/Saturated: —")
+            unknown_lbl = ui.label("Unknown: —")
+        summary_caption = ui.label("").classes("text-caption q-pa-sm")
+        summary_caption.visible = False
+        summary_body = ui.column().classes("w-full")
+
+    def _render_subset(label, df, *, default_open):
+        if df.empty:
+            return
+        title = f"{label} — {len(df)}"
+        with summary_body:
+            with ui.expansion(title, value=default_open).classes("w-full"):
+                ui.aggrid({
+                    "columnDefs": [{"field": c, "headerName": c}
+                                   for c in df.columns],
+                    "rowData": df.reset_index().fillna("").to_dict("records"),
+                    "defaultColDef": _DEFAULT_COL_DEF,
+                }).classes("w-full").style("height: 240px")
+
+    def _set_plot(vm, gen_id):
+        plot_data = build_generator_plot_data(
+            gen_id, vm.gens_df, vm.curves_df, vm.classified, vm.curve_gen_ids,
+        )
+        if plot_data is None:
+            plot.figure = go.Figure()
+            plot.update()
+            plot_caption.set_text("")
+            return
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=plot_data.polygon_p, y=plot_data.polygon_q,
+            fill="toself",
+            fillcolor="rgba(99, 110, 250, 0.15)",
+            line=dict(color="rgb(99, 110, 250)"),
+            name=plot_data.curve_label,
+        ))
+        if plot_data.operating_point is not None:
+            op_p, op_q = plot_data.operating_point
+            fig.add_trace(go.Scatter(
+                x=[op_p], y=[op_q],
+                mode="markers",
+                marker=dict(size=12, color="red", symbol="x"),
+                name=f"Operating (P={op_p:.1f}, Q={op_q:.1f})",
+            ))
+        if plot_data.target_point is not None:
+            tp, tq, status, regulation = plot_data.target_point
+            fig.add_trace(go.Scatter(
+                x=[tp], y=[tq],
+                mode="markers",
+                marker=dict(
+                    size=12,
+                    color=STATUS_DIAMOND_COLOR.get(status, "green"),
+                    symbol="diamond",
+                ),
+                name=(
+                    f"Target [{regulation}] (P={tp:.1f}, Q={tq:.1f}, {status})"
+                ),
+            ))
+        fig.update_layout(
+            xaxis_title="P (MW)",
+            yaxis_title="Q (MVar)",
+            title=f"Reactive Capability Curve — {gen_id}",
+            showlegend=True,
+            height=500,
+        )
+        plot.figure = fig
+        plot.update()
+        if plot_data.has_curve and plot_data.curve_points is not None:
+            plot_caption.set_text(
+                f"{len(plot_data.curve_points)} curve points for {gen_id}"
+            )
+        else:
+            plot_caption.set_text(f"Min-max reactive limits for {gen_id}")
+
+    def _render_summary(vm):
+        summary = build_containment_summary(vm.classified, vm.gens_df)
+        inside_lbl.set_text(f"Inside: {summary.n_inside}")
+        warning_lbl.set_text(f"Edge/Near: {summary.n_warning}")
+        action_lbl.set_text(
+            f"Outside/Saturated: {summary.n_action}"
+            + (f" (PV→PQ: {summary.n_saturated})" if summary.n_saturated else "")
+        )
+        unknown_lbl.set_text(f"Unknown/Needs LF: {summary.n_unknown}")
+        if summary.n_needs_lf:
+            summary_caption.set_text(
+                f"{summary.n_needs_lf} PV generator(s) need a load flow to "
+                "evaluate their operating point against the diagram."
+            )
+            summary_caption.visible = True
+        else:
+            summary_caption.visible = False
+        summary_body.clear()
+        if summary.n_action + summary.n_warning == 0:
+            with summary_body:
+                ui.label("All targets are inside their capability curves.") \
+                    .classes("text-positive q-pa-sm")
+            return
+        _render_subset("PQ outside (target_q infeasible)",
+                       summary.pq_outside, default_open=True)
+        _render_subset("PV saturated (LF clamped Q, switched to PQ)",
+                       summary.pv_saturated, default_open=True)
+        _render_subset("PQ on edge", summary.pq_edge, default_open=False)
+        _render_subset("PV near saturation",
+                       summary.pv_near_saturation, default_open=False)
+
+    def _render_selected_gen():
+        vm = state["vm"]
+        gen_id = state["gen_id"]
+        if vm is None or gen_id is None or gen_id not in vm.gens_df.index:
+            for lbl, prefix in (
+                (target_p_lbl, "target_p"),
+                (target_q_lbl, "target_q"),
+                (min_q_lbl, "min_q @ tp"),
+                (max_q_lbl, "max_q @ tp"),
+                (type_lbl, "Type"),
+            ):
+                lbl.set_text(f"{prefix}: —")
+            sensitivity_caption.visible = False
+            plot.figure = go.Figure()
+            plot.update()
+            plot_caption.set_text("")
+            return
+        gen_row = vm.gens_df.loc[gen_id]
+        classified_row = (
+            vm.classified.loc[gen_id]
+            if gen_id in vm.classified.index
+            else pd.Series(dtype="object")
+        )
+        target_p_lbl.set_text(
+            f"target_p: {gen_row.get('target_p', float('nan')):.1f} MW"
+        )
+        target_q_lbl.set_text(
+            f"target_q: {gen_row.get('target_q', float('nan')):.1f} MVar"
+        )
+        min_q_lbl.set_text(
+            f"min_q @ tp: {gen_row.get('min_q_at_target_p', float('nan')):.1f} MVar"
+        )
+        max_q_lbl.set_text(
+            f"max_q @ tp: {gen_row.get('max_q_at_target_p', float('nan')):.1f} MVar"
+        )
+        type_lbl.set_text(f"Type: {classified_row.get('regulation', '?')}")
+
+        # Sensitivity caption — only for voltage-regulating gens.
+        sensitivity_caption.visible = False
+        if bool(gen_row.get("voltage_regulator_on", False)):
+            try:
+                from iidm_viewer.reactive_curves import (
+                    compute_target_v_q_sensitivity,
+                )
+                sens = compute_target_v_q_sensitivity(_state.network, gen_id)
+            except Exception:
+                sens = None
+            if sens is not None:
+                dq_dv, q_ref = sens
+                sensitivity_caption.set_text(
+                    f"dQ_bus / dV_target ≈ {dq_dv:+.2f} MVar/kV "
+                    f"(BUS_REACTIVE_POWER ref = {q_ref:.2f} MVar)."
+                )
+                sensitivity_caption.visible = True
+
+        _set_plot(vm, gen_id)
+
+    def _on_gen_changed(_e=None):
+        state["gen_id"] = gen_select.value
+        _render_selected_gen()
+
+    gen_select.on("update:model-value", _on_gen_changed)
+
+    def _on_only_vl_changed(_e=None):
+        refresh()
+
+    only_vl_checkbox.on("update:model-value", _on_only_vl_changed)
+
+    def refresh() -> None:
+        if _state.network is None:
+            state["vm"] = None
+            state["gen_id"] = None
+            placeholder.set_text("Load a network first.")
+            placeholder.visible = True
+            only_vl_row.visible = False
+            gen_select.options = []
+            gen_select.update()
+            gen_count_lbl.set_text("")
+            summary_expansion.value = False
+            _render_selected_gen()
+            return
+        # Sync "only_vl" affordance with the upstream-selected VL.
+        only_vl_label = (
+            f"Only generators in VL {_state.selected_vl}"
+            if _state.selected_vl else ""
+        )
+        if _state.selected_vl:
+            only_vl_checkbox.set_text(only_vl_label)
+            only_vl_row.visible = True
+        else:
+            only_vl_row.visible = False
+        only_vl = bool(only_vl_checkbox.value) and bool(_state.selected_vl)
+        try:
+            vm = build_reactive_curves_view_model(
+                _state.network,
+                only_vl=_state.selected_vl if only_vl else None,
+            )
+        except Exception as exc:
+            placeholder.set_text(f"Reactive curves failed: {exc}")
+            placeholder.visible = True
+            state["vm"] = None
+            state["gen_id"] = None
+            gen_select.options = []
+            gen_select.update()
+            _render_selected_gen()
+            return
+        if vm is None or vm.gens_df.empty:
+            placeholder.set_text("No generators with reactive limits in this network.")
+            placeholder.visible = True
+            state["vm"] = None
+            state["gen_id"] = None
+            gen_select.options = []
+            gen_select.update()
+            gen_count_lbl.set_text("")
+            _render_selected_gen()
+            return
+        placeholder.visible = False
+        state["vm"] = vm
+        gen_ids = list(vm.gens_df.index)
+        gen_count_lbl.set_text(f"{len(gen_ids)} generators with reactive limits")
+        gen_select.options = gen_ids
+        current = state["gen_id"]
+        if current not in gen_ids:
+            current = gen_ids[0]
+        state["gen_id"] = current
+        gen_select.value = current
+        gen_select.update()
+        _render_selected_gen()
+        _render_summary(vm)
+
+    refresh()
+    return refresh
+
+
 def _cast_value_for_col(series, raw):
     """Best-effort cast for a user-typed cell value, matching the
     source DataFrame's column dtype."""
@@ -4272,6 +4580,7 @@ def main_page() -> None:
         sld_tab = ui.tab("Single Line Diagram")
         data_tab = ui.tab("Data Explorer Components")
         extensions_tab = ui.tab("Data Explorer Extensions")
+        reactive_curves_tab = ui.tab("Reactive Capability Curves")
     panels = ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")
     with panels:
         with ui.tab_panel(map_tab).classes("q-pa-none w-full"):
@@ -4325,6 +4634,8 @@ def main_page() -> None:
             refresh_data_grid = _build_data_explorer()
         with ui.tab_panel(extensions_tab).classes("w-full"):
             refresh_extensions_tab = _build_extensions_explorer()
+        with ui.tab_panel(reactive_curves_tab).classes("w-full"):
+            refresh_reactive_curves = _build_reactive_curves()
 
     # ------------------------------------------------------------------
     # Cross-tab navigation: substation click on map -> SLD tab on that VL.
@@ -4362,6 +4673,7 @@ def main_page() -> None:
         _push_map()
         tabs.set_value(map_tab)
         refresh_data_grid()
+        refresh_reactive_curves()
 
     def _on_state_vl(vl_id):
         vl_lbl.set_text(f"VL: {vl_id}" if vl_id else "VL: —")
@@ -4377,6 +4689,9 @@ def main_page() -> None:
         if vl_id:
             _push_sld(vl_id)
             _push_nad(vl_id, _nad_depth)
+        # Refresh the reactive-curves tab so its "Only generators in
+        # VL <id>" checkbox label and any active narrow stay in sync.
+        refresh_reactive_curves()
 
     def _on_loadflow_completed(result):
         """LF rewrites line P/Q/I + bus V/angle, baked into the SVGs and
@@ -4390,6 +4705,9 @@ def main_page() -> None:
             _push_nad(_state.selected_vl, _nad_depth)
         refresh_data_grid()
         refresh_extensions_tab()
+        # Post-LF the gen ``q`` column flips PV gens from ``needs_lf`` to
+        # an actionable status; re-run the classification.
+        refresh_reactive_curves()
 
     # Listeners are registered fresh on every page connect; if a
     # previous registration is still around (browser refresh), the

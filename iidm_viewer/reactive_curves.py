@@ -481,6 +481,299 @@ def compute_target_v_q_sensitivity(network: NetworkProxy, gen_id: str):
 
 
 # ---------------------------------------------------------------------------
+# View-model composer + per-generator plot data + containment summary —
+# the host-agnostic building blocks each UI (Streamlit / PySide6 / NiceGUI)
+# composes into its own widget tree.
+# ---------------------------------------------------------------------------
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ReactiveCurvesViewModel:
+    """Everything a Reactive Capability Curves tab needs in one shape.
+
+    The composer fetches + enriches + augments + classifies; the host
+    renders. ``gens_df`` is indexed by gen id and carries the enriched
+    columns (VL/substation joins, step-up transformer, bus voltage gap).
+    """
+    gens_df: "pd.DataFrame"
+    curves_df: "pd.DataFrame"
+    classified: "pd.DataFrame"
+    curve_gen_ids: set = field(default_factory=set)
+    pv_gen_ids: list = field(default_factory=list)
+
+
+def build_reactive_curves_view_model(
+    network: NetworkProxy,
+    *,
+    only_vl: Optional[str] = None,
+    gens_df: Optional["pd.DataFrame"] = None,
+    curves_df: Optional["pd.DataFrame"] = None,
+    vl_to_xf: Optional["pd.DataFrame"] = None,
+    bus_voltages: Optional["pd.DataFrame"] = None,
+) -> Optional[ReactiveCurvesViewModel]:
+    """Build the reactive-curves view model for ``network``.
+
+    Pipeline:
+
+    1. Load capability curve points + generator frame (callers can pass
+       pre-fetched / pre-cached frames so Streamlit's session-state
+       caches stay effective).
+    2. Filter to gens with either a capability curve *or* finite
+       min/max reactive limits.
+    3. Enrich with VL / substation / nominal_v joins.
+    4. If ``only_vl`` is given, narrow to gens in that voltage level.
+    5. Augment with step-up transformer and bus-voltage columns.
+    6. Classify each gen's operating point against its polygon.
+
+    Returns ``None`` when the network carries no eligible generators
+    after step 2 — hosts surface a "no data" placeholder.
+    """
+    if curves_df is None:
+        try:
+            curves_df = network.get_reactive_capability_curve_points()
+        except Exception:
+            curves_df = pd.DataFrame()
+    curve_gen_ids = (
+        set(curves_df.index.get_level_values("id").unique())
+        if not curves_df.empty else set()
+    )
+
+    if gens_df is None:
+        gens_df = network.get_generators(all_attributes=True)
+    if gens_df.empty:
+        return None
+
+    has_curve = gens_df.index.isin(curve_gen_ids)
+    has_minmax = (
+        gens_df["min_q"].abs() < 1e300
+    ) & (
+        gens_df["max_q"].abs() < 1e300
+    )
+    gens_df = gens_df[has_curve | has_minmax]
+    if gens_df.empty:
+        return None
+
+    gens_df = enrich_with_joins(gens_df, build_vl_lookup(network))
+
+    if only_vl and "voltage_level_id" in gens_df.columns:
+        narrowed = gens_df[gens_df["voltage_level_id"] == only_vl]
+        if not narrowed.empty:
+            gens_df = narrowed
+
+    gens_df = augment_gens_with_step_up_transformer(
+        network, gens_df, vl_to_xf=vl_to_xf,
+    )
+    gens_df = augment_gens_with_bus_voltage(
+        network, gens_df, bus_voltages=bus_voltages,
+    )
+    classified = classify_targets(gens_df, curves_df)
+    pv_gen_ids = classified.index[classified["regulation"] == "PV"].tolist()
+
+    return ReactiveCurvesViewModel(
+        gens_df=gens_df,
+        curves_df=curves_df,
+        classified=classified,
+        curve_gen_ids=curve_gen_ids,
+        pv_gen_ids=pv_gen_ids,
+    )
+
+
+@dataclass
+class GeneratorPlotData:
+    """Per-generator data ready to feed any plotting library.
+
+    ``polygon_p`` / ``polygon_q`` close the capability polygon; the
+    operating point and the target point are optional (NaN inputs →
+    ``None``). Coordinates are in **gen convention** (positive = MW out
+    of the generator) so the plot reads correctly regardless of the
+    pypowsybl ``p`` / ``q`` sign convention.
+    """
+    polygon_p: list
+    polygon_q: list
+    curve_label: str
+    has_curve: bool
+    # (P_gen, Q_gen) — pypowsybl reports load-convention p/q, we flip the
+    # sign so the marker lands inside the capability polygon as expected.
+    operating_point: Optional[tuple] = None
+    # (target_p, target_q, status, regulation) — used to draw the
+    # status-coloured diamond.
+    target_point: Optional[tuple] = None
+    # The raw curve points (id, p, min_q, max_q) for curve gens; ``None``
+    # for min-max only generators so the host can pick its own caption.
+    curve_points: Optional["pd.DataFrame"] = None
+
+
+def build_generator_plot_data(
+    gen_id: str,
+    gens_df: "pd.DataFrame",
+    curves_df: "pd.DataFrame",
+    classified: "pd.DataFrame",
+    curve_gen_ids,
+) -> Optional[GeneratorPlotData]:
+    """Build the per-gen plot payload for ``gen_id``.
+
+    Returns ``None`` when the gen isn't in ``gens_df``. Otherwise the
+    payload always carries a closed polygon (when min_p / max_p /
+    min_q / max_q are available), plus optional operating + target
+    markers when the underlying data is non-NaN.
+    """
+    if gen_id not in gens_df.index:
+        return None
+    gen_row = gens_df.loc[gen_id]
+    has_curve_points = gen_id in curve_gen_ids
+
+    if has_curve_points:
+        points = curves_df.loc[gen_id].sort_values("p")
+        p_vals = points["p"].tolist()
+        min_q = points["min_q"].tolist()
+        max_q = points["max_q"].tolist()
+        curve_label = "Capability curve"
+        curve_points = points
+    else:
+        min_p = float(gen_row.get("min_p", 0))
+        max_p = float(gen_row.get("max_p", 0))
+        q_min = float(gen_row.get("min_q", 0))
+        q_max = float(gen_row.get("max_q", 0))
+        p_vals = [min_p, max_p]
+        min_q = [q_min, q_min]
+        max_q = [q_max, q_max]
+        curve_label = "Min-max reactive limits"
+        curve_points = None
+
+    poly_p = list(p_vals) + list(reversed(p_vals)) + [p_vals[0]]
+    poly_q = list(max_q) + list(reversed(min_q)) + [max_q[0]]
+
+    operating_point = None
+    op_p = gen_row.get("p")
+    op_q = gen_row.get("q")
+    if pd.notna(op_p) and pd.notna(op_q):
+        # pypowsybl p / q are in load convention → flip for the plot.
+        operating_point = (float(-op_p), float(-op_q))
+
+    target_point = None
+    target_p = gen_row.get("target_p")
+    target_q = gen_row.get("target_q")
+    if pd.notna(target_p) and pd.notna(target_q):
+        classified_row = (
+            classified.loc[gen_id]
+            if gen_id in classified.index
+            else pd.Series(dtype="object")
+        )
+        status = classified_row.get("status", "n/a")
+        regulation = classified_row.get("regulation", "?")
+        target_point = (
+            float(target_p), float(target_q), str(status), str(regulation),
+        )
+
+    return GeneratorPlotData(
+        polygon_p=poly_p,
+        polygon_q=poly_q,
+        curve_label=curve_label,
+        has_curve=has_curve_points,
+        operating_point=operating_point,
+        target_point=target_point,
+        curve_points=curve_points,
+    )
+
+
+@dataclass
+class ContainmentSummary:
+    """Aggregated counts + per-subset frames for the "Target P/Q
+    containment" section.
+
+    Counts use the same buckets the Streamlit summary metrics show.
+    The four ``*_df`` frames are pre-sorted (zero-MW dispatches pushed
+    to the bottom, then by descending distance) and carry the
+    ``display_columns`` slice ready to render in any tabular widget.
+    """
+    n_inside: int
+    n_warning: int
+    n_action: int
+    n_unknown: int
+    n_saturated: int
+    n_needs_lf: int
+    pq_outside: "pd.DataFrame"
+    pv_saturated: "pd.DataFrame"
+    pq_edge: "pd.DataFrame"
+    pv_near_saturation: "pd.DataFrame"
+    display_columns: list
+
+
+def build_containment_summary(
+    classified: "pd.DataFrame",
+    gens_df: "pd.DataFrame",
+) -> ContainmentSummary:
+    """Bucket ``classified`` into the four action/warning subsets the
+    summary section displays."""
+    n_inside = int((classified["status"] == "inside").sum())
+    n_warning = int(
+        classified["status"].isin(["edge", "near_saturation"]).sum()
+    )
+    n_action = int(classified["status"].isin(["outside", "saturated"]).sum())
+    n_unknown = int(classified["status"].isin(["n/a", "needs_lf"]).sum())
+    n_saturated = int((classified["status"] == "saturated").sum())
+    n_needs_lf = int((classified["status"] == "needs_lf").sum())
+
+    issues = classified[
+        classified["status"].isin(
+            ["outside", "saturated", "edge", "near_saturation"]
+        )
+    ]
+
+    extra = [c for c in ("voltage_level_id", "nominal_v", "country")
+             if c in gens_df.columns]
+    gen_attrs = [c for c in (
+        "regulated_element_id", "connected",
+        "step_up_transformer_id", "step_up_transformer_connected",
+    ) if c in gens_df.columns]
+    v_attrs = [c for c in ("target_v", "v_bus", "v_target_gap")
+               if c in gens_df.columns]
+    join_cols = extra + gen_attrs + v_attrs
+    if join_cols and not issues.empty:
+        issues = issues.join(gens_df[join_cols], how="left")
+
+    display_columns = extra + [
+        "status", "regulation", "lf_action", "distance", "violation",
+    ] + gen_attrs + [
+        "target_p", "target_q",
+    ] + v_attrs + [
+        "p_lo", "p_hi", "min_q_at_target_p", "max_q_at_target_p",
+    ]
+
+    def _subset(status_val: str, regulation_val: str) -> "pd.DataFrame":
+        sub = issues[
+            (issues["status"] == status_val)
+            & (issues["regulation"] == regulation_val)
+        ]
+        if sub.empty:
+            return sub
+        is_zero_p = (sub["target_p"] == 0).astype(int)
+        sorted_sub = (
+            sub.assign(_zero_p=is_zero_p)
+            .sort_values(["_zero_p", "distance"], ascending=[True, False])
+            .drop(columns="_zero_p")
+        )
+        # Restrict to display columns that actually exist.
+        cols_present = [c for c in display_columns if c in sorted_sub.columns]
+        return sorted_sub[cols_present]
+
+    return ContainmentSummary(
+        n_inside=n_inside,
+        n_warning=n_warning,
+        n_action=n_action,
+        n_unknown=n_unknown,
+        n_saturated=n_saturated,
+        n_needs_lf=n_needs_lf,
+        pq_outside=_subset("outside", "PQ"),
+        pv_saturated=_subset("saturated", "PV"),
+        pq_edge=_subset("edge", "PQ"),
+        pv_near_saturation=_subset("near_saturation", "PV"),
+        display_columns=display_columns,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Legacy aliases — existing tests / streamlit_tab consume the underscored
 # names. Keep them re-exported so the rename can land without breakage.
 # ---------------------------------------------------------------------------

@@ -1025,3 +1025,31 @@ def test_map_substation_click_routes_to_sld_tab_and_selected_vl():
     assert "vlIds" in handler_src
     assert "tabs.set_value(sld_tab)" in handler_src
     assert "_state.set_selected_vl(vl_ids[0])" in handler_src
+
+
+def test_reactive_curves_tab_registered_in_main_page():
+    """``Reactive Capability Curves`` must be a top-level tab + its
+    refresh closure must be wired into the page-wide listeners (network
+    swap, VL change, LF completion)."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert 'ui.tab("Reactive Capability Curves")' in src
+    assert "refresh_reactive_curves = _build_reactive_curves()" in src
+    # The refresh closure must fire on the same hooks as the other
+    # data-driven tabs.
+    assert "refresh_reactive_curves()" in src
+
+
+def test_reactive_curves_builder_uses_shared_view_model():
+    """The NiceGUI builder must compose the shared view model + plot
+    helpers — that's how PySide6 + Streamlit stay in sync."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_reactive_curves)
+    assert "build_reactive_curves_view_model" in src
+    assert "build_generator_plot_data" in src
+    assert "build_containment_summary" in src
+    assert "STATUS_DIAMOND_COLOR" in src

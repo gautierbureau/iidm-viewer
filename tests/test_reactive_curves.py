@@ -371,3 +371,100 @@ def test_reactive_curves_tab_module_lives_in_a_separate_file():
     # The old import path must be gone — otherwise we'd re-couple the
     # shared module to Streamlit through a transitive import.
     assert "from iidm_viewer.reactive_curves import render_reactive_curves" not in app_src
+
+
+# ---------------------------------------------------------------------------
+# View model composer + plot data + containment summary (against IEEE14)
+# ---------------------------------------------------------------------------
+def test_build_view_model_returns_classified_gens_against_ieee14(xiidm_upload):
+    """End-to-end smoke against IEEE14: the composer must return a
+    populated view model with classified statuses + a PV gen list."""
+    from iidm_viewer.reactive_curves import (
+        ReactiveCurvesViewModel,
+        build_reactive_curves_view_model,
+    )
+
+    net = load_network(xiidm_upload)
+    vm = build_reactive_curves_view_model(net)
+    assert isinstance(vm, ReactiveCurvesViewModel)
+    assert not vm.gens_df.empty
+    assert "status" in vm.classified.columns
+    assert "regulation" in vm.classified.columns
+    # The IEEE14 generators all carry a PV regulation flag — confirm the
+    # composer surfaces them in ``pv_gen_ids`` for sensitivity warming.
+    assert set(vm.pv_gen_ids).issubset(set(vm.gens_df.index))
+
+
+def test_build_view_model_returns_none_when_no_eligible_gens():
+    """An empty network has no generators → composer must return ``None``
+    so the host renders a placeholder instead of an exception."""
+    import pypowsybl.network as pn
+
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.reactive_curves import build_reactive_curves_view_model
+
+    net = NetworkProxy(run(pn.create_empty))
+    assert build_reactive_curves_view_model(net) is None
+
+
+def test_build_generator_plot_data_for_curve_gen(xiidm_upload):
+    """A gen with a real capability curve yields a closed polygon, a
+    curve label, and a non-None ``curve_points`` frame."""
+    from iidm_viewer.reactive_curves import (
+        build_generator_plot_data,
+        build_reactive_curves_view_model,
+    )
+
+    net = load_network(xiidm_upload)
+    vm = build_reactive_curves_view_model(net)
+    curve_gens = [g for g in vm.gens_df.index if g in vm.curve_gen_ids]
+    assert curve_gens, "fixture should have at least one curve gen"
+    gid = curve_gens[0]
+    pd_obj = build_generator_plot_data(
+        gid, vm.gens_df, vm.curves_df, vm.classified, vm.curve_gen_ids,
+    )
+    assert pd_obj is not None
+    assert pd_obj.has_curve is True
+    assert pd_obj.curve_label == "Capability curve"
+    assert pd_obj.curve_points is not None and not pd_obj.curve_points.empty
+    # Closed polygon: vertex count should be 2 * N + 1 (top + bottom + close).
+    assert len(pd_obj.polygon_p) == len(pd_obj.polygon_q)
+    assert len(pd_obj.polygon_p) >= 5
+
+
+def test_build_generator_plot_data_returns_none_for_unknown_gen(xiidm_upload):
+    from iidm_viewer.reactive_curves import (
+        build_generator_plot_data,
+        build_reactive_curves_view_model,
+    )
+
+    net = load_network(xiidm_upload)
+    vm = build_reactive_curves_view_model(net)
+    assert build_generator_plot_data(
+        "GHOST-GEN", vm.gens_df, vm.curves_df, vm.classified, vm.curve_gen_ids,
+    ) is None
+
+
+def test_build_containment_summary_buckets_match_classified(xiidm_upload):
+    """The summary must agree with the underlying ``classified.status``
+    column on the four action / warning / inside / unknown buckets."""
+    from iidm_viewer.reactive_curves import (
+        build_containment_summary,
+        build_reactive_curves_view_model,
+    )
+
+    net = load_network(xiidm_upload)
+    vm = build_reactive_curves_view_model(net)
+    summary = build_containment_summary(vm.classified, vm.gens_df)
+    total = (
+        summary.n_inside + summary.n_warning
+        + summary.n_action + summary.n_unknown
+    )
+    assert total == len(vm.classified)
+    # The four subset frames cover the same row count as the action +
+    # warning bucket on the summary itself.
+    subsets = (
+        summary.pq_outside, summary.pv_saturated,
+        summary.pq_edge, summary.pv_near_saturation,
+    )
+    assert sum(len(s) for s in subsets) == summary.n_action + summary.n_warning
