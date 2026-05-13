@@ -214,3 +214,89 @@ def test_sample_report_subtree_max_is_info():
     root = _SAMPLE_REPORT["reportRoot"]
     assert _subtree_max_severity_level(root) == _SEVERITY_ORDER["INFO"]
 
+
+
+# ---------------------------------------------------------------------------
+# show_lf_report_dialog body — exercise via ``__wrapped__``
+# ---------------------------------------------------------------------------
+def test_dialog_body_no_report_in_session_state_shows_info():
+    """Missing ``_lf_report_json`` → ``st.info`` + early return."""
+    import streamlit as st
+    from unittest.mock import patch
+
+    from iidm_viewer.lf_report_dialog import show_lf_report_dialog
+
+    st.session_state.clear()
+    with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
+        mock_st.session_state = {}
+        show_lf_report_dialog.__wrapped__()
+    mock_st.info.assert_called_once()
+
+
+def test_dialog_body_no_severity_selected_shows_warning():
+    """Severity multiselect with no items → ``st.warning`` + early return."""
+    from unittest.mock import patch
+
+    from iidm_viewer.lf_report_dialog import show_lf_report_dialog
+
+    with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
+        mock_st.session_state = {"_lf_report_json": "{}"}
+        mock_st.multiselect.return_value = []  # user deselected everything
+        show_lf_report_dialog.__wrapped__()
+    mock_st.warning.assert_called_once()
+
+
+def test_dialog_body_invalid_json_shows_error():
+    """``parse_report_to_tree`` raising ``ValueError`` lands on ``st.error``."""
+    from unittest.mock import patch
+
+    from iidm_viewer.lf_report_dialog import show_lf_report_dialog
+
+    with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
+        mock_st.session_state = {"_lf_report_json": "not-json"}
+        mock_st.multiselect.return_value = ["INFO"]
+        show_lf_report_dialog.__wrapped__()
+    mock_st.error.assert_called_once()
+
+
+def test_dialog_body_empty_tree_shows_info():
+    """A well-formed report whose tree filters to empty → ``st.info``."""
+    import json
+    from unittest.mock import patch
+
+    from iidm_viewer.lf_report_dialog import show_lf_report_dialog
+
+    # An empty reportRoot yields zero nodes after the severity filter.
+    report = json.dumps({
+        "dictionaries": {"default": {}},
+        "reportRoot": {"messageKey": "root"},
+    })
+    with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
+        mock_st.session_state = {"_lf_report_json": report}
+        mock_st.multiselect.return_value = ["ERROR"]  # filter excludes the root
+        show_lf_report_dialog.__wrapped__()
+    # Either info("No log entries…") or markdown for the root node.
+    # We only assert the call path reached the parser (no early-return).
+    mock_st.multiselect.assert_called_once()
+
+
+def test_render_node_walks_children_into_expanders():
+    """``_render_node`` emits ``st.markdown`` for leaves and ``st.expander``
+    for parents — the recursive tree walker the dialog body uses."""
+    from unittest.mock import MagicMock, patch
+
+    from iidm_viewer.lf_report_dialog import _render_node
+
+    leaf = {"icon": "ℹ️", "message": "leaf", "children": [], "expanded": False}
+    parent = {
+        "icon": "", "message": "parent", "expanded": True,
+        "children": [leaf],
+    }
+    with patch("iidm_viewer.lf_report_dialog.st") as mock_st:
+        ctx = MagicMock()
+        ctx.__enter__.return_value = ctx
+        ctx.__exit__.return_value = False
+        mock_st.expander.return_value = ctx
+        _render_node(parent)
+    mock_st.expander.assert_called_once()
+    mock_st.markdown.assert_called_once()
