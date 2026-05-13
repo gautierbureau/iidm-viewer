@@ -97,7 +97,9 @@ def load_network(
     st.session_state.pop("va_nom_select", None)
     for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_") or k.startswith("_export_cache_")]:
         del st.session_state[k]
-    script_recorder.record_load_network(uploaded_file.name, params, pp_list)
+    script_recorder.record_load_network(
+        uploaded_file.name, parameters or {}, post_processors or [],
+    )
     return network
 
 
@@ -124,7 +126,7 @@ def create_empty_network(network_id: str = "network"):
     st.session_state.pop("_export_ext", None)
     for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_") or k.startswith("_export_cache_")]:
         del st.session_state[k]
-    script_recorder.record_create_empty(nid)
+    script_recorder.record_create_empty(network_id)
     return network
 
 
@@ -415,12 +417,15 @@ from iidm_viewer.component_creation import (  # noqa: E402, F401  (re-exported)
 
 
 def create_container(network, component: str, fields: dict):
-    """Streamlit wrapper around the shared dispatcher; adds cache invalidation."""
+    """Streamlit wrapper around the shared dispatcher; adds cache
+    invalidation + Session Script recording."""
     from iidm_viewer.component_creation import create_container as _shared
     _shared(network, component, fields)
     invalidate_on_topology_change(affects_geography=True)
     script_recorder.record_create_container(
-        component, spec["create_function"], clean
+        component,
+        CREATABLE_CONTAINERS[component]["create_function"],
+        fields,
     )
 
 
@@ -467,12 +472,16 @@ from iidm_viewer.component_creation import (
 def create_tap_changer(
     network, kind: str, transformer_id: str, main_fields: dict, steps: list[dict]
 ):
-    from iidm_viewer.component_creation import create_tap_changer as _shared
+    from iidm_viewer.component_creation import (
+        CREATABLE_TAP_CHANGERS,
+        create_tap_changer as _shared,
+    )
     _shared(network, kind, transformer_id, main_fields, steps)
     invalidate_on_topology_change(affects_geography=True)
+    spec = CREATABLE_TAP_CHANGERS[kind]
     script_recorder.record_create_tap_changer(
         kind,
-        method_name,
+        spec["create_method"],
         transformer_id,
         main_fields,
         spec["step_columns"],
@@ -596,10 +605,19 @@ from iidm_viewer.extension_creation import (  # noqa: E402, F401  (re-exported)
 
 
 def create_extension(network, extension_name: str, target_id: str, fields: dict):
-    from iidm_viewer.extension_creation import create_extension as _shared
+    from iidm_viewer.extension_creation import (
+        CREATABLE_EXTENSIONS,
+        create_extension as _shared,
+    )
     _shared(network, extension_name, target_id, fields)
     invalidate_on_topology_change()
-    script_recorder.record_create_extension(extension_name, target_id, row, index_col)
+    # The shared dispatcher trims + coerces ``fields`` internally before
+    # calling pypowsybl; the recording just needs the user-supplied
+    # ``fields`` and the schema's index column.
+    index_col = CREATABLE_EXTENSIONS[extension_name]["index"]
+    script_recorder.record_create_extension(
+        extension_name, target_id, fields, index_col,
+    )
 
 
 # --- Secondary voltage control (network-level, two dataframes) ---
