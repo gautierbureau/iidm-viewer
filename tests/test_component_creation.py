@@ -1,6 +1,7 @@
 """Tests for the framework-agnostic ``iidm_viewer.component_creation`` module."""
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from iidm_viewer.component_creation import (
@@ -229,6 +230,42 @@ def test_create_load_end_to_end(node_breaker_network):
 def test_create_rejects_unknown_component(node_breaker_network):
     with pytest.raises(ValueError, match="not creatable"):
         create_component_bay(node_breaker_network, "Mystery", {"id": "X"})
+
+
+def test_create_generator_with_rated_s_zero_treats_as_unset(node_breaker_network):
+    """Regression for "create generator fails with invalid value for
+    rated_s but it is an optional value".
+
+    The form's ``rated_s`` field is optional and defaults to ``0.0``
+    with the explicit label "0 = unset". pypowsybl rejects literal
+    ``rated_s = 0.0`` with "Invalid value 0.0 for rated_s", so the
+    shared dispatcher must honor the sentinel and drop the column
+    before calling pypowsybl. This is the one test that exercises the
+    contract — Qt / NiceGUI both go through the same dispatcher.
+    """
+    vls = list_node_breaker_voltage_levels(node_breaker_network)
+    vl_id = str(vls["id"].iloc[0])
+    bbs = list_busbar_sections(node_breaker_network, vl_id)
+    assert bbs, "need at least one busbar section"
+    new_id = "TEST_GEN_RATED_S_UNSET"
+    fields = {
+        "id": new_id, "energy_source": "OTHER",
+        "min_p": 0.0, "max_p": 100.0,
+        "target_p": 50.0, "voltage_regulator_on": False,
+        "target_v": 0.0, "target_q": 0.0,
+        "rated_s": 0.0,
+        "position_order": 998, "direction": "BOTTOM",
+        "bus_or_busbar_section_id": bbs[0],
+    }
+    # Without the sentinel-honoring branch in ``_dispatch_bay_create``
+    # this raises ``Invalid value 0.0 for rated_s``.
+    create_component_bay(node_breaker_network, "Generators", fields)
+
+    gens = node_breaker_network.get_generators()
+    assert new_id in gens.index
+    # pypowsybl reports unset rated_s as NaN — never as 0.0.
+    new_row = gens.loc[new_id]
+    assert pd.isna(new_row["rated_s"])
 
 
 def test_shunt_linear_fields_constant():
