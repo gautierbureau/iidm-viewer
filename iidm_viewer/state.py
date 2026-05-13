@@ -1201,13 +1201,17 @@ def run_short_circuit_analysis(network, faults: list[dict], sc_params: dict | No
 def compute_target_v_q_sensitivities(network, gen_ids):
     """Return ``{gen_id: (dq_dv, q_ref) | None}`` for ``gen_ids``.
 
-    Missing entries are computed in one batched AC sensitivity analysis on
-    the powsybl worker thread (one LF factorization shared across every
-    generator, plus one RHS solve per gen). Results are cached per
-    ``(net_key, lf_gen, gen_id)`` in ``st.session_state["_dq_dv_cache"]``.
-    The intended use is to call this once per rerun with every displayed
-    PV generator so that selectbox navigation through them is instant.
+    Thin Streamlit cache around
+    :func:`iidm_viewer.reactive_curves.compute_target_v_q_sensitivities`
+    (which owns the worker-routed sensitivity call). Results are cached
+    per ``(net_id, lf_gen, gen_id)`` in
+    ``st.session_state["_dq_dv_cache"]`` so a selectbox-only rerun
+    through PV generators reuses the previous factorization.
     """
+    from iidm_viewer.reactive_curves import (
+        compute_target_v_q_sensitivities as _shared_compute,
+    )
+
     cache = st.session_state.setdefault("_dq_dv_cache", {})
     raw = object.__getattribute__(network, "_obj")
     net_id = id(raw)
@@ -1215,43 +1219,9 @@ def compute_target_v_q_sensitivities(network, gen_ids):
 
     gen_ids = list(gen_ids)
     missing = [g for g in gen_ids if (net_id, lf_gen, g) not in cache]
-
     if missing:
-        def _run_sensitivity():
-            try:
-                import pypowsybl.sensitivity as sens
-                from pypowsybl.sensitivity import (
-                    ContingencyContextType,
-                    SensitivityFunctionType,
-                    SensitivityVariableType,
-                )
-                analysis = sens.create_ac_analysis()
-                analysis.add_factor_matrix(
-                    missing, missing, [],
-                    ContingencyContextType.NONE,
-                    SensitivityFunctionType.BUS_REACTIVE_POWER,
-                    SensitivityVariableType.BUS_TARGET_VOLTAGE,
-                )
-                result = analysis.run(raw)
-                sens_matrix = result.get_sensitivity_matrix()
-                ref_matrix = result.get_reference_matrix()
-                out = {}
-                for gid in missing:
-                    try:
-                        out[gid] = (
-                            float(sens_matrix.loc[gid, gid]),
-                            float(ref_matrix.loc["reference_values", gid]),
-                        )
-                    except Exception:
-                        out[gid] = None
-                return out
-            except Exception:
-                return {gid: None for gid in missing}
-
-        new_results = run(_run_sensitivity)
-        for gid, val in new_results.items():
+        for gid, val in _shared_compute(network, missing).items():
             cache[(net_id, lf_gen, gid)] = val
-
     return {g: cache[(net_id, lf_gen, g)] for g in gen_ids}
 
 

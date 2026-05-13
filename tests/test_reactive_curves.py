@@ -310,3 +310,64 @@ def test_classify_distance_diagonal_corner():
     expected = (10.0 ** 2 + 10.0 ** 2) ** 0.5
     assert abs(out.loc["G", "distance"] - expected) < 1e-9
     assert out.loc["G", "violation"] == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Shared/Streamlit split — guards the Phase-1 refactor so future work
+# doesn't accidentally re-couple the shared module to Streamlit.
+# ---------------------------------------------------------------------------
+def test_reactive_curves_shared_module_has_no_streamlit_dependency():
+    """``iidm_viewer.reactive_curves`` is the framework-agnostic core
+    consumed by Streamlit (via ``reactive_curves_tab``), PySide6 and
+    NiceGUI. The shared module must not import streamlit or plotly —
+    that's the contract that lets the non-Streamlit hosts boot.
+    """
+    import inspect
+    import iidm_viewer.reactive_curves as rc
+
+    src = inspect.getsource(rc)
+    assert "import streamlit" not in src
+    assert "from streamlit" not in src
+    assert "import plotly" not in src
+    assert "from plotly" not in src
+
+
+def test_reactive_curves_shared_module_exposes_public_api():
+    """The non-underscored public API consumed by hosts."""
+    from iidm_viewer import reactive_curves as rc
+
+    expected_callables = (
+        "classify_targets",
+        "polygon_vertices",
+        "signed_distance_to_polygon",
+        "vl_to_step_up_transformer_table",
+        "add_bus_voltage_columns",
+        "augment_gens_with_step_up_transformer",
+        "augment_gens_with_bus_voltage",
+        "compute_target_v_q_sensitivities",
+        "compute_target_v_q_sensitivity",
+    )
+    for name in expected_callables:
+        assert callable(getattr(rc, name, None)), f"missing public callable: {name}"
+    # Tunables live here so every host renders the same colors / band.
+    assert isinstance(rc.STATUS_DIAMOND_COLOR, dict)
+    assert "inside" in rc.STATUS_DIAMOND_COLOR
+    assert isinstance(rc.TARGET_TOLERANCE, float)
+    assert isinstance(rc.NEAR_SATURATION_THRESHOLD, float)
+
+
+def test_reactive_curves_tab_module_lives_in_a_separate_file():
+    """The Streamlit-only UI must live in ``reactive_curves_tab`` so
+    PySide6 / NiceGUI can import the shared core without dragging
+    streamlit / plotly in. Pin both: the tab module exposes
+    ``render_reactive_curves`` and ``app.py`` imports from there."""
+    import inspect
+
+    from iidm_viewer import app, reactive_curves_tab
+
+    assert hasattr(reactive_curves_tab, "render_reactive_curves")
+    app_src = inspect.getsource(app)
+    assert "from iidm_viewer.reactive_curves_tab import render_reactive_curves" in app_src
+    # The old import path must be gone — otherwise we'd re-couple the
+    # shared module to Streamlit through a transitive import.
+    assert "from iidm_viewer.reactive_curves import render_reactive_curves" not in app_src
