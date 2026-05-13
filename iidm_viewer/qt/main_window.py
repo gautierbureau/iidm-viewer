@@ -36,6 +36,7 @@ from iidm_viewer.network_loader import (
     list_voltage_levels_for_selector,
 )
 from iidm_viewer.qt.data_explorer_tab import DataExplorerTab
+from iidm_viewer.qt.extensions_explorer_tab import ExtensionsExplorerTab
 from iidm_viewer.qt.map_tab import MapTab
 from iidm_viewer.qt.nad_tab import NadTab
 from iidm_viewer.qt.sld_tab import SldTab
@@ -254,12 +255,14 @@ class MainWindow(QMainWindow):
         self.nad_tab = NadTab()
         self.sld_tab = SldTab()
         self.data_tab = DataExplorerTab()
+        self.extensions_tab = ExtensionsExplorerTab()
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.map_tab, "Network Map")
         self.tabs.addTab(self.nad_tab, "Network Area Diagram")
         self.tabs.addTab(self.sld_tab, "Single Line Diagram")
         self.tabs.addTab(self.data_tab, "Data Explorer Components")
+        self.tabs.addTab(self.extensions_tab, "Data Explorer Extensions")
 
         # The Data Explorer reports cell + bulk edits to the AppState's
         # ChangeLog so the panel below shows a unified history that
@@ -567,6 +570,9 @@ class MainWindow(QMainWindow):
         # Refresh the Data Explorer in case the user is looking at
         # something the LF touched (lines/transformers with new flows).
         self.data_tab.set_network(self.state.network)
+        # Extensions tab also caches per-network data — refresh it so
+        # LF-touched extensions (e.g. branch flows) reflect the run.
+        self.extensions_tab.set_network(self.state.network)
 
     # ------------------------------------------------------------------
     # State → UI plumbing
@@ -592,6 +598,7 @@ class MainWindow(QMainWindow):
         self.nad_tab.set_network(network)
         self.sld_tab.set_network(network)
         self.data_tab.set_network(network)
+        self.extensions_tab.set_network(network)
         self.tabs.setCurrentWidget(self.map_tab)
 
     def _on_sidebar_vl_selected(self, vl_id: str) -> None:
