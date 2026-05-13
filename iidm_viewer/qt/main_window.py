@@ -39,6 +39,7 @@ from iidm_viewer.qt.data_explorer_tab import DataExplorerTab
 from iidm_viewer.qt.extensions_explorer_tab import ExtensionsExplorerTab
 from iidm_viewer.qt.map_tab import MapTab
 from iidm_viewer.qt.nad_tab import NadTab
+from iidm_viewer.qt.operational_limits_tab import OperationalLimitsTab
 from iidm_viewer.qt.reactive_curves_tab import ReactiveCurvesTab
 from iidm_viewer.qt.sld_tab import SldTab
 from iidm_viewer.qt.state import AppState
@@ -270,6 +271,7 @@ class MainWindow(QMainWindow):
         self.data_tab = DataExplorerTab()
         self.extensions_tab = ExtensionsExplorerTab()
         self.reactive_curves_tab = ReactiveCurvesTab()
+        self.operational_limits_tab = OperationalLimitsTab()
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.map_tab, "Network Map")
@@ -278,6 +280,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.data_tab, "Data Explorer Components")
         self.tabs.addTab(self.extensions_tab, "Data Explorer Extensions")
         self.tabs.addTab(self.reactive_curves_tab, "Reactive Capability Curves")
+        self.tabs.addTab(self.operational_limits_tab, "Operational Limits")
 
         # The Data Explorer reports cell + bulk edits to the AppState's
         # ChangeLog so the panel below shows a unified history that
@@ -603,6 +606,9 @@ class MainWindow(QMainWindow):
         # from ``needs_lf`` to an actionable status; re-run the
         # classification.
         self.reactive_curves_tab.refresh()
+        # Operational Limits: post-LF branch I + p1/p2 change → loading
+        # table + losses metric + chart need a redraw.
+        self.operational_limits_tab.refresh()
 
     # ------------------------------------------------------------------
     # State → UI plumbing
@@ -630,6 +636,7 @@ class MainWindow(QMainWindow):
         self.data_tab.set_network(network)
         self.extensions_tab.set_network(network)
         self.reactive_curves_tab.set_network(network)
+        self.operational_limits_tab.set_network(network)
         self.tabs.setCurrentWidget(self.map_tab)
 
     def _on_sidebar_vl_selected(self, vl_id: str) -> None:

@@ -1116,3 +1116,27 @@ def test_nicegui_state_records_load_and_create_empty_and_loadflow():
         assert seeded[0]["network_id"] == "blank"
     finally:
         script_recorder.reset_store()
+
+
+def test_operational_limits_tab_registered_in_main_page():
+    """``Operational Limits`` must be a top-level tab + its refresh
+    closure must be wired into the page-wide listeners (network swap +
+    load-flow completion)."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert 'ui.tab("Operational Limits")' in src
+    assert "refresh_operational_limits = _build_operational_limits()" in src
+    assert "refresh_operational_limits()" in src
+
+
+def test_operational_limits_builder_uses_shared_view_model():
+    """The NiceGUI builder must compose the shared view model + chart
+    builder so PySide6 + Streamlit stay in sync."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_operational_limits)
+    assert "build_operational_limits_view_model" in src
+    assert "build_element_chart" in src

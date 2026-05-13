@@ -4423,6 +4423,254 @@ def _build_reactive_curves():
     return refresh
 
 
+def _build_operational_limits():
+    """Materialise the "Operational Limits" tab.
+
+    Composes the shared :class:`~iidm_viewer.operational_limits.OperationalLimitsViewModel`
+    + :func:`build_element_chart` against NiceGUI widgets:
+
+    * a "Most loaded" section with a threshold slider, an ag-Grid
+      table sorted by descending loading %,
+    * a per-element detail view: ID-substring filter, a generator-
+      style ``ui.select``, a metric label for losses, the shared
+      Plotly chart, and a raw limits table for the selected element.
+
+    Returns a closure the page-wide listeners call when the network or
+    load-flow state changes.
+    """
+    import pandas as pd
+    import plotly.graph_objects as go
+
+    from iidm_viewer.operational_limits import (
+        build_element_chart,
+        build_operational_limits_view_model,
+    )
+
+    state: dict = {
+        "vm": None, "element_id": None,
+        "threshold": 50, "id_filter": "",
+    }
+
+    placeholder = ui.label(
+        "Load a network to see operational limits."
+    ).classes("text-caption q-pa-md")
+
+    # --- Most loaded section --------------------------------------------
+    most_loaded_group = ui.column().classes("w-full q-pa-sm")
+    with most_loaded_group:
+        ui.label("Most loaded elements").classes("text-h6")
+        with ui.row().classes("items-center w-full"):
+            ui.label("Show elements loaded above")
+            threshold_slider = ui.slider(
+                min=0, max=100, value=50, step=1,
+            ).props("label-always").classes("flex-grow")
+            ui.label("%")
+        loading_caption = ui.label("").classes("text-caption q-mb-sm")
+        loading_placeholder = ui.label(
+            "No loading data available (run a load flow first)."
+        ).classes("text-caption text-orange")
+        loading_grid = ui.aggrid({
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }).classes("w-full").style("height: 280px")
+
+    # --- Element detail section ----------------------------------------
+    element_group = ui.column().classes("w-full q-pa-sm")
+    with element_group:
+        ui.label("Element detail").classes("text-h6")
+        with ui.row().classes("items-center w-full"):
+            id_filter_input = ui.input(
+                placeholder="Filter by element ID (substring, case-insensitive)",
+            ).props("dense outlined clearable").classes("w-96")
+            element_count_lbl = ui.label("").classes("text-caption q-ml-md")
+        with ui.row().classes("items-center w-full"):
+            ui.label("Element:")
+            element_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-72")
+        losses_lbl = ui.label("").classes("q-pa-sm")
+        element_plot = ui.plotly(go.Figure()).classes("w-full") \
+            .style("height: 450px")
+        ui.label("Limits for the selected element:") \
+            .classes("text-caption q-mt-sm")
+        element_limits_grid = ui.aggrid({
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }).classes("w-full").style("height: 220px")
+
+    def _set_data_visible(visible: bool) -> None:
+        most_loaded_group.visible = visible
+        element_group.visible = visible
+        placeholder.visible = not visible
+
+    def _render_loading_table() -> None:
+        vm = state["vm"]
+        if vm is None:
+            return
+        threshold = int(state["threshold"])
+        loading = vm.loading_df
+        if loading is None or loading.empty:
+            loading_placeholder.visible = True
+            loading_grid.options.update({"columnDefs": [], "rowData": []})
+            loading_grid.update()
+            loading_caption.set_text("")
+            return
+        loading_placeholder.visible = False
+        above = loading[loading["loading_pct"] >= threshold].copy()
+        if above.empty:
+            loading_caption.set_text(f"No elements loaded above {threshold}%.")
+            loading_grid.options.update({"columnDefs": [], "rowData": []})
+            loading_grid.update()
+            return
+        loading_caption.set_text(f"{len(above)} elements above {threshold}%")
+        show = above[["element_id", "element_name", "element_type", "side",
+                      "current", "permanent_limit", "loading_pct", "losses"]].copy()
+        show.columns = ["Element", "Name", "Type", "Worst side",
+                        "I (A)", "Permanent limit (A)", "Loading (%)",
+                        "Losses (MW)"]
+        show["Worst side"] = show["Worst side"].map(
+            {"ONE": "Side 1", "TWO": "Side 2"})
+        show["I (A)"] = show["I (A)"].round(1)
+        show["Loading (%)"] = show["Loading (%)"].round(1)
+        show["Losses (MW)"] = show["Losses (MW)"].round(3)
+        # Color-code Loading (%) ≥ 80 (orange) / ≥ 100 (red) via an
+        # ag-Grid cellClassRules expression.
+        column_defs = []
+        for col in show.columns:
+            defn: dict = {"headerName": col, "field": col}
+            if col == "Loading (%)":
+                defn["cellClassRules"] = {
+                    "bg-red-3 text-white": "x >= 100",
+                    "bg-orange-3 text-white": "x >= 80 && x < 100",
+                }
+            column_defs.append(defn)
+        loading_grid.options.update({
+            "columnDefs": column_defs,
+            "rowData": show.to_dict("records"),
+            "defaultColDef": _DEFAULT_COL_DEF,
+        })
+        loading_grid.update()
+
+    def _render_selected_element() -> None:
+        vm = state["vm"]
+        element_id = state["element_id"]
+        if vm is None or element_id is None:
+            losses_lbl.set_text("")
+            element_plot.figure = go.Figure()
+            element_plot.update()
+            element_limits_grid.options.update({"columnDefs": [], "rowData": []})
+            element_limits_grid.update()
+            return
+        elem_limits = vm.display_limits_df[
+            vm.display_limits_df["element_id"] == element_id
+        ]
+        if elem_limits.empty:
+            losses_lbl.set_text("")
+            element_plot.figure = go.Figure()
+            element_plot.update()
+            element_limits_grid.options.update({"columnDefs": [], "rowData": []})
+            element_limits_grid.update()
+            return
+        # Losses metric.
+        loss = vm.losses.get(element_id)
+        if loss is not None and pd.notna(loss):
+            losses_lbl.set_text(f"Active-power losses: {loss:.3f} MW")
+        else:
+            losses_lbl.set_text(
+                "Losses unavailable (run a load flow to compute p1 + p2)."
+            )
+        # Plotly chart.
+        fig = build_element_chart(
+            element_id, elem_limits, vm.flows.get(element_id),
+        )
+        element_plot.figure = fig
+        element_plot.update()
+        # Raw limits table.
+        cols = [c for c in
+                ("side", "name", "acceptable_duration", "value", "element_type")
+                if c in elem_limits.columns]
+        show = elem_limits[cols].sort_values(
+            ["side", "acceptable_duration"]
+            if "acceptable_duration" in cols else cols,
+        )
+        element_limits_grid.options.update({
+            "columnDefs": [{"field": c, "headerName": c} for c in show.columns],
+            "rowData": show.to_dict("records"),
+            "defaultColDef": _DEFAULT_COL_DEF,
+        })
+        element_limits_grid.update()
+
+    def _refresh_element_choices() -> None:
+        vm = state["vm"]
+        if vm is None:
+            element_select.options = []
+            element_select.update()
+            element_count_lbl.set_text("")
+            return
+        candidates = list(vm.element_ids)
+        id_filter = (state["id_filter"] or "").strip()
+        if id_filter:
+            f = id_filter.lower()
+            candidates = [e for e in candidates if f in str(e).lower()]
+        element_count_lbl.set_text(f"{len(candidates)} elements with limits")
+        element_select.options = candidates
+        current = state["element_id"]
+        if current not in candidates:
+            current = candidates[0] if candidates else None
+        state["element_id"] = current
+        element_select.value = current
+        element_select.update()
+
+    def _on_threshold_changed(_e=None) -> None:
+        try:
+            state["threshold"] = int(threshold_slider.value or 0)
+        except (TypeError, ValueError):
+            return
+        _render_loading_table()
+
+    threshold_slider.on("update:model-value", _on_threshold_changed)
+
+    def _on_id_filter_changed(_e=None) -> None:
+        state["id_filter"] = id_filter_input.value or ""
+        _refresh_element_choices()
+        _render_selected_element()
+
+    id_filter_input.on("update:model-value", _on_id_filter_changed)
+
+    def _on_element_changed(_e=None) -> None:
+        state["element_id"] = element_select.value
+        _render_selected_element()
+
+    element_select.on("update:model-value", _on_element_changed)
+
+    def refresh() -> None:
+        if _state.network is None:
+            state["vm"] = None
+            state["element_id"] = None
+            placeholder.set_text("Load a network to see operational limits.")
+            _set_data_visible(False)
+            return
+        try:
+            vm = build_operational_limits_view_model(_state.network)
+        except Exception as exc:
+            placeholder.set_text(f"Operational limits failed: {exc}")
+            state["vm"] = None
+            _set_data_visible(False)
+            return
+        if vm is None:
+            placeholder.set_text("No operational limits found in this network.")
+            state["vm"] = None
+            _set_data_visible(False)
+            return
+        state["vm"] = vm
+        _set_data_visible(True)
+        _render_loading_table()
+        _refresh_element_choices()
+        _render_selected_element()
+
+    refresh()
+    return refresh
+
+
 def _cast_value_for_col(series, raw):
     """Best-effort cast for a user-typed cell value, matching the
     source DataFrame's column dtype."""
@@ -4698,6 +4946,7 @@ def main_page() -> None:
         data_tab = ui.tab("Data Explorer Components")
         extensions_tab = ui.tab("Data Explorer Extensions")
         reactive_curves_tab = ui.tab("Reactive Capability Curves")
+        operational_limits_tab = ui.tab("Operational Limits")
     panels = ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")
     with panels:
         with ui.tab_panel(map_tab).classes("q-pa-none w-full"):
@@ -4753,6 +5002,8 @@ def main_page() -> None:
             refresh_extensions_tab = _build_extensions_explorer()
         with ui.tab_panel(reactive_curves_tab).classes("w-full"):
             refresh_reactive_curves = _build_reactive_curves()
+        with ui.tab_panel(operational_limits_tab).classes("w-full"):
+            refresh_operational_limits = _build_operational_limits()
 
     # ------------------------------------------------------------------
     # Cross-tab navigation: substation click on map -> SLD tab on that VL.
@@ -4791,6 +5042,7 @@ def main_page() -> None:
         tabs.set_value(map_tab)
         refresh_data_grid()
         refresh_reactive_curves()
+        refresh_operational_limits()
 
     def _on_state_vl(vl_id):
         vl_lbl.set_text(f"VL: {vl_id}" if vl_id else "VL: —")
@@ -4825,6 +5077,9 @@ def main_page() -> None:
         # Post-LF the gen ``q`` column flips PV gens from ``needs_lf`` to
         # an actionable status; re-run the classification.
         refresh_reactive_curves()
+        # Post-LF the branch I and P/Q flows change → loading_pct +
+        # losses + chart need to be re-rendered.
+        refresh_operational_limits()
 
     # Listeners are registered fresh on every page connect; if a
     # previous registration is still around (browser refresh), the
