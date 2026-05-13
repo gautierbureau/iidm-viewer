@@ -920,6 +920,54 @@ def test_nad_depth_handler_reads_widget_value_not_event_value():
     assert "depth_input.value" in handler_src
 
 
+def test_clear_diagrams_blanks_caches_and_last_args():
+    """``_clear_diagrams`` wipes the diagram caches *and* replaces the
+    cached ``_last_*`` payloads with blanks. The blanks are what gets
+    resent when an iframe re-mounts after a tab switch — without them
+    the previously-rendered SVG would come back."""
+    from iidm_viewer.web import app
+
+    # Seed cache + last-args so we can prove they get wiped.
+    app._nad_cache[("VL1", 1)] = ("<svg/>", "{}")
+    app._sld_cache["VL1"] = ("<svg/>", "{}")
+    app._last_nad = {"svg": "<svg>...</svg>", "metadata": "{}", "height": 700}
+    app._last_sld = {
+        "svg": "<svg>...</svg>", "metadata": "{}",
+        "height": 700, "svgType": "voltage-level",
+    }
+
+    app._clear_diagrams()
+
+    assert app._nad_cache == {}
+    assert app._sld_cache == {}
+    assert app._last_nad == {"svg": "", "metadata": "", "height": 700}
+    assert app._last_sld == {
+        "svg": "", "metadata": "", "height": 700,
+        "svgType": "voltage-level",
+    }
+
+
+def test_on_state_network_clears_diagrams_on_swap():
+    """Regression for: "I start from an empty network after I already
+    loaded one, and the NAD / SLD are not refreshed."
+
+    When the open network is swapped, ``_on_state_network`` must call
+    ``_clear_diagrams`` *before* deciding what to do with the picker
+    so the previous network's diagrams disappear immediately — even
+    when no default VL gets picked (empty network → no
+    ``_on_state_vl`` follow-up to overwrite the SVGs).
+    """
+    import inspect
+
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    handler_idx = src.index("def _on_state_network(network):")
+    handler_end = src.index("def _on_state_vl", handler_idx)
+    handler_src = src[handler_idx:handler_end]
+    assert "_clear_diagrams()" in handler_src
+
+
 def test_map_substation_click_routes_to_sld_tab_and_selected_vl():
     """End-to-end check of the killer interaction.
 
