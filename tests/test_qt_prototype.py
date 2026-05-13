@@ -1647,6 +1647,76 @@ def test_create_extension_panel_creates_active_power_control_end_to_end(qapp):
     assert seen == [("Extension", "B1-G")]
 
 
+def test_data_explorer_refreshes_sibling_create_panels_after_container_create(qapp):
+    """Regression for "Generators panel still says no node-breaker VL"
+    after the user has just created a Substation + VL + BBS from an
+    empty network. Every create panel needs its VL / busbar / target
+    dropdown refreshed when a sibling panel reports a topology-
+    altering create."""
+    import pypowsybl.network as pn
+    from iidm_viewer.component_creation import create_container
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.data_explorer_tab import DataExplorerTab
+
+    # Empty network — no VLs / no busbars to start with.
+    network = NetworkProxy(run(pn.create_empty))
+    tab = DataExplorerTab()
+    tab.set_network(network)
+    tab._combo.setCurrentText("Generators")
+    qapp.processEvents()
+    # Initial state: no node-breaker VL → the panel shows the
+    # "(no node-breaker VLs in this network)" placeholder text.
+    # ``itemData`` returns ``None`` for the placeholder (the real VL
+    # items carry the id as userData), so the lack of data is what
+    # tests the pre-create state.
+    panel = tab._create_panel
+    assert panel._vl_combo.count() == 1
+    assert panel._vl_combo.itemData(0) is None
+    assert "no node-breaker" in panel._vl_combo.itemText(0)
+
+    # Build a node-breaker VL with one busbar section through the
+    # shared helpers (same code path the CreateContainerPanel uses).
+    create_container(network, "Substations", {"id": "S1", "country": "FR"})
+    create_container(network, "Voltage Levels", {
+        "id": "VL1", "name": "",
+        "topology_kind": "NODE_BREAKER",
+        "nominal_v": 400.0,
+        "low_voltage_limit": 0.0, "high_voltage_limit": 0.0,
+        "substation_id": "S1",
+    })
+    create_container(network, "Busbar Sections", {
+        "id": "BBS1", "name": "",
+        "voltage_level_id": "VL1",
+        "node": 0,
+    })
+
+    # Simulate the CreateContainerPanel firing its post-create signal.
+    # The fix: ``_on_component_created`` fans the network + active
+    # component out to every sibling create panel so their pickers
+    # pick up the new VL / BBS.
+    tab._create_container_panel.component_created.emit("Busbar Sections", "BBS1")
+    qapp.processEvents()
+
+    # CreateComponentPanel should now report the new node-breaker VL
+    # — that's the bug the user reported. The panel is folded by
+    # default, which means Qt auto-disables its children — so check
+    # ``itemData`` / ``itemText`` (which work regardless of enabled
+    # state) rather than ``isEnabled``.
+    vl_data = [
+        tab._create_panel._vl_combo.itemData(i)
+        for i in range(tab._create_panel._vl_combo.count())
+    ]
+    assert "VL1" in vl_data
+    # The placeholder ``itemData is None`` row must be gone now that
+    # there's a real VL to pick.
+    assert None not in vl_data
+    bbs_ids = [
+        tab._create_panel._bbs_combo.itemText(i)
+        for i in range(tab._create_panel._bbs_combo.count())
+    ]
+    assert "BBS1" in bbs_ids
+
+
 def test_main_window_carries_an_extensions_tab(qapp):
     """The PySide6 main window must surface the Extensions Explorer as
     a top-level tab — same UX as Streamlit's two data-explorer tabs."""
