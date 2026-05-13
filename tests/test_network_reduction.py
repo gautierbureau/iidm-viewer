@@ -5,7 +5,8 @@ from unittest.mock import patch
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from iidm_viewer.network_reduction import _clear_caches, _get_voltage_level_ids
+from iidm_viewer.network_reduction import _clear_caches
+from iidm_viewer.network_reduction_actions import list_voltage_level_ids
 from iidm_viewer.powsybl_worker import NetworkProxy, run
 from iidm_viewer.state import load_network
 
@@ -22,18 +23,18 @@ def _fresh_ieee14() -> NetworkProxy:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _get_voltage_level_ids
+# list_voltage_level_ids
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_get_voltage_level_ids_count(xiidm_upload):
+def testlist_voltage_level_ids_count(xiidm_upload):
     net = load_network(xiidm_upload)
-    ids = _get_voltage_level_ids(net)
+    ids = list_voltage_level_ids(net)
     assert len(ids) == 14
     assert all(isinstance(i, str) for i in ids)
 
 
-def test_get_voltage_level_ids_node_breaker(node_breaker_network):
-    ids = _get_voltage_level_ids(node_breaker_network)
+def testlist_voltage_level_ids_node_breaker(node_breaker_network):
+    ids = list_voltage_level_ids(node_breaker_network)
     assert len(ids) > 0
     assert all(isinstance(i, str) for i in ids)
 
@@ -156,12 +157,12 @@ def test_reduce_by_voltage_range_with_boundary_lines():
 
 def test_reduce_by_ids_keeps_subset():
     net = _fresh_ieee14()
-    all_ids = _get_voltage_level_ids(net)
+    all_ids = list_voltage_level_ids(net)
     keep = all_ids[:3]
 
     net.reduce_by_ids(ids=keep)
 
-    remaining = _get_voltage_level_ids(net)
+    remaining = list_voltage_level_ids(net)
     # pypowsybl keeps the requested VLs plus elements between them, so the
     # result is a superset of `keep` and at most as large as the original.
     assert set(keep).issubset(set(remaining))
@@ -171,7 +172,7 @@ def test_reduce_by_ids_keeps_subset():
 def test_reduce_by_ids_single_vl_reduces_count():
     net = _fresh_ieee14()
     original = len(net.get_voltage_levels())
-    seed = _get_voltage_level_ids(net)[0]
+    seed = list_voltage_level_ids(net)[0]
 
     net.reduce_by_ids(ids=[seed])
 
@@ -180,7 +181,7 @@ def test_reduce_by_ids_single_vl_reduces_count():
 
 def test_reduce_by_ids_with_boundary_lines():
     net = _fresh_ieee14()
-    seed = _get_voltage_level_ids(net)[0]
+    seed = list_voltage_level_ids(net)[0]
     net.reduce_by_ids(ids=[seed], with_boundary_lines=True)
     assert len(net.get_voltage_levels()) > 0
 
@@ -192,7 +193,7 @@ def test_reduce_by_ids_with_boundary_lines():
 def test_reduce_by_ids_and_depths_reduces_count():
     net = _fresh_ieee14()
     original = len(net.get_voltage_levels())
-    seed = _get_voltage_level_ids(net)[0]
+    seed = list_voltage_level_ids(net)[0]
 
     net.reduce_by_ids_and_depths(vl_depths=[(seed, 0)])
     assert len(net.get_voltage_levels()) < original
@@ -202,7 +203,7 @@ def test_reduce_by_ids_and_depths_greater_depth_keeps_more():
     """depth=2 must retain at least as many VLs as depth=0."""
     net_shallow = _fresh_ieee14()
     net_deep = _fresh_ieee14()
-    seed = _get_voltage_level_ids(net_shallow)[0]
+    seed = list_voltage_level_ids(net_shallow)[0]
 
     net_shallow.reduce_by_ids_and_depths(vl_depths=[(seed, 0)])
     net_deep.reduce_by_ids_and_depths(vl_depths=[(seed, 2)])
@@ -214,7 +215,7 @@ def test_reduce_by_ids_and_depths_multiple_seeds():
     """Providing two seed VLs keeps at least as many elements as one seed."""
     net_one = _fresh_ieee14()
     net_two = _fresh_ieee14()
-    ids = _get_voltage_level_ids(net_one)
+    ids = list_voltage_level_ids(net_one)
 
     net_one.reduce_by_ids_and_depths(vl_depths=[(ids[0], 1)])
     net_two.reduce_by_ids_and_depths(vl_depths=[(ids[0], 1), (ids[1], 1)])
@@ -224,7 +225,7 @@ def test_reduce_by_ids_and_depths_multiple_seeds():
 
 def test_reduce_by_ids_and_depths_with_boundary_lines():
     net = _fresh_ieee14()
-    seed = _get_voltage_level_ids(net)[0]
+    seed = list_voltage_level_ids(net)[0]
     net.reduce_by_ids_and_depths(vl_depths=[(seed, 1)], with_boundary_lines=True)
     assert len(net.get_voltage_levels()) > 0
 
