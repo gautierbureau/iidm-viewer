@@ -1,49 +1,62 @@
-import os
-import tempfile
+"""Framework-agnostic core for the Security Analysis tab.
 
-import streamlit as st
+This module owns the pypowsybl integration each UI host (Streamlit
+``security_analysis_tab``, PySide6, NiceGUI) composes into its own
+widget tree. No streamlit / Qt / NiceGUI imports here — the
+Streamlit-only rendering + per-session caching live in
+:mod:`iidm_viewer.security_analysis_tab`.
+
+Public API:
+
+* Vocabulary constants (``ELEMENT_TYPES``, ``AUTO_MODES``,
+  ``MANUAL_TYPES``, ``MANUAL_TYPE_IDS_KEY``, ``MANUAL_GROUPINGS``,
+  ``CTX_TYPES``, ``ACTION_TYPES``, ``CONDITION_TYPES``,
+  ``VIOLATION_TYPES``, ``SIDES``) shared across hosts.
+* :func:`get_nominal_voltages` / :func:`get_element_ids` —
+  worker-routed pypowsybl fetchers. No caching here; hosts wrap with
+  their own.
+* :func:`build_n1_contingencies` / :func:`build_n2_contingencies` —
+  contingency-list builders, lifted out of ``state.py``.
+* :func:`apply_action` — pypowsybl ``add_*_action`` dispatcher.
+* :func:`run_security_analysis` — the big AC SA runner with the
+  serialised result dict the Streamlit Results tab consumes.
+* :func:`action_summary` — pure one-line description used by every
+  host's action-list rendering.
+"""
+from __future__ import annotations
+
+from itertools import combinations
+from typing import Optional
+
 import pandas as pd
 
-from iidm_viewer.caches import (
-    _net_key as _caches_net_key,
-    _cache_key as _caches_cache_key,
-    get_vl_nominal_v,
-    get_lines_all,
-    get_2wt_all,
-    get_3wt_all,
-    get_generators_all,
-)
-from iidm_viewer.powsybl_worker import run
-from iidm_viewer.filters import (
-    FILTERS,
-    build_vl_lookup,
-    enrich_with_joins,
-    render_filters,
-)
-from iidm_viewer.state import (
-    build_n1_contingencies,
-    build_n2_contingencies,
-    run_security_analysis,
-)
+from iidm_viewer import script_recorder
+from iidm_viewer.powsybl_worker import NetworkProxy, run
 
 
-_ELEMENT_TYPES = ["Lines", "2-Winding Transformers"]
-_AUTO_MODES = ["N-1", "N-2"]
-_MANUAL_TYPES = [
+# ---------------------------------------------------------------------------
+# Vocabulary constants
+# ---------------------------------------------------------------------------
+ELEMENT_TYPES: list[str] = ["Lines", "2-Winding Transformers"]
+AUTO_MODES: list[str] = ["N-1", "N-2"]
+MANUAL_TYPES: list[str] = [
     "Lines",
     "2-Winding Transformers",
     "3-Winding Transformers",
     "Generators",
 ]
-_MANUAL_TYPE_IDS_KEY = {
+MANUAL_TYPE_IDS_KEY: dict[str, str] = {
     "Lines": "lines",
     "2-Winding Transformers": "two_windings_transformers",
     "3-Winding Transformers": "three_windings_transformers",
     "Generators": "generators",
 }
-_MANUAL_GROUPINGS = ["One contingency per element (N-1)", "Single grouped contingency (N-k)"]
-_CTX_TYPES = ["ALL", "NONE", "SPECIFIC"]
-_ACTION_TYPES = [
+MANUAL_GROUPINGS: list[str] = [
+    "One contingency per element (N-1)",
+    "Single grouped contingency (N-k)",
+]
+CTX_TYPES: list[str] = ["ALL", "NONE", "SPECIFIC"]
+ACTION_TYPES: list[str] = [
     "SWITCH",
     "TERMINALS_CONNECTION",
     "GENERATOR_ACTIVE_POWER",
@@ -52,57 +65,72 @@ _ACTION_TYPES = [
     "RATIO_TAP_CHANGER_POSITION",
     "SHUNT_COMPENSATOR_POSITION",
 ]
-_CONDITION_TYPES = [
+CONDITION_TYPES: list[str] = [
     "TRUE_CONDITION",
     "ANY_VIOLATION_CONDITION",
     "ALL_VIOLATION_CONDITION",
     "AT_LEAST_ONE_VIOLATION_CONDITION",
 ]
-_VIOLATION_TYPES = [
+VIOLATION_TYPES: list[str] = [
     "CURRENT",
     "ACTIVE_POWER",
     "APPARENT_POWER",
     "LOW_VOLTAGE",
     "HIGH_VOLTAGE",
 ]
-_SIDES = ["NONE", "ONE", "TWO"]
+SIDES: list[str] = ["NONE", "ONE", "TWO"]
 
 
-def _get_nominal_voltages(network) -> list[float]:
-    try:
-        df = get_vl_nominal_v(network)
-        return sorted(df["nominal_v"].dropna().unique().tolist())
-    except Exception:
-        return []
+# ---------------------------------------------------------------------------
+# Worker-routed pypowsybl fetchers
+# ---------------------------------------------------------------------------
+def get_nominal_voltages(network: NetworkProxy) -> list[float]:
+    """Return the sorted set of nominal voltages present in the network.
 
-
-def _get_ids(network) -> dict[str, list[str]]:
-    """Fetch element id lists in a single worker call, cached per network.
-
-    Keyed by ``net_key`` only (IDs are topology-dependent, not LF-dependent).
-    Invalidated by ``caches._TOPOLOGY_CACHE_KEYS`` on every topology edit.
+    Worker-routed; no caching here. Hosts that need it (Streamlit) wrap
+    with their own session-state cache.
     """
-    net_key = _caches_net_key(network)
-    cached = st.session_state.get("_sa_id_cache")
-    if cached is not None and cached.get("key") == net_key:
-        return cached["data"]
-
     raw = object.__getattribute__(network, "_obj")
 
-    def _gather():
+    def _fetch() -> list[float]:
+        try:
+            df = raw.get_voltage_levels(attributes=["nominal_v"])
+            return sorted(df["nominal_v"].dropna().unique().tolist())
+        except Exception:
+            return []
+
+    return run(_fetch)
+
+
+def get_element_ids(network: NetworkProxy) -> dict[str, list[str]]:
+    """Fetch every element-id list the Security Analysis config needs.
+
+    One worker hop returns all the categories the configuration UI
+    needs to populate its dropdowns:
+
+    * ``branches``: lines + 2-winding transformers
+    * ``lines`` / ``two_windings_transformers`` /
+      ``three_windings_transformers``
+    * ``voltage_levels`` / ``switches`` / ``generators`` /
+      ``loads`` / ``shunt_compensators``
+    * ``phase_tap_changers`` / ``ratio_tap_changers``: transformers
+      that carry the matching tap changer
+    * ``connectables``: lines + 2WTs + generators (the most common
+      terminals-connection action targets)
+    """
+    raw = object.__getattribute__(network, "_obj")
+
+    def _gather() -> dict[str, list[str]]:
         lines = list(raw.get_lines(attributes=[]).index)
-        t2w_df = raw.get_2_windings_transformers(attributes=[])
-        t2w = list(t2w_df.index)
+        t2w = list(raw.get_2_windings_transformers(attributes=[]).index)
         t3w = list(raw.get_3_windings_transformers(attributes=[]).index)
         vls = list(raw.get_voltage_levels(attributes=[]).index)
         switches = list(raw.get_switches(attributes=[]).index)
         gens = list(raw.get_generators(attributes=[]).index)
         loads = list(raw.get_loads(attributes=[]).index)
         shunts = list(raw.get_shunt_compensators(attributes=[]).index)
-        # Transformers with a phase tap changer
         ptc_df = raw.get_phase_tap_changers(attributes=[])
         ptc_ids = sorted(set(ptc_df.index)) if not ptc_df.empty else []
-        # Transformers with a ratio tap changer
         rtc_df = raw.get_ratio_tap_changers(attributes=[])
         rtc_ids = sorted(set(rtc_df.index)) if not rtc_df.empty else []
         return {
@@ -117,561 +145,164 @@ def _get_ids(network) -> dict[str, list[str]]:
             "shunt_compensators": sorted(shunts),
             "phase_tap_changers": ptc_ids,
             "ratio_tap_changers": rtc_ids,
-            # "connectable" elements (terminals-connection action targets):
-            # in practice, lines + 2WTs + generators are the most common.
             "connectables": sorted(lines + t2w + gens),
         }
 
-    data = run(_gather)
-    st.session_state["_sa_id_cache"] = {"key": net_key, "data": data}
-    return data
+    return run(_gather)
 
 
-_FILTERABLE_DF_GETTERS = {
-    "Lines": get_lines_all,
-    "2-Winding Transformers": get_2wt_all,
-    "3-Winding Transformers": get_3wt_all,
-    "Generators": get_generators_all,
-}
+# ---------------------------------------------------------------------------
+# Contingency builders
+# ---------------------------------------------------------------------------
+def build_n1_contingencies(
+    network: NetworkProxy,
+    element_type: str,
+    nominal_v_set: Optional[set] = None,
+) -> list[dict]:
+    """Build N-1 contingency definitions for every element of ``element_type``.
 
-
-def _get_filterable_df(network, manual_type: str) -> pd.DataFrame:
-    """Return the enriched component DataFrame for *manual_type*.
-
-    Raw data comes from ``caches.get_*_all`` (shared, 0 RT when warm). The
-    enriched result (VL/substation join applied) is cached per
-    ``(net_key, lf_gen, manual_type)`` so repeated visits to the same type
-    within a rerun are free. Invalidated via ``caches._TOPOLOGY_CACHE_KEYS``
-    on topology edits, and self-invalidating after a load flow (lf_gen bumps).
+    When ``nominal_v_set`` is provided, only elements whose terminal
+    voltage levels carry a nominal voltage in the set are kept. Returns
+    ``[{"id": "N1_<element_id>", "element_id": eid, "element_ids": [eid]}]``.
     """
-    cache = st.session_state.setdefault("_sa_manual_df_cache", {})
-    key = _caches_cache_key(network) + (manual_type,)
-    if key in cache:
-        return cache[key]
+    if element_type == "Lines":
+        getter = "get_lines"
+    elif element_type == "2-Winding Transformers":
+        getter = "get_2_windings_transformers"
+    else:
+        return []
 
-    getter_fn = _FILTERABLE_DF_GETTERS.get(manual_type)
-    if not getter_fn:
-        cache[key] = pd.DataFrame()
-        return cache[key]
+    vl_cols = ["voltage_level1_id", "voltage_level2_id"]
+    raw = object.__getattribute__(network, "_obj")
 
-    df = getter_fn(network)
-    if df.empty:
-        cache[key] = pd.DataFrame()
-        return cache[key]
+    def _gather():
+        elem_df = getattr(raw, getter)(attributes=vl_cols)
+        vl_df = (
+            raw.get_voltage_levels(attributes=["nominal_v"])
+            if nominal_v_set else None
+        )
+        return elem_df, vl_df
 
-    cache[key] = enrich_with_joins(df, build_vl_lookup(network))
-    return cache[key]
+    elem_df, vl_df = run(_gather)
+    if elem_df.empty:
+        return []
+
+    if nominal_v_set and vl_df is not None and not vl_df.empty:
+        def _matches(row):
+            for col in vl_cols:
+                vl_id = row.get(col)
+                if vl_id and vl_id in vl_df.index:
+                    if vl_df.at[vl_id, "nominal_v"] in nominal_v_set:
+                        return True
+            return False
+
+        elem_df = elem_df[elem_df.apply(_matches, axis=1)]
+
+    return [
+        {"id": f"N1_{eid}", "element_id": eid, "element_ids": [eid]}
+        for eid in elem_df.index
+    ]
 
 
-def _contingencies_list() -> list[dict]:
-    return st.session_state.get("_sa_contingencies", [])
+def build_n2_contingencies(
+    network: NetworkProxy,
+    element_type: str,
+    nominal_v_set: Optional[set] = None,
+) -> list[dict]:
+    """Build N-2 contingency definitions for every unique pair of elements.
 
-
-# --- JSON file upload helpers ---
-
-def _persist_uploaded_json(files, state_key: str) -> int:
-    """Write each UploadedFile to a tempfile, record ``(name, path)`` in state.
-
-    Returns the number of newly-persisted files. Skips files whose name is
-    already present.
+    Pairs are unordered ``(A, B)`` with ``A < B`` by element id. Returns
+    ``[{"id": "N2_<a>_<b>", "element_ids": [a, b]}]``.
     """
-    entries: list[dict] = st.session_state.setdefault(state_key, [])
-    existing = {e["name"] for e in entries}
-    added = 0
-    for f in files or []:
-        if f.name in existing:
-            continue
-        fd, path = tempfile.mkstemp(suffix=".json", prefix="sa_upload_")
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(f.getvalue())
-        except Exception:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-            raise
-        entries.append({"name": f.name, "path": path})
-        existing.add(f.name)
-        added += 1
-    return added
+    n1 = build_n1_contingencies(network, element_type, nominal_v_set)
+    ids = sorted(c["element_id"] for c in n1)
+    return [
+        {"id": f"N2_{a}_{b}", "element_ids": [a, b]}
+        for a, b in combinations(ids, 2)
+    ]
 
 
-def _json_paths(state_key: str) -> list[str]:
-    return [e["path"] for e in st.session_state.get(state_key, [])]
+# ---------------------------------------------------------------------------
+# Action dispatcher
+# ---------------------------------------------------------------------------
+def apply_action(analysis, action: dict) -> None:
+    """Dispatch a single action dict to the right pypowsybl ``add_*_action`` call.
 
+    Supported action types (extend here to add more):
 
-def _render_json_upload_section(
-    label: str,
-    state_key: str,
-    help_text: str,
-    uploader_gen_key: str,
-) -> None:
-    """Render a collapsible section to upload and manage JSON files.
-
-    Uploaded files are persisted to tempfiles and their paths are stored in
-    ``st.session_state[state_key]`` as ``[{"name": str, "path": str}, ...]``.
-    The uploader widget is keyed with an incrementing generation counter so
-    it resets after a successful load.
+    - ``SWITCH``: ``switch_id``, ``open``
+    - ``TERMINALS_CONNECTION``: ``element_id``, ``opening``, optional ``side``
+    - ``GENERATOR_ACTIVE_POWER``: ``generator_id``, ``is_relative``, ``active_power``
+    - ``LOAD_ACTIVE_POWER``: ``load_id``, ``is_relative``, ``active_power``
+    - ``PHASE_TAP_CHANGER_POSITION``: ``transformer_id``, ``is_relative``,
+      ``tap_position``, optional ``side``
+    - ``RATIO_TAP_CHANGER_POSITION``: ``transformer_id``, ``is_relative``,
+      ``tap_position``, optional ``side``
+    - ``SHUNT_COMPENSATOR_POSITION``: ``shunt_id``, ``section``
     """
-    entries: list[dict] = st.session_state.setdefault(state_key, [])
-    if uploader_gen_key not in st.session_state:
-        st.session_state[uploader_gen_key] = 0
+    from pypowsybl._pypowsybl import Side
 
-    with st.expander(label, expanded=False):
-        st.caption(help_text)
-        gen = st.session_state[uploader_gen_key]
-        uploaded = st.file_uploader(
-            "JSON file(s)",
-            type=["json"],
-            accept_multiple_files=True,
-            key=f"{state_key}_uploader_{gen}",
+    action_id = action["action_id"]
+    atype = action["type"]
+    side = Side.__members__.get(action.get("side", "NONE"), Side.NONE)
+
+    if atype == "SWITCH":
+        analysis.add_switch_action(
+            action_id, action["switch_id"], bool(action["open"])
         )
-        if st.button("Load", key=f"{state_key}_load_btn"):
-            if not uploaded:
-                st.warning("No file selected.")
-            else:
-                try:
-                    added = _persist_uploaded_json(uploaded, state_key)
-                except Exception as exc:
-                    st.error(f"Failed to persist upload: {exc}")
-                else:
-                    st.session_state[uploader_gen_key] += 1
-                    if added:
-                        st.success(f"Loaded {added} file(s).")
-                        st.rerun()
-                    else:
-                        st.warning("All selected files were already loaded.")
-
-        if entries:
-            st.caption(f"{len(entries)} JSON file(s) loaded")
-            for i, e in enumerate(list(entries)):
-                col1, col2 = st.columns([5, 1])
-                with col1:
-                    st.markdown(f"`{e['name']}`")
-                with col2:
-                    if st.button("Remove", key=f"{state_key}_rm_{i}"):
-                        try:
-                            os.unlink(e["path"])
-                        except OSError:
-                            pass
-                        entries.pop(i)
-                        st.rerun()
-
-
-# --- Configuration: Contingencies sub-tab ---
-
-def _render_contingencies_subtab(network):
-    st.subheader("Contingency configuration")
-
-    # --- Section A: automatic builder (N-1 / N-2) -----------------------
-    st.markdown("**Automatic builder**")
-    mode = st.radio(
-        "Generation mode",
-        options=_AUTO_MODES,
-        horizontal=True,
-        key="sa_auto_mode",
-    )
-    element_type = st.selectbox(
-        "Element type",
-        options=_ELEMENT_TYPES,
-        key="sa_element_type",
-    )
-
-    nom_voltages = _get_nominal_voltages(network)
-    if nom_voltages:
-        default_v = [v for v in nom_voltages if v >= 380.0]
-        selected_voltages = st.multiselect(
-            "Filter by nominal voltage (kV) — leave empty to include all",
-            options=nom_voltages,
-            default=default_v,
-            key="sa_nominal_v_filter",
-            format_func=lambda v: f"{v:.0f} kV",
+    elif atype == "TERMINALS_CONNECTION":
+        analysis.add_terminals_connection_action(
+            action_id,
+            action["element_id"],
+            side=side,
+            opening=bool(action.get("opening", True)),
+        )
+    elif atype == "GENERATOR_ACTIVE_POWER":
+        analysis.add_generator_active_power_action(
+            action_id,
+            action["generator_id"],
+            bool(action["is_relative"]),
+            float(action["active_power"]),
+        )
+    elif atype == "LOAD_ACTIVE_POWER":
+        analysis.add_load_active_power_action(
+            action_id,
+            action["load_id"],
+            bool(action["is_relative"]),
+            float(action["active_power"]),
+        )
+    elif atype == "PHASE_TAP_CHANGER_POSITION":
+        analysis.add_phase_tap_changer_position_action(
+            action_id,
+            action["transformer_id"],
+            bool(action["is_relative"]),
+            int(action["tap_position"]),
+            side=side,
+        )
+    elif atype == "RATIO_TAP_CHANGER_POSITION":
+        analysis.add_ratio_tap_changer_position_action(
+            action_id,
+            action["transformer_id"],
+            bool(action["is_relative"]),
+            int(action["tap_position"]),
+            side=side,
+        )
+    elif atype == "SHUNT_COMPENSATOR_POSITION":
+        analysis.add_shunt_compensator_position_action(
+            action_id,
+            action["shunt_id"],
+            int(action["section"]),
         )
     else:
-        selected_voltages = []
-        st.info("No voltage levels found in the network.")
-
-    nominal_v_set = set(selected_voltages) if selected_voltages else None
-
-    if mode == "N-1":
-        auto = build_n1_contingencies(network, element_type, nominal_v_set)
-    else:
-        auto = build_n2_contingencies(network, element_type, nominal_v_set)
-
-    # --- Section B: manual contingencies --------------------------------
-    st.markdown("**Manual contingencies**")
-    st.caption(
-        "Pick any subset of elements of a given type and add them as one "
-        "or several contingencies alongside the automatic ones."
-    )
-    manual: list[dict] = st.session_state.setdefault("_sa_manual_contingencies", [])
-    ids = _get_ids(network)
-
-    manual_type = st.selectbox(
-        "Element type",
-        options=_MANUAL_TYPES,
-        key="sa_manual_type",
-    )
-
-    # Filters are rendered outside the form so changing them re-renders the
-    # multiselect options immediately.
-    type_df = _get_filterable_df(network, manual_type)
-    if type_df.empty:
-        type_ids = ids.get(_MANUAL_TYPE_IDS_KEY[manual_type], [])
-    else:
-        filter_cols = FILTERS.get(manual_type, [])
-        filtered_df = render_filters(
-            type_df,
-            filter_cols,
-            key_prefix=f"sa_manual_flt_{manual_type}",
-            label=f"Filter {manual_type.lower()}",
-        )
-        type_ids = list(filtered_df.index.astype(str))
-
-    with st.form("sa_manual_contingency_form", clear_on_submit=True):
-        st.caption(f"{len(type_ids)} {manual_type.lower()} available after filtering")
-        selected_ids = st.multiselect(
-            f"Pick {manual_type.lower()} to include",
-            options=type_ids,
-            key="sa_manual_ids",
-        )
-        grouping = st.radio(
-            "Grouping",
-            options=_MANUAL_GROUPINGS,
-            index=0,
-            key="sa_manual_grouping",
-        )
-        group_id = st.text_input(
-            "Contingency id (for single grouped mode)",
-            key="sa_manual_group_id",
-            placeholder="e.g. N2_outage_southwest",
-        )
-        submitted = st.form_submit_button("Add manual contingencies")
-
-    if submitted:
-        if not selected_ids:
-            st.warning("Pick at least one element.")
-        elif grouping == _MANUAL_GROUPINGS[0]:
-            existing = {c["id"] for c in manual}
-            added = 0
-            for eid in selected_ids:
-                cid = f"N1_{eid}"
-                if cid in existing:
-                    continue
-                manual.append({
-                    "id": cid,
-                    "element_id": eid,
-                    "element_ids": [eid],
-                })
-                existing.add(cid)
-                added += 1
-            if added:
-                st.rerun()
-            else:
-                st.warning("All selected elements were already added.")
-        else:
-            cid = group_id.strip()
-            if not cid:
-                st.warning("A contingency id is required for grouped mode.")
-            elif any(c["id"] == cid for c in manual):
-                st.warning(f"Contingency id '{cid}' already exists.")
-            else:
-                manual.append({
-                    "id": cid,
-                    "element_ids": list(selected_ids),
-                })
-                st.rerun()
-
-    if manual:
-        st.caption(f"{len(manual)} manual contingency(ies) defined")
-        for i, c in enumerate(list(manual)):
-            with st.container(border=True):
-                col1, col2 = st.columns([5, 1])
-                with col1:
-                    eids = c.get("element_ids") or ([c["element_id"]] if "element_id" in c else [])
-                    st.markdown(
-                        f"`{c['id']}` — "
-                        f"{', '.join(f'`{x}`' for x in eids)}"
-                    )
-                with col2:
-                    if st.button("Remove", key=f"sa_manual_rm_{i}"):
-                        manual.pop(i)
-                        st.rerun()
-
-    # --- Section C: JSON import -----------------------------------------
-    st.markdown("**Import contingencies from JSON**")
-    _render_json_upload_section(
-        label="Upload contingency JSON file(s)",
-        state_key="_sa_contingencies_json_files",
-        help_text=(
-            "Files are passed to `add_contingencies_from_json_file` at run "
-            "time. Use pypowsybl's native JSON contingency format."
-        ),
-        uploader_gen_key="_sa_contingencies_json_uploader_gen",
-    )
-    json_files = st.session_state.get("_sa_contingencies_json_files", [])
-
-    # --- Section D: composed list --------------------------------------
-    contingencies = list(auto) + list(manual)
-    st.session_state["_sa_contingencies"] = contingencies
-
-    auto_label = "N-1" if mode == "N-1" else "N-2"
-    if contingencies or json_files:
-        bits = [f"{len(auto)} auto ({auto_label})", f"{len(manual)} manual"]
-        if json_files:
-            bits.append(f"{len(json_files)} JSON file(s)")
-        st.caption(
-            " + ".join(bits)
-            + f" — {len(contingencies)} dict contingencies (JSON entries "
-            "added on run)"
-        )
-        with st.expander("Preview contingencies", expanded=False):
-            preview = [
-                {
-                    "id": c["id"],
-                    "element_ids": ", ".join(
-                        c.get("element_ids") or ([c["element_id"]] if "element_id" in c else [])
-                    ),
-                }
-                for c in contingencies
-            ]
-            st.dataframe(
-                pd.DataFrame(preview),
-                use_container_width=True,
-                hide_index=True,
-            )
-    else:
-        st.info(
-            "No contingencies yet — adjust the automatic filter above or add "
-            "a manual contingency."
-        )
+        raise ValueError(f"Unsupported action type: {atype!r}")
 
 
-# --- Configuration: Monitored elements sub-tab ---
+def action_summary(action: dict) -> str:
+    """One-line human description of an action dict.
 
-def _render_monitored_subtab(network):
-    st.subheader("Monitored elements")
-    st.caption(
-        "Define extra network elements for which the analysis should return "
-        "power, current and voltage results. Each row below becomes a single "
-        "call to `add_monitored_elements`."
-    )
-
-    entries: list[dict] = st.session_state.setdefault("_sa_monitored", [])
-    ids = _get_ids(network)
-    contingency_ids = [c["id"] for c in _contingencies_list()]
-
-    with st.form("sa_monitored_form", clear_on_submit=True):
-        ctx_type = st.selectbox(
-            "Contingency context",
-            options=_CTX_TYPES,
-            index=0,
-            key="sa_mon_ctx",
-            help=(
-                "ALL: monitor in pre- and post-contingency states. "
-                "NONE: pre-contingency only. "
-                "SPECIFIC: only for the selected contingencies."
-            ),
-        )
-        specific_cids: list[str] = []
-        if ctx_type == "SPECIFIC":
-            specific_cids = st.multiselect(
-                "Contingencies",
-                options=contingency_ids,
-                key="sa_mon_cids",
-            )
-        branch_ids = st.multiselect(
-            "Branches (lines and 2-winding transformers)",
-            options=ids["branches"],
-            key="sa_mon_branches",
-        )
-        vl_ids = st.multiselect(
-            "Voltage levels",
-            options=ids["voltage_levels"],
-            key="sa_mon_vls",
-        )
-        t3w_ids = st.multiselect(
-            "3-winding transformers",
-            options=ids["three_windings_transformers"],
-            key="sa_mon_3wt",
-        )
-        submitted = st.form_submit_button("Add monitored elements")
-
-    if submitted:
-        if not (branch_ids or vl_ids or t3w_ids):
-            st.warning("Pick at least one branch, voltage level or 3WT.")
-        elif ctx_type == "SPECIFIC" and not specific_cids:
-            st.warning("Pick at least one contingency for SPECIFIC context.")
-        else:
-            entries.append({
-                "contingency_context_type": ctx_type,
-                "contingency_ids": specific_cids if ctx_type == "SPECIFIC" else None,
-                "branch_ids": branch_ids or None,
-                "voltage_level_ids": vl_ids or None,
-                "three_windings_transformer_ids": t3w_ids or None,
-            })
-            st.rerun()
-
-    if not entries:
-        st.info("No monitored-element rules defined.")
-        return
-
-    st.caption(f"{len(entries)} rule(s) defined")
-    for i, e in enumerate(entries):
-        with st.container(border=True):
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                lines = [f"**Context:** {e['contingency_context_type']}"]
-                if e["contingency_context_type"] == "SPECIFIC":
-                    lines.append(f"**Contingencies:** {', '.join(e['contingency_ids'] or [])}")
-                if e.get("branch_ids"):
-                    lines.append(f"**Branches ({len(e['branch_ids'])}):** {', '.join(e['branch_ids'])}")
-                if e.get("voltage_level_ids"):
-                    lines.append(f"**Voltage levels ({len(e['voltage_level_ids'])}):** {', '.join(e['voltage_level_ids'])}")
-                if e.get("three_windings_transformer_ids"):
-                    lines.append(f"**3WTs ({len(e['three_windings_transformer_ids'])}):** {', '.join(e['three_windings_transformer_ids'])}")
-                st.markdown("  \n".join(lines))
-            with col2:
-                if st.button("Remove", key=f"sa_mon_rm_{i}"):
-                    entries.pop(i)
-                    st.rerun()
-
-
-# --- Configuration: Limit reductions sub-tab ---
-
-def _render_limit_reductions_subtab():
-    st.subheader("Limit reductions")
-    st.caption(
-        "Apply a reduction factor (in [0, 1]) to current limits. OpenLoadFlow "
-        "currently supports `limit_type=CURRENT` and `contingency_context=ALL`."
-    )
-
-    entries: list[dict] = st.session_state.setdefault("_sa_limit_reductions", [])
-
-    with st.form("sa_lr_form", clear_on_submit=True):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            value = st.number_input(
-                "Value (0 – 1)",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.9,
-                step=0.05,
-                key="sa_lr_value",
-            )
-        with col2:
-            permanent = st.checkbox("Permanent limits", value=True, key="sa_lr_perm")
-        with col3:
-            temporary = st.checkbox("Temporary limits", value=True, key="sa_lr_temp")
-
-        col4, col5 = st.columns(2)
-        with col4:
-            min_dur = st.number_input(
-                "Min temp. duration (s, optional)",
-                min_value=0,
-                value=0,
-                step=60,
-                key="sa_lr_min_dur",
-                help="0 = no minimum",
-            )
-        with col5:
-            max_dur = st.number_input(
-                "Max temp. duration (s, optional)",
-                min_value=0,
-                value=0,
-                step=60,
-                key="sa_lr_max_dur",
-                help="0 = no maximum",
-            )
-
-        col6, col7, col8 = st.columns(3)
-        with col6:
-            country = st.text_input("Country code (optional)", key="sa_lr_country")
-        with col7:
-            min_v = st.number_input(
-                "Min voltage (kV, optional)",
-                min_value=0.0,
-                value=0.0,
-                step=1.0,
-                key="sa_lr_min_v",
-            )
-        with col8:
-            max_v = st.number_input(
-                "Max voltage (kV, optional)",
-                min_value=0.0,
-                value=0.0,
-                step=1.0,
-                key="sa_lr_max_v",
-            )
-
-        submitted = st.form_submit_button("Add limit reduction")
-
-    if submitted:
-        if not (permanent or temporary):
-            st.warning("Pick at least one of 'Permanent' or 'Temporary'.")
-        else:
-            entry: dict = {
-                "limit_type": "CURRENT",
-                "permanent": bool(permanent),
-                "temporary": bool(temporary),
-                "value": float(value),
-                "contingency_context": "ALL",
-            }
-            if temporary and min_dur > 0:
-                entry["min_temporary_duration"] = int(min_dur)
-            if temporary and max_dur > 0:
-                entry["max_temporary_duration"] = int(max_dur)
-            if country.strip():
-                entry["country"] = country.strip().upper()
-            if min_v > 0:
-                entry["min_voltage"] = float(min_v)
-            if max_v > 0:
-                entry["max_voltage"] = float(max_v)
-            entries.append(entry)
-            st.rerun()
-
-    if not entries:
-        st.info("No limit reductions defined.")
-        return
-
-    st.caption(f"{len(entries)} reduction(s) defined")
-    df = pd.DataFrame(entries)
-    remove_idx = None
-    for i, e in enumerate(entries):
-        with st.container(border=True):
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                scope = []
-                if e["permanent"]:
-                    scope.append("permanent")
-                if e["temporary"]:
-                    scope.append("temporary")
-                parts = [f"**value={e['value']}** on {' + '.join(scope)} {e['limit_type']}"]
-                extras = []
-                for k in ("min_temporary_duration", "max_temporary_duration",
-                          "country", "min_voltage", "max_voltage"):
-                    if k in e:
-                        extras.append(f"{k}={e[k]}")
-                if extras:
-                    parts.append("  \n" + " · ".join(extras))
-                st.markdown("".join(parts))
-            with col2:
-                if st.button("Remove", key=f"sa_lr_rm_{i}"):
-                    remove_idx = i
-
-    if remove_idx is not None:
-        entries.pop(remove_idx)
-        st.rerun()
-
-    with st.expander("Preview DataFrame passed to pypowsybl", expanded=False):
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-
-# --- Configuration: Actions sub-tab ---
-
-def _action_summary(action: dict) -> str:
-    """One-line human description of an action dict."""
+    Pure helper so every host renders the same caption in its action
+    list (Streamlit markdown, NiceGUI label, Qt ``QLabel``).
+    """
     atype = action["type"]
     aid = action["action_id"]
     if atype == "SWITCH":
@@ -714,677 +345,256 @@ def _action_summary(action: dict) -> str:
     return f"`{aid}` — **{atype}**"
 
 
-def _render_action_form_fields(atype: str, ids: dict) -> dict | None:
-    """Render type-specific fields; return the extra dict or None on error.
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+def run_security_analysis(
+    network: NetworkProxy,
+    contingencies: list[dict],
+    monitored_elements: Optional[list[dict]] = None,
+    limit_reductions: Optional[list[dict]] = None,
+    actions: Optional[list[dict]] = None,
+    operator_strategies: Optional[list[dict]] = None,
+    contingencies_json_paths: Optional[list[str]] = None,
+    actions_json_paths: Optional[list[str]] = None,
+    operator_strategies_json_paths: Optional[list[str]] = None,
+) -> dict:
+    """Run AC security analysis on the worker thread.
 
-    Returns None when the selected element list is empty so the caller can
-    surface a clear message rather than letting the selectbox raise.
+    The signature is the same as the legacy ``state.run_security_analysis``
+    (which now re-exports this); see that docstring for the full
+    contract. Returns a serialized dict the Streamlit / Qt / NiceGUI
+    tabs can stash in their per-host state container.
+
+    Side effect: records the run via :mod:`iidm_viewer.script_recorder`
+    so the Session Script dialog can replay it.
     """
-    if atype == "SWITCH":
-        if not ids["switches"]:
-            st.info("No switches in this network.")
-            return None
-        switch_id = st.selectbox("Switch", ids["switches"], key="sa_act_switch_id")
-        open_ = st.checkbox("Open switch", value=True, key="sa_act_switch_open")
-        return {"switch_id": switch_id, "open": bool(open_)}
-    if atype == "TERMINALS_CONNECTION":
-        if not ids["connectables"]:
-            st.info("No connectable elements in this network.")
-            return None
-        element_id = st.selectbox(
-            "Element (line / 2WT / generator)",
-            ids["connectables"],
-            key="sa_act_term_id",
-        )
-        side = st.selectbox("Side", _SIDES, index=0, key="sa_act_term_side")
-        opening = st.checkbox("Open (disconnect)", value=True, key="sa_act_term_open")
-        return {"element_id": element_id, "side": side, "opening": bool(opening)}
-    if atype == "GENERATOR_ACTIVE_POWER":
-        if not ids["generators"]:
-            st.info("No generators in this network.")
-            return None
-        gen_id = st.selectbox("Generator", ids["generators"], key="sa_act_gen_id")
-        is_relative = st.checkbox(
-            "Relative change (tick) vs. absolute (untick)",
-            value=True,
-            key="sa_act_gen_rel",
-        )
-        active_power = st.number_input(
-            "Active power (MW)",
-            value=-10.0,
-            step=10.0,
-            key="sa_act_gen_p",
-        )
-        return {
-            "generator_id": gen_id,
-            "is_relative": bool(is_relative),
-            "active_power": float(active_power),
-        }
-    if atype == "LOAD_ACTIVE_POWER":
-        if not ids["loads"]:
-            st.info("No loads in this network.")
-            return None
-        load_id = st.selectbox("Load", ids["loads"], key="sa_act_load_id")
-        is_relative = st.checkbox(
-            "Relative change (tick) vs. absolute (untick)",
-            value=True,
-            key="sa_act_load_rel",
-        )
-        active_power = st.number_input(
-            "Active power (MW)",
-            value=-10.0,
-            step=10.0,
-            key="sa_act_load_p",
-        )
-        return {
-            "load_id": load_id,
-            "is_relative": bool(is_relative),
-            "active_power": float(active_power),
-        }
-    if atype == "PHASE_TAP_CHANGER_POSITION":
-        if not ids["phase_tap_changers"]:
-            st.info("No phase tap changers in this network.")
-            return None
-        tx_id = st.selectbox(
-            "Transformer",
-            ids["phase_tap_changers"],
-            key="sa_act_ptc_id",
-        )
-        is_relative = st.checkbox(
-            "Relative change (tick) vs. absolute (untick)",
-            value=False,
-            key="sa_act_ptc_rel",
-        )
-        tap_position = st.number_input(
-            "Tap position",
-            value=0,
-            step=1,
-            key="sa_act_ptc_tap",
-        )
-        side = st.selectbox("Side (3WTs only)", _SIDES, index=0, key="sa_act_ptc_side")
-        return {
-            "transformer_id": tx_id,
-            "is_relative": bool(is_relative),
-            "tap_position": int(tap_position),
-            "side": side,
-        }
-    if atype == "RATIO_TAP_CHANGER_POSITION":
-        if not ids["ratio_tap_changers"]:
-            st.info("No ratio tap changers in this network.")
-            return None
-        tx_id = st.selectbox(
-            "Transformer",
-            ids["ratio_tap_changers"],
-            key="sa_act_rtc_id",
-        )
-        is_relative = st.checkbox(
-            "Relative change (tick) vs. absolute (untick)",
-            value=False,
-            key="sa_act_rtc_rel",
-        )
-        tap_position = st.number_input(
-            "Tap position",
-            value=0,
-            step=1,
-            key="sa_act_rtc_tap",
-        )
-        side = st.selectbox("Side (3WTs only)", _SIDES, index=0, key="sa_act_rtc_side")
-        return {
-            "transformer_id": tx_id,
-            "is_relative": bool(is_relative),
-            "tap_position": int(tap_position),
-            "side": side,
-        }
-    if atype == "SHUNT_COMPENSATOR_POSITION":
-        if not ids["shunt_compensators"]:
-            st.info("No shunt compensators in this network.")
-            return None
-        shunt_id = st.selectbox(
-            "Shunt compensator",
-            ids["shunt_compensators"],
-            key="sa_act_shunt_id",
-        )
-        section = st.number_input(
-            "Section count",
-            value=0,
-            step=1,
-            min_value=0,
-            key="sa_act_shunt_sec",
-        )
-        return {
-            "shunt_id": shunt_id,
-            "section": int(section),
-        }
-    return {}
+    from iidm_viewer.lf_parameters import get_lf_parameters
 
+    raw = object.__getattribute__(network, "_obj")
+    generic, provider = get_lf_parameters()
+    monitored_elements = monitored_elements or []
+    limit_reductions = limit_reductions or []
+    actions = actions or []
+    operator_strategies = operator_strategies or []
+    contingencies_json_paths = contingencies_json_paths or []
+    actions_json_paths = actions_json_paths or []
+    operator_strategies_json_paths = operator_strategies_json_paths or []
 
-def _render_actions_subtab(network):
-    st.subheader("Remedial actions")
-    st.caption(
-        "Define atomic actions that can later be grouped into an operator "
-        "strategy. Each action gets a unique id."
-    )
+    def _run_sa():
+        import pypowsybl.security as sa
+        import pypowsybl.loadflow as lf
+        from pypowsybl.flowdecomposition import ContingencyContextType
+        from pypowsybl._pypowsybl import ConditionType, ViolationType
 
-    entries: list[dict] = st.session_state.setdefault("_sa_actions", [])
-    ids = _get_ids(network)
-
-    # Action-type selectbox is outside the form so type-specific fields
-    # re-render immediately on change.
-    atype = st.selectbox(
-        "Action type",
-        options=_ACTION_TYPES,
-        key="sa_act_type",
-    )
-
-    with st.form("sa_actions_form", clear_on_submit=True):
-        action_id = st.text_input(
-            "Action ID (unique)",
-            key="sa_act_id",
-            placeholder="e.g. open_L1 or gen_down",
-        )
-        extra = _render_action_form_fields(atype, ids)
-        submitted = st.form_submit_button("Add action")
-
-    if submitted:
-        existing_ids = {a["action_id"] for a in entries}
-        if extra is None:
-            st.warning("Cannot build this action — no matching element in the network.")
-        elif not action_id.strip():
-            st.warning("Action ID is required.")
-        elif action_id in existing_ids:
-            st.warning(f"Action ID '{action_id}' already exists.")
-        else:
-            entries.append({"action_id": action_id.strip(), "type": atype, **extra})
-            st.rerun()
-
-    _render_json_upload_section(
-        label="Upload action JSON file(s)",
-        state_key="_sa_actions_json_files",
-        help_text=(
-            "Files are passed to `add_actions_from_json_file` at run time. "
-            "Action IDs in these files can be referenced by operator "
-            "strategies defined here or loaded from JSON."
-        ),
-        uploader_gen_key="_sa_actions_json_uploader_gen",
-    )
-
-    if not entries:
-        st.info("No form-defined actions. JSON-imported actions will still be used.")
-        return
-
-    st.caption(f"{len(entries)} action(s) defined")
-    for i, e in enumerate(entries):
-        with st.container(border=True):
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                st.markdown(_action_summary(e))
-            with col2:
-                if st.button("Remove", key=f"sa_act_rm_{i}"):
-                    entries.pop(i)
-                    # Also drop the action from any strategies that reference it
-                    for strat in st.session_state.get("_sa_operator_strategies", []):
-                        if e["action_id"] in strat.get("action_ids", []):
-                            strat["action_ids"] = [
-                                a for a in strat["action_ids"]
-                                if a != e["action_id"]
-                            ]
-                    st.rerun()
-
-
-# --- Configuration: Operator strategies sub-tab ---
-
-def _render_operator_strategies_subtab(network=None):
-    st.subheader("Operator strategies")
-    st.caption(
-        "Group actions into a post-contingency strategy. Each strategy is "
-        "triggered by one contingency and applies the listed actions when "
-        "its condition is met."
-    )
-
-    entries: list[dict] = st.session_state.setdefault("_sa_operator_strategies", [])
-    contingencies = _contingencies_list()
-    actions = st.session_state.get("_sa_actions", [])
-    action_ids = [a["action_id"] for a in actions]
-    contingency_ids = [c["id"] for c in contingencies]
-
-    if not contingency_ids or not action_ids:
-        st.info(
-            "Define at least one contingency (in the Contingencies sub-tab) "
-            "and one action (in the Actions sub-tab) to build a strategy."
-        )
-    else:
-        # Condition-type selectbox is outside the form so violation fields
-        # show/hide immediately on change.
-        condition_type = st.selectbox(
-            "Condition type",
-            options=_CONDITION_TYPES,
-            index=0,
-            key="sa_strat_condition",
-            help=(
-                "TRUE_CONDITION: always apply. "
-                "ANY/ALL/AT_LEAST_ONE_VIOLATION_CONDITION: apply only if "
-                "post-contingency limit violations match the subject/type filters."
-            ),
-        )
-        needs_filters = condition_type != "TRUE_CONDITION"
-
-        with st.form("sa_strat_form", clear_on_submit=True):
-            strat_id = st.text_input(
-                "Strategy ID (unique)",
-                key="sa_strat_id",
-                placeholder="e.g. strat_open_line",
+        analysis = sa.create_analysis()
+        for c in contingencies:
+            eids = list(
+                c.get("element_ids")
+                or ([c["element_id"]] if "element_id" in c else []),
             )
-            contingency_id = st.selectbox(
-                "Triggered by contingency",
-                options=contingency_ids,
-                key="sa_strat_cid",
+            if len(eids) == 1:
+                analysis.add_single_element_contingency(eids[0], c["id"])
+            elif len(eids) > 1:
+                analysis.add_multiple_elements_contingency(eids, c["id"])
+        for p in contingencies_json_paths:
+            analysis.add_contingencies_from_json_file(p)
+
+        for me in monitored_elements:
+            ctx_name = me.get("contingency_context_type", "ALL")
+            ctx = ContingencyContextType.__members__.get(
+                ctx_name, ContingencyContextType.ALL,
             )
-            selected_actions = st.multiselect(
-                "Actions to apply (in order)",
-                options=action_ids,
-                key="sa_strat_actions",
+            analysis.add_monitored_elements(
+                contingency_context_type=ctx,
+                contingency_ids=me.get("contingency_ids") or None,
+                branch_ids=me.get("branch_ids") or None,
+                voltage_level_ids=me.get("voltage_level_ids") or None,
+                three_windings_transformer_ids=me.get(
+                    "three_windings_transformer_ids",
+                ) or None,
             )
-            if needs_filters:
-                ids = _get_ids(network) if network is not None else {}
-                subject_options = sorted(
-                    set(ids.get("branches", []))
-                    | set(ids.get("three_windings_transformers", []))
-                    | set(ids.get("voltage_levels", []))
-                )
-                violation_subject_ids = st.multiselect(
-                    "Violation subject IDs (empty = any element)",
-                    options=subject_options,
-                    key="sa_strat_vsubj",
-                    help="Only violations on these elements count toward the condition.",
-                )
-                violation_types = st.multiselect(
-                    "Violation types (empty = any type)",
-                    options=_VIOLATION_TYPES,
-                    key="sa_strat_vtypes",
-                )
-            else:
-                violation_subject_ids = []
-                violation_types = []
-            submitted = st.form_submit_button("Add operator strategy")
 
-        if submitted:
-            existing_ids = {s["operator_strategy_id"] for s in entries}
-            if not strat_id.strip():
-                st.warning("Strategy ID is required.")
-            elif strat_id in existing_ids:
-                st.warning(f"Strategy ID '{strat_id}' already exists.")
-            elif not selected_actions:
-                st.warning("Pick at least one action.")
-            else:
-                entries.append({
-                    "operator_strategy_id": strat_id.strip(),
-                    "contingency_id": contingency_id,
-                    "action_ids": selected_actions,
-                    "condition_type": condition_type,
-                    "violation_subject_ids": list(violation_subject_ids),
-                    "violation_types": list(violation_types),
-                })
-                st.rerun()
+        if limit_reductions:
+            lr_df = pd.DataFrame(limit_reductions).set_index("limit_type")
+            analysis.add_limit_reductions(lr_df)
 
-    _render_json_upload_section(
-        label="Upload operator-strategy JSON file(s)",
-        state_key="_sa_operator_strategies_json_files",
-        help_text=(
-            "Files are passed to `add_operator_strategies_from_json_file` "
-            "at run time. Strategies can reference contingencies and actions "
-            "loaded either from the forms above or from JSON."
-        ),
-        uploader_gen_key="_sa_operator_strategies_json_uploader_gen",
-    )
+        for action in actions:
+            apply_action(analysis, action)
+        for p in actions_json_paths:
+            analysis.add_actions_from_json_file(p)
 
-    if not entries:
-        st.info("No form-defined strategies. JSON-imported strategies will still be used.")
-        return
+        for strat in operator_strategies:
+            cond_name = strat.get("condition_type", "TRUE_CONDITION")
+            cond = ConditionType.__members__.get(
+                cond_name, ConditionType.TRUE_CONDITION,
+            )
+            vtype_names = strat.get("violation_types") or []
+            vtypes = [
+                ViolationType.__members__[n]
+                for n in vtype_names
+                if n in ViolationType.__members__
+            ] or None
+            vsubjects = list(strat.get("violation_subject_ids") or []) or None
+            analysis.add_operator_strategy(
+                strat["operator_strategy_id"],
+                strat["contingency_id"],
+                list(strat["action_ids"]),
+                condition_type=cond,
+                violation_subject_ids=vsubjects,
+                violation_types=vtypes,
+            )
+        for p in operator_strategies_json_paths:
+            analysis.add_operator_strategies_from_json_file(p)
 
-    st.caption(f"{len(entries)} strategy(ies) defined")
-    for i, s in enumerate(entries):
-        with st.container(border=True):
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                cond = s.get("condition_type", "TRUE_CONDITION")
-                lines = [
-                    f"`{s['operator_strategy_id']}` — triggered by "
-                    f"**`{s['contingency_id']}`**",
-                    f"**Condition:** {cond}",
-                    f"**Actions ({len(s['action_ids'])}):** "
-                    + ", ".join(f"`{a}`" for a in s["action_ids"]),
-                ]
-                subj = s.get("violation_subject_ids") or []
-                vtypes = s.get("violation_types") or []
-                if subj:
-                    lines.append(
-                        "**Subjects:** " + ", ".join(f"`{x}`" for x in subj)
-                    )
-                if vtypes:
-                    lines.append("**Violation types:** " + ", ".join(vtypes))
-                st.markdown("  \n".join(lines))
-            with col2:
-                if st.button("Remove", key=f"sa_strat_rm_{i}"):
-                    entries.pop(i)
-                    st.rerun()
-
-
-# --- Configuration tab (run button + sub-tabs) ---
-
-def _render_config_tab(network):
-    (
-        sub_cont,
-        sub_mon,
-        sub_lr,
-        sub_act,
-        sub_strat,
-    ) = st.tabs(
-        [
-            "Contingencies",
-            "Monitored elements",
-            "Limit reductions",
-            "Actions",
-            "Operator strategies",
-        ]
-    )
-
-    with sub_cont:
-        _render_contingencies_subtab(network)
-    with sub_mon:
-        _render_monitored_subtab(network)
-    with sub_lr:
-        _render_limit_reductions_subtab()
-    with sub_act:
-        _render_actions_subtab(network)
-    with sub_strat:
-        _render_operator_strategies_subtab(network)
-
-    st.divider()
-    contingencies = _contingencies_list()
-    monitored = st.session_state.get("_sa_monitored", [])
-    reductions = st.session_state.get("_sa_limit_reductions", [])
-    actions = st.session_state.get("_sa_actions", [])
-    strategies = st.session_state.get("_sa_operator_strategies", [])
-    contingencies_json_paths = _json_paths("_sa_contingencies_json_files")
-    actions_json_paths = _json_paths("_sa_actions_json_files")
-    strategies_json_paths = _json_paths("_sa_operator_strategies_json_files")
-
-    cols = st.columns(6)
-    cols[0].metric(
-        "Contingencies",
-        len(contingencies),
-        delta=f"+{len(contingencies_json_paths)} JSON" if contingencies_json_paths else None,
-    )
-    cols[1].metric("Monitored", len(monitored))
-    cols[2].metric("Reductions", len(reductions))
-    cols[3].metric(
-        "Actions",
-        len(actions),
-        delta=f"+{len(actions_json_paths)} JSON" if actions_json_paths else None,
-    )
-    cols[4].metric(
-        "Strategies",
-        len(strategies),
-        delta=f"+{len(strategies_json_paths)} JSON" if strategies_json_paths else None,
-    )
-
-    has_contingency_source = bool(contingencies) or bool(contingencies_json_paths)
-    with cols[5]:
-        if st.button(
-            "Run Security Analysis",
-            key="sa_run_btn",
-            type="primary",
-            disabled=not has_contingency_source,
-        ):
-            with st.spinner(
-                f"Running security analysis ({len(contingencies)} contingencies"
-                + (f" + {len(contingencies_json_paths)} JSON file(s)"
-                   if contingencies_json_paths else "")
-                + ")…"
-            ):
-                try:
-                    results = run_security_analysis(
-                        network,
-                        contingencies,
-                        monitored_elements=monitored,
-                        limit_reductions=reductions,
-                        actions=actions,
-                        operator_strategies=strategies,
-                        contingencies_json_paths=contingencies_json_paths,
-                        actions_json_paths=actions_json_paths,
-                        operator_strategies_json_paths=strategies_json_paths,
-                    )
-                    st.session_state["_sa_results"] = results
-                    st.success("Security analysis complete.")
-                except Exception as exc:
-                    st.error(f"Security analysis failed: {exc}")
-
-
-def _style_status(val: str) -> str:
-    if val == "CONVERGED":
-        return "color: green"
-    return "background-color: #ff4b4b; color: white"
-
-
-def _style_violations(val: int) -> str:
-    if val == 0:
-        return ""
-    if val >= 3:
-        return "background-color: #ff4b4b; color: white"
-    return "background-color: #ffa500; color: white"
-
-
-def _render_monitored_pre(results: dict):
-    pre_branch = results.get("pre_branch_results", pd.DataFrame())
-    pre_bus = results.get("pre_bus_results", pd.DataFrame())
-    pre_3wt = results.get("pre_3wt_results", pd.DataFrame())
-    if pre_branch.empty and pre_bus.empty and pre_3wt.empty:
-        return
-    with st.expander("Pre-contingency monitored results", expanded=False):
-        if not pre_branch.empty:
-            st.caption("Branches (P, Q, I)")
-            st.dataframe(pre_branch, use_container_width=True)
-        if not pre_bus.empty:
-            st.caption("Buses (voltage magnitude & angle)")
-            st.dataframe(pre_bus, use_container_width=True)
-        if not pre_3wt.empty:
-            st.caption("3-winding transformers")
-            st.dataframe(pre_3wt, use_container_width=True)
-
-
-def _render_monitored_post(cr: dict):
-    br = cr.get("branch_results", pd.DataFrame())
-    bu = cr.get("bus_results", pd.DataFrame())
-    t3 = cr.get("three_windings_transformer_results", pd.DataFrame())
-    if br.empty and bu.empty and t3.empty:
-        return
-    st.caption("Monitored results for this contingency")
-    if not br.empty:
-        st.markdown("**Branches**")
-        st.dataframe(br, use_container_width=True)
-    if not bu.empty:
-        st.markdown("**Buses**")
-        st.dataframe(bu, use_container_width=True)
-    if not t3.empty:
-        st.markdown("**3-winding transformers**")
-        st.dataframe(t3, use_container_width=True)
-
-
-def _render_operator_strategy_block(sid: str, sr: dict):
-    """Render one operator-strategy result block (status + violations + monitored)."""
-    status = sr.get("status", "UNKNOWN")
-    viol = sr.get("limit_violations", pd.DataFrame())
-    status_color = "green" if status == "CONVERGED" else "red"
-    actions_str = ", ".join(f"`{a}`" for a in sr.get("action_ids", []))
-    st.markdown(
-        f"`{sid}` — **Status:** :{status_color}[{status}]  \n"
-        f"**Actions:** {actions_str or '(none)'}"
-    )
-    if not viol.empty:
-        st.caption(f"{len(viol)} limit violation(s) after the strategy")
-        st.dataframe(viol, use_container_width=True, hide_index=True)
-    _render_monitored_post(sr)
-
-
-def _render_results_tab():
-    results = st.session_state.get("_sa_results")
-    if results is None:
-        st.info(
-            "No results yet. Configure and run a security analysis "
-            "in the Configuration tab."
-        )
-        return
-
-    contingencies = results.get("contingencies", [])
-    pre_status = results.get("pre_status", "UNKNOWN")
-    pre_violations: pd.DataFrame = results.get("pre_violations", pd.DataFrame())
-    post: dict = results.get("post", {})
-
-    json_export = results.get("json_export")
-    if json_export:
-        st.download_button(
-            "Download results (JSON)",
-            data=json_export,
-            file_name="security_analysis_result.json",
-            mime="application/json",
-            key="sa_results_json_dl",
-            help="Native pypowsybl SecurityAnalysisResult JSON export.",
-        )
-
-    # Pre-contingency summary
-    st.subheader("Pre-contingency state")
-    col1, col2 = st.columns(2)
-    col1.metric("Base case status", pre_status)
-    col2.metric(
-        "Limit violations",
-        0 if pre_violations.empty else len(pre_violations),
-    )
-
-    if not pre_violations.empty:
-        st.caption("Pre-contingency limit violations")
-        st.dataframe(pre_violations, use_container_width=True, hide_index=True)
-
-    _render_monitored_pre(results)
-
-    # Post-contingency summary
-    st.subheader("Post-contingency results")
-
-    if not post:
-        st.info("No post-contingency results available.")
-        return
-
-    form_ids = {c["id"] for c in contingencies}
-    rows = []
-    for c in contingencies:
-        cid = c["id"]
-        cr = post.get(cid, {})
-        viol_df: pd.DataFrame = cr.get("limit_violations", pd.DataFrame())
-        eids = c.get("element_ids") or ([c["element_id"]] if "element_id" in c else [])
-        rows.append(
-            {
-                "Contingency": cid,
-                "Element": ", ".join(eids),
-                "Status": cr.get("status", "UNKNOWN"),
-                "Violations": 0 if viol_df.empty else len(viol_df),
+        lf_params = lf.Parameters(**generic)
+        if provider:
+            lf_params.provider_parameters = {
+                k: str(v) for k, v in provider.items()
             }
+        params = sa.Parameters(load_flow_parameters=lf_params)
+
+        result = analysis.run_ac(raw, parameters=params)
+
+        # Serialize the native pypowsybl JSON view so the caller can
+        # download it after the result object goes out of scope on the
+        # worker.
+        import os as _os
+        import tempfile as _tempfile
+
+        with _tempfile.NamedTemporaryFile(suffix=".json", delete=False) as _tf:
+            _json_path = _tf.name
+        try:
+            result.export_to_json(_json_path)
+            with open(_json_path, "rb") as _fh:
+                json_export_bytes = _fh.read()
+        finally:
+            try:
+                _os.unlink(_json_path)
+            except OSError:
+                pass
+
+        pre_result = result.pre_contingency_result
+        pre_viol = pd.DataFrame(pre_result.limit_violations)
+
+        def _select(
+            df: pd.DataFrame,
+            contingency_id: Optional[str],
+            strategy_id: str = "",
+        ) -> pd.DataFrame:
+            """Slice a multi-indexed result DF by
+            ``(contingency_id, operator_strategy_id)``.
+
+            Index levels are
+            ``(contingency_id, operator_strategy_id, element_id)``.
+            ``""`` means "no contingency" for level 0 and "no strategy"
+            for level 1. Returns an empty DataFrame if ``df`` is empty
+            or the keys are absent.
+            """
+            if df is None or df.empty:
+                return pd.DataFrame()
+            try:
+                if isinstance(df.index, pd.MultiIndex):
+                    cid_key = "" if contingency_id is None else contingency_id
+                    lvl0 = df.index.get_level_values(0)
+                    mask = lvl0 == cid_key
+                    if df.index.nlevels >= 3:
+                        lvl1 = df.index.get_level_values(1)
+                        mask = mask & (lvl1 == strategy_id)
+                        return df[mask].reset_index(level=[0, 1], drop=True)
+                    return df[mask].reset_index(level=0, drop=True)
+                return df.copy()
+            except Exception:
+                return pd.DataFrame()
+
+        branch_all = (
+            pd.DataFrame(result.branch_results)
+            if result.branch_results is not None else pd.DataFrame()
         )
-    # Contingencies loaded from JSON files are not in the form list, so show
-    # them with whatever id came back in the result dict.
-    for cid, cr in post.items():
-        if cid in form_ids:
-            continue
-        viol_df = cr.get("limit_violations", pd.DataFrame())
-        rows.append(
-            {
-                "Contingency": cid,
-                "Element": "(from JSON)",
-                "Status": cr.get("status", "UNKNOWN"),
-                "Violations": 0 if viol_df.empty else len(viol_df),
+        bus_all = (
+            pd.DataFrame(result.bus_results)
+            if result.bus_results is not None else pd.DataFrame()
+        )
+        t3w_all = (
+            pd.DataFrame(result.three_windings_transformer_results)
+            if result.three_windings_transformer_results is not None
+            else pd.DataFrame()
+        )
+
+        post: dict = {}
+        for cid, cr in result.post_contingency_results.items():
+            post[cid] = {
+                "status": cr.status.name,
+                "limit_violations": pd.DataFrame(cr.limit_violations),
+                "branch_results": _select(branch_all, cid),
+                "bus_results": _select(bus_all, cid),
+                "three_windings_transformer_results": _select(t3w_all, cid),
             }
-        )
 
-    summary_df = pd.DataFrame(rows)
+        os_results: dict = {}
+        for sid, osr in result.operator_strategy_results.items():
+            strat = next(
+                (s for s in operator_strategies
+                 if s["operator_strategy_id"] == sid),
+                None,
+            )
+            cid = strat["contingency_id"] if strat else None
+            os_results[sid] = {
+                "status": osr.status.name,
+                "limit_violations": pd.DataFrame(osr.limit_violations),
+                "branch_results": _select(branch_all, cid, sid),
+                "bus_results": _select(bus_all, cid, sid),
+                "three_windings_transformer_results": _select(
+                    t3w_all, cid, sid,
+                ),
+                "contingency_id": cid,
+                "action_ids": list(strat["action_ids"]) if strat else [],
+            }
 
-    n_failed = int((summary_df["Status"] != "CONVERGED").sum())
-    n_with_viol = int((summary_df["Violations"] > 0).sum())
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Contingencies", len(contingencies))
-    c2.metric("Failed / not converged", n_failed)
-    c3.metric("With limit violations", n_with_viol)
+        return {
+            "pre_status": pre_result.status.name,
+            "pre_violations": pre_viol,
+            "pre_branch_results": _select(branch_all, None),
+            "pre_bus_results": _select(bus_all, None),
+            "pre_3wt_results": _select(t3w_all, None),
+            "post": post,
+            "operator_strategies": os_results,
+            "contingencies": contingencies,
+            "json_export": json_export_bytes,
+        }
 
-    max_viol = int(summary_df["Violations"].max()) if not summary_df.empty else 0
-    threshold = st.slider(
-        "Show contingencies with violations ≥",
-        min_value=0,
-        max_value=max(max_viol, 1),
-        value=0,
-        key="sa_violation_threshold",
+    sa_result = run(_run_sa)
+    script_recorder.record_run_security_analysis(
+        contingencies,
+        monitored_elements,
+        limit_reductions,
+        actions,
+        operator_strategies,
+        contingencies_json_paths,
+        actions_json_paths,
+        operator_strategies_json_paths,
+        generic,
+        provider,
     )
-
-    filtered = summary_df[summary_df["Violations"] >= threshold]
-    styled = filtered.style.map(_style_status, subset=["Status"]).map(
-        _style_violations, subset=["Violations"]
-    )
-    st.dataframe(styled, use_container_width=True, hide_index=True)
-
-    # Drill-down
-    st.subheader("Contingency detail")
-
-    form_ids = [c["id"] for c in contingencies]
-    extra_ids = [cid for cid in post.keys() if cid not in set(form_ids)]
-    contingency_options = form_ids + sorted(extra_ids)
-    id_filter = st.text_input(
-        "Filter by contingency ID (substring, case-insensitive)",
-        key="sa_contingency_filter",
-    )
-    if id_filter:
-        contingency_options = [
-            c for c in contingency_options if id_filter.lower() in c.lower()
-        ]
-
-    if not contingency_options:
-        st.info("No contingencies match the filter.")
-        return
-
-    selected_contingency = st.selectbox(
-        "Select contingency",
-        options=contingency_options,
-        key="sa_selected_contingency",
-    )
-
-    cr = post.get(selected_contingency, {})
-    status = cr.get("status", "UNKNOWN")
-    viol_df = cr.get("limit_violations", pd.DataFrame())
-
-    status_color = "green" if status == "CONVERGED" else "red"
-    st.markdown(f"**Status:** :{status_color}[{status}]")
-
-    if not viol_df.empty:
-        st.caption(f"{len(viol_df)} limit violation(s)")
-        st.dataframe(viol_df, use_container_width=True, hide_index=True)
-    else:
-        st.success("No limit violations for this contingency.")
-
-    _render_monitored_post(cr)
-
-    # Operator strategies that target this contingency
-    os_results: dict = results.get("operator_strategies", {})
-    matching = [
-        (sid, sr) for sid, sr in os_results.items()
-        if sr.get("contingency_id") == selected_contingency
-    ]
-    if matching:
-        st.subheader("Operator strategies for this contingency")
-        for sid, sr in matching:
-            with st.container(border=True):
-                _render_operator_strategy_block(sid, sr)
+    return sa_result
 
 
-def render_security_analysis(network):
-    tab_config, tab_results = st.tabs(["Configuration", "Results"])
-
-    with tab_config:
-        _render_config_tab(network)
-
-    with tab_results:
-        _render_results_tab()
+# ---------------------------------------------------------------------------
+# Legacy aliases — existing tests + the Streamlit tab consume the
+# underscored names. Keep them re-exported so the rename can land
+# without breakage.
+# ---------------------------------------------------------------------------
+_ELEMENT_TYPES = ELEMENT_TYPES
+_AUTO_MODES = AUTO_MODES
+_MANUAL_TYPES = MANUAL_TYPES
+_MANUAL_TYPE_IDS_KEY = MANUAL_TYPE_IDS_KEY
+_MANUAL_GROUPINGS = MANUAL_GROUPINGS
+_CTX_TYPES = CTX_TYPES
+_ACTION_TYPES = ACTION_TYPES
+_CONDITION_TYPES = CONDITION_TYPES
+_VIOLATION_TYPES = VIOLATION_TYPES
+_SIDES = SIDES
+_apply_action = apply_action
+_action_summary = action_summary
+_get_nominal_voltages = get_nominal_voltages
+_get_ids = get_element_ids
