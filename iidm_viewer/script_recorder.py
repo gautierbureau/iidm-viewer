@@ -1,9 +1,9 @@
 """Session-state op log for the HMI-mirror "Session Script" feature.
 
 The recorder is intentionally tiny: every state-mutating call in
-``state.py`` appends one record to ``st.session_state["_op_log"]``.
-``script_generator.generate_script`` later turns that list into a
-runnable Python script.
+``state.py`` appends one record to the backing store under
+``_op_log``.  ``script_generator.generate_script`` later turns that
+list into a runnable Python script.
 
 Design notes:
 
@@ -17,13 +17,17 @@ Design notes:
 - Phase 1 recorded ``load_network``, ``create_empty`` and
   ``run_loadflow``.  Phase 2 adds component edits, component removals,
   extension edits, extension removals, and their revert counterparts.
+- The backing store is a dict-like mapping injected via
+  :func:`set_store`. Streamlit calls ``set_store(_store)``
+  on every rerun so the log lives per-tab; the PySide6 / NiceGUI
+  prototypes use the default module-level dict (single user per
+  process). Test fixtures call :func:`reset_store` to start fresh.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, MutableMapping
 
 import pandas as pd
-import streamlit as st
 
 
 _OP_LOG_KEY = "_op_log"
@@ -37,14 +41,41 @@ _PAUSED_KEY = "_op_log_paused"
 RECORDING_WIDGET_KEY = "_session_script_recording_toggle"
 
 
+# ---------------------------------------------------------------------------
+# Backing store — host-injected
+# ---------------------------------------------------------------------------
+_store: MutableMapping[str, Any] = {}
+
+
+def set_store(store: MutableMapping[str, Any]) -> None:
+    """Replace the backing store.
+
+    Streamlit calls this with ``_store`` so the recorder
+    lives per browser tab. The PySide6 / NiceGUI prototypes leave the
+    default module-level dict in place.
+    """
+    global _store
+    _store = store
+
+
+def reset_store() -> None:
+    """Reset the recorder to an empty module-level dict.
+
+    Useful for tests, and for non-Streamlit hosts that want a clean
+    starting state.
+    """
+    global _store
+    _store = {}
+
+
 def get_log() -> list[dict[str, Any]]:
     """Return the current op log (never ``None``)."""
-    return list(st.session_state.get(_OP_LOG_KEY, []))
+    return list(_store.get(_OP_LOG_KEY, []))
 
 
 def get_source_filename() -> str | None:
     """Original filename of the loaded network, or ``None`` for empty starts."""
-    return st.session_state.get(_SOURCE_FILENAME_KEY)
+    return _store.get(_SOURCE_FILENAME_KEY)
 
 
 def is_paused() -> bool:
@@ -53,7 +84,7 @@ def is_paused() -> bool:
     Defaults to False (recording) — every new session starts recording,
     and the user must explicitly pause via the Session Script tab.
     """
-    return bool(st.session_state.get(_PAUSED_KEY, False))
+    return bool(_store.get(_PAUSED_KEY, False))
 
 
 def set_paused(value: bool) -> None:
@@ -63,7 +94,7 @@ def set_paused(value: bool) -> None:
     no-op. The op log itself is preserved; resuming continues
     appending. Loading a new network always re-enables recording.
     """
-    st.session_state[_PAUSED_KEY] = bool(value)
+    _store[_PAUSED_KEY] = bool(value)
 
 
 def _reset_recording_state() -> None:
@@ -75,33 +106,33 @@ def _reset_recording_state() -> None:
     Session Script tab renders, so the toggle visibly snaps back to
     Recording = ON.
     """
-    st.session_state[_PAUSED_KEY] = False
-    st.session_state.pop(RECORDING_WIDGET_KEY, None)
+    _store[_PAUSED_KEY] = False
+    _store.pop(RECORDING_WIDGET_KEY, None)
 
 
 def clear_log() -> None:
     """Drop every recorded op. The next ``record_load_network`` /
     ``record_create_empty`` reseeds the log."""
-    st.session_state[_OP_LOG_KEY] = []
-    st.session_state.pop(_SOURCE_FILENAME_KEY, None)
+    _store[_OP_LOG_KEY] = []
+    _store.pop(_SOURCE_FILENAME_KEY, None)
     _reset_recording_state()
 
 
 def _reset_with(op: dict[str, Any], source_filename: str | None) -> None:
-    st.session_state[_OP_LOG_KEY] = [op]
+    _store[_OP_LOG_KEY] = [op]
     if source_filename is None:
-        st.session_state.pop(_SOURCE_FILENAME_KEY, None)
+        _store.pop(_SOURCE_FILENAME_KEY, None)
     else:
-        st.session_state[_SOURCE_FILENAME_KEY] = source_filename
+        _store[_SOURCE_FILENAME_KEY] = source_filename
     _reset_recording_state()
 
 
 def _append(op: dict[str, Any]) -> None:
     if is_paused():
         return
-    log = list(st.session_state.get(_OP_LOG_KEY, []))
+    log = list(_store.get(_OP_LOG_KEY, []))
     log.append(op)
-    st.session_state[_OP_LOG_KEY] = log
+    _store[_OP_LOG_KEY] = log
 
 
 def record_load_network(
@@ -223,7 +254,7 @@ def record_update_components(
         return
     if changes_df.empty:
         return
-    log = list(st.session_state.get(_OP_LOG_KEY, []))
+    log = list(_store.get(_OP_LOG_KEY, []))
     for element_id, col, value in _iter_cells(changes_df):
         after = _scalar(value)
         if is_revert:
@@ -260,7 +291,7 @@ def record_update_components(
                     "reverted": False,
                 }
             )
-    st.session_state[_OP_LOG_KEY] = log
+    _store[_OP_LOG_KEY] = log
 
 
 def record_remove_components(component: str, ids: list[str]) -> None:
@@ -299,7 +330,7 @@ def record_update_extension(
         return
     if changes_df.empty:
         return
-    log = list(st.session_state.get(_OP_LOG_KEY, []))
+    log = list(_store.get(_OP_LOG_KEY, []))
     for element_id, col, value in _iter_cells(changes_df):
         after = _scalar(value)
         if is_revert:
@@ -334,7 +365,7 @@ def record_update_extension(
                     "reverted": False,
                 }
             )
-    st.session_state[_OP_LOG_KEY] = log
+    _store[_OP_LOG_KEY] = log
 
 
 def record_remove_extension(extension_name: str, ids: list[str]) -> None:

@@ -22,6 +22,10 @@ def init_state():
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+    # Hook the Session Script recorder into per-tab session state so
+    # the op log lives alongside the rest of the Streamlit state.
+    # PySide6 / NiceGUI keep the recorder's default module-level dict.
+    script_recorder.set_store(st.session_state)
 
 
 def get_import_extensions() -> list[str]:

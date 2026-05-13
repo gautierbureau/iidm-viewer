@@ -13,7 +13,9 @@ from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
 
-from iidm_viewer import network_loader
+import os
+
+from iidm_viewer import network_loader, script_recorder
 from iidm_viewer.change_log import ChangeLog
 from iidm_viewer.loadflow import LoadFlowResult, run_ac
 from iidm_viewer.powsybl_worker import NetworkProxy
@@ -83,6 +85,14 @@ class AppState(QObject):
             post_processors=self.import_post_processors or None,
         )
         self.install_network(network)
+        # Seed the Session Script log with the load op. The filename
+        # is the displayable basename — the generator handles the
+        # ``Path`` resolution at replay time.
+        script_recorder.record_load_network(
+            os.path.basename(path) or path,
+            self.import_params or None,
+            self.import_post_processors or None,
+        )
         return network
 
     def create_empty_network(self, network_id: str = "network") -> NetworkProxy:
@@ -95,6 +105,7 @@ class AppState(QObject):
         """
         network = network_loader.create_empty(network_id)
         self.install_network(network)
+        script_recorder.record_create_empty(network_id)
         return network
 
     def install_network(self, network: NetworkProxy) -> None:
@@ -169,5 +180,6 @@ class AppState(QObject):
             provider_params = self.lf_provider_params or None
         result = run_ac(self._network, generic_params, provider_params)
         self._last_report_json = getattr(result, "report_json", None)
+        script_recorder.record_run_loadflow(generic_params, provider_params)
         self.loadflow_completed.emit(result)
         return result

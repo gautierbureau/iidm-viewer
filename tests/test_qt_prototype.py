@@ -2349,3 +2349,62 @@ def test_reactive_curves_tab_empty_network_shows_placeholder(qapp):
     assert tab._plot_view.isHidden() is True
     # The placeholder stays unhidden so the user sees the "no data" hint.
     assert tab._placeholder.isHidden() is False
+
+
+def test_main_window_sidebar_has_view_session_script_button(qapp):
+    """The PySide6 sidebar must surface a "View live Script" button —
+    parity with Streamlit + NiceGUI."""
+    from iidm_viewer.qt.main_window import MainWindow
+
+    window = MainWindow()
+    qapp.processEvents()
+    btn = getattr(window.sidebar, "_view_script_btn", None)
+    assert btn is not None
+    assert btn.text() == "View live Script"
+
+
+def test_session_script_dialog_consumes_shared_recorder(qapp):
+    """The Qt dialog must drive ``script_recorder`` + ``generate_script``
+    the same way Streamlit + NiceGUI do."""
+    import inspect
+
+    from iidm_viewer.qt import session_script_dialog
+
+    module_src = inspect.getsource(session_script_dialog)
+    assert "from iidm_viewer import script_recorder" in module_src
+    assert "from iidm_viewer.script_generator import generate_script" in module_src
+    class_src = inspect.getsource(session_script_dialog.SessionScriptDialog)
+    assert "script_recorder.get_log" in class_src
+    assert "script_recorder.set_paused" in class_src
+    assert "script_recorder.clear_log" in class_src
+
+
+def test_app_state_records_load_and_create_empty_and_loadflow(qapp):
+    """The PySide6 ``AppState`` mutators must drive ``script_recorder``
+    so the sidebar's Session Script button shows the same op log
+    Streamlit produces.
+    """
+    import os
+
+    from iidm_viewer import script_recorder
+    from iidm_viewer.qt.state import AppState
+
+    script_recorder.reset_store()
+    try:
+        state = AppState()
+        xiidm = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), os.pardir, "test_ieee14.xiidm"),
+        )
+        state.load_network_from_path(xiidm)
+        ops = script_recorder.get_log()
+        assert ops and ops[0]["kind"] == "load_network"
+        # Loadflow appends a ``run_loadflow`` op.
+        state.run_loadflow()
+        assert script_recorder.get_log()[-1]["kind"] == "run_loadflow"
+        # Empty network seeds a fresh log via ``record_create_empty``.
+        state.create_empty_network("blank")
+        seeded = script_recorder.get_log()
+        assert seeded[0]["kind"] == "create_empty"
+        assert seeded[0]["network_id"] == "blank"
+    finally:
+        script_recorder.reset_store()

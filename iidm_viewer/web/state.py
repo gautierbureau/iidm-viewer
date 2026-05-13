@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from iidm_viewer import network_loader
+import os
+
+from iidm_viewer import network_loader, script_recorder
 from iidm_viewer.change_log import ChangeLog
 from iidm_viewer.loadflow import LoadFlowResult, run_ac
 from iidm_viewer.powsybl_worker import NetworkProxy
@@ -95,6 +97,13 @@ class AppState:
         """
         network = network_loader.load_from_path(path)
         self.install_network(network)
+        # Seed the Session Script log with the load op — the recorder
+        # records as a side effect, the generator emits the call later.
+        script_recorder.record_load_network(
+            os.path.basename(path) or path,
+            self.import_params or None,
+            self.import_post_processors or None,
+        )
         return network
 
     def install_network(self, network: NetworkProxy) -> None:
@@ -162,6 +171,7 @@ class AppState:
             provider_params = self.lf_provider_params or None
         result = run_ac(self._network, generic_params, provider_params)
         self._last_report_json = getattr(result, "report_json", None)
+        script_recorder.record_run_loadflow(generic_params, provider_params)
         for listener in list(self._loadflow_listeners):
             listener(result)
         return result
