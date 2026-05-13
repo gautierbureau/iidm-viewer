@@ -421,11 +421,6 @@ def _render_create_component_form(network, component: str):
         fields.update(_coerce_field_values(LOCATOR_FIELDS, raw_locator))
         fields["bus_or_busbar_section_id"] = bbs_id
 
-        # rated_s=0 is the form's "unset" sentinel; pypowsybl treats missing
-        # columns as unset, so drop it rather than sending zero.
-        if component == "Generators" and fields.get("rated_s") == 0.0:
-            fields.pop("rated_s", None)
-
         try:
             create_component_bay(network, component, fields)
         except Exception as e:
@@ -511,10 +506,6 @@ def _render_create_branch_form(network, component: str):
         fields.update(_coerce_field_values(branch_side_locator_fields(2), raw_loc2))
         fields["bus_or_busbar_section_id_1"] = bbs1
         fields["bus_or_busbar_section_id_2"] = bbs2
-
-        # rated_s=0 is the form's "unset" sentinel for 2WTs.
-        if component == "2-Winding Transformers" and fields.get("rated_s") == 0.0:
-            fields.pop("rated_s", None)
 
         try:
             create_branch_bay(network, component, fields)

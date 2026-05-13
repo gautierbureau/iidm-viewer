@@ -319,6 +319,17 @@ def _dispatch_bay_create(
     fields: dict,
 ) -> None:
     """Build a one-row DataFrame and call pypowsybl's ``<bay_fn_name>``."""
+    # ``rated_s`` carries a documented "0 = unset" sentinel in every
+    # schema that exposes it (Generators, 2-Winding Transformers). The
+    # form label says so explicitly; the user can leave it at the
+    # default ``0.0`` to mean "no rated apparent power". pypowsybl
+    # rejects ``rated_s = 0.0`` with "Invalid value 0.0 for rated_s",
+    # so honor the sentinel here — drop the field before dispatch so
+    # pypowsybl sees "column absent" → unset.
+    fields = {
+        k: v for k, v in fields.items()
+        if not (k == "rated_s" and v == 0.0)
+    }
     row = {k: v for k, v in fields.items() if v is not None and v != ""}
     df = pd.DataFrame([row]).set_index("id")
     raw = object.__getattribute__(network, "_obj")
