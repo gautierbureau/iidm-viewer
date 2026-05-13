@@ -802,8 +802,8 @@ def _open_load_options_dialog() -> None:
 
         params_box = ui.expansion("Format parameters", value=True) \
             .classes("w-full")
-        params_container = ui.column().classes("w-full")
-        params_box.add(params_container)
+        with params_box:
+            params_container = ui.column().classes("w-full")
 
         def _rebuild_params() -> None:
             fmt = fmt_select.value
@@ -947,8 +947,8 @@ def _open_save_network_dialog() -> None:
         ).props("dense outlined").classes("full-width q-mb-md")
         params_box = ui.expansion("Export parameters", value=False) \
             .classes("w-full")
-        params_container = ui.column().classes("w-full")
-        params_box.add(params_container)
+        with params_box:
+            params_container = ui.column().classes("w-full")
 
         def _rebuild_params() -> None:
             fmt = fmt_select.value
