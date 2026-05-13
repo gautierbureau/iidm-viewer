@@ -2298,3 +2298,54 @@ def test_sidebar_vl_picker_syncs_when_state_changes_externally(qapp, loaded_wind
     loaded_window.state.set_selected_vl(other)
     qapp.processEvents()
     assert sidebar._vl_combo.currentData() == other
+
+
+def test_main_window_carries_a_reactive_curves_tab(qapp):
+    """The PySide6 main window must surface the Reactive Capability
+    Curves tab as a top-level entry — parity with Streamlit and NiceGUI.
+    """
+    from iidm_viewer.qt.main_window import MainWindow
+    from iidm_viewer.qt.reactive_curves_tab import ReactiveCurvesTab
+
+    window = MainWindow()
+    qapp.processEvents()
+    tab_titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert "Reactive Capability Curves" in tab_titles
+    assert isinstance(window.reactive_curves_tab, ReactiveCurvesTab)
+
+
+def test_reactive_curves_tab_builds_view_model_for_ieee14(qapp, loaded_window):
+    """End-to-end: with IEEE14 loaded, the tab must populate its
+    generator combo + render the metric labels via the shared view model."""
+    tab = loaded_window.reactive_curves_tab
+    qapp.processEvents()
+    # IEEE14 has at least one gen with reactive limits → the combo
+    # carries entries and the placeholder is hidden.
+    assert tab._gen_combo.count() > 0
+    assert tab._placeholder.isVisible() is False
+    # Metric labels were populated from the selected gen's row.
+    assert "target_p" in tab._target_p_lbl.text()
+    assert tab._target_p_lbl.text() != "target_p: —"
+
+
+def test_reactive_curves_tab_empty_network_shows_placeholder(qapp):
+    """Switching to a network with no eligible gens (empty network)
+    must show the placeholder, hide the data widgets, and not crash."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.reactive_curves_tab import ReactiveCurvesTab
+
+    tab = ReactiveCurvesTab()
+    network = NetworkProxy(run(pn.create_empty))
+    tab.set_network(network)
+    qapp.processEvents()
+    # ``isVisible`` returns False for any widget whose parent window
+    # isn't shown, so we check the model state + the widgets the
+    # refresh path explicitly toggles via ``setVisible``.
+    assert tab._view_model is None
+    assert tab._gen_combo.count() == 0
+    # ``_set_visible_data(False)`` hides the metric labels + plot view.
+    assert tab._target_p_lbl.isHidden() is True
+    assert tab._plot_view.isHidden() is True
+    # The placeholder stays unhidden so the user sees the "no data" hint.
+    assert tab._placeholder.isHidden() is False

@@ -39,6 +39,7 @@ from iidm_viewer.qt.data_explorer_tab import DataExplorerTab
 from iidm_viewer.qt.extensions_explorer_tab import ExtensionsExplorerTab
 from iidm_viewer.qt.map_tab import MapTab
 from iidm_viewer.qt.nad_tab import NadTab
+from iidm_viewer.qt.reactive_curves_tab import ReactiveCurvesTab
 from iidm_viewer.qt.sld_tab import SldTab
 from iidm_viewer.qt.state import AppState
 
@@ -256,6 +257,7 @@ class MainWindow(QMainWindow):
         self.sld_tab = SldTab()
         self.data_tab = DataExplorerTab()
         self.extensions_tab = ExtensionsExplorerTab()
+        self.reactive_curves_tab = ReactiveCurvesTab()
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.map_tab, "Network Map")
@@ -263,6 +265,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.sld_tab, "Single Line Diagram")
         self.tabs.addTab(self.data_tab, "Data Explorer Components")
         self.tabs.addTab(self.extensions_tab, "Data Explorer Extensions")
+        self.tabs.addTab(self.reactive_curves_tab, "Reactive Capability Curves")
 
         # The Data Explorer reports cell + bulk edits to the AppState's
         # ChangeLog so the panel below shows a unified history that
@@ -573,6 +576,10 @@ class MainWindow(QMainWindow):
         # Extensions tab also caches per-network data — refresh it so
         # LF-touched extensions (e.g. branch flows) reflect the run.
         self.extensions_tab.set_network(self.state.network)
+        # Reactive Curves: post-LF the gen ``q`` column flips PV gens
+        # from ``needs_lf`` to an actionable status; re-run the
+        # classification.
+        self.reactive_curves_tab.refresh()
 
     # ------------------------------------------------------------------
     # State → UI plumbing
@@ -599,6 +606,7 @@ class MainWindow(QMainWindow):
         self.sld_tab.set_network(network)
         self.data_tab.set_network(network)
         self.extensions_tab.set_network(network)
+        self.reactive_curves_tab.set_network(network)
         self.tabs.setCurrentWidget(self.map_tab)
 
     def _on_sidebar_vl_selected(self, vl_id: str) -> None:
@@ -612,6 +620,9 @@ class MainWindow(QMainWindow):
         # Push the active VL into the data tab so its "Filter by VL"
         # checkbox can use it.
         self.data_tab.set_selected_vl(vl_id or None)
+        # Mirror to the reactive-curves tab so its "Only generators in
+        # VL X" checkbox label tracks the active selection.
+        self.reactive_curves_tab.set_selected_vl(vl_id or None)
         if vl_id:
             # Both diagram tabs follow the selection; they cache by VL
             # so re-centering on tab focus is essentially free.
