@@ -793,6 +793,32 @@ def test_save_network_dialog_uses_shared_helpers():
     assert "ui.download" in src
 
 
+def test_import_and_save_dialogs_do_not_use_expansion_add():
+    """Regression for the ``AttributeError: 'Expansion' object has no
+    attribute 'add'`` crash reported by the user.
+
+    NiceGUI's :class:`Expansion` element accepts children via a
+    ``with`` block — not via a non-existent ``.add(child)`` method.
+    Both modal dialogs (Import options, Save network) previously
+    relied on the missing API and crashed the moment the user clicked
+    the sidebar button.
+    """
+    import inspect
+
+    from iidm_viewer.web import app
+
+    for fn in (app._open_load_options_dialog, app._open_save_network_dialog):
+        src = inspect.getsource(fn)
+        # ``ui.expansion`` itself must still be there — only the wrong
+        # ``.add(`` follow-up call is forbidden. ``params_container``
+        # has to be defined inside a ``with`` block on the expansion.
+        assert "ui.expansion" in src
+        assert ".add(params_container)" not in src
+        # The replacement pattern: nest the column inside the
+        # expansion's ``with`` block.
+        assert "with params_box:" in src
+
+
 def test_save_network_button_is_gated_on_network_presence():
     """The drawer's "Save network" button toggles with the network —
     matches the Streamlit sidebar gate."""
