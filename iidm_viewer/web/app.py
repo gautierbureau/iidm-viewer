@@ -1254,6 +1254,12 @@ _DEFAULT_COL_DEF: dict = {
     "resizable": True,
     "filter": True,
     "floatingFilter": True,
+    # Wrap long pypowsybl column names (``regulated_element_id``,
+    # ``voltage_regulator_on``, …) onto a second line instead of
+    # truncating them with an ellipsis. ``autoHeaderHeight`` grows
+    # the header row so the wrapped text stays visible.
+    "wrapHeaderText": True,
+    "autoHeaderHeight": True,
 }
 
 
