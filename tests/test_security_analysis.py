@@ -1450,13 +1450,20 @@ def test_security_analysis_shared_module_exposes_public_api():
 def test_security_analysis_tab_module_lives_in_a_separate_file():
     """The Streamlit-only UI must live in ``security_analysis_tab`` so
     PySide6 / NiceGUI can import the shared core without dragging
-    streamlit in."""
-    import inspect
+    streamlit in.
 
-    from iidm_viewer import app, security_analysis_tab
+    Read ``app.py`` as text rather than ``import``-ing the module —
+    importing a Streamlit script executes it top-to-bottom in bare
+    mode, which seeds global Streamlit state that leaks into
+    ``AppTest``-based tests later in the run.
+    """
+    from pathlib import Path
+
+    from iidm_viewer import security_analysis_tab
 
     assert hasattr(security_analysis_tab, "render_security_analysis")
-    app_src = inspect.getsource(app)
+    app_path = Path(__file__).resolve().parent.parent / "iidm_viewer" / "app.py"
+    app_src = app_path.read_text(encoding="utf-8")
     assert (
         "from iidm_viewer.security_analysis_tab import render_security_analysis"
         in app_src
