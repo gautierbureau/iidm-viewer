@@ -257,6 +257,10 @@ def test_dataframe_to_aggrid_options_default_col_def_enables_sort_and_filter():
     assert default["resizable"] is True
     assert default["filter"] is True
     assert default["floatingFilter"] is True
+    # Long pypowsybl column names (``regulated_element_id``,
+    # ``voltage_regulator_on``, …) must wrap rather than truncate.
+    assert default["wrapHeaderText"] is True
+    assert default["autoHeaderHeight"] is True
 
 
 def test_bridge_js_has_expected_hooks():
