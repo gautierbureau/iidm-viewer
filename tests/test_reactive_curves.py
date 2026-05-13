@@ -360,13 +360,20 @@ def test_reactive_curves_tab_module_lives_in_a_separate_file():
     """The Streamlit-only UI must live in ``reactive_curves_tab`` so
     PySide6 / NiceGUI can import the shared core without dragging
     streamlit / plotly in. Pin both: the tab module exposes
-    ``render_reactive_curves`` and ``app.py`` imports from there."""
-    import inspect
+    ``render_reactive_curves`` and ``app.py`` imports from there.
 
-    from iidm_viewer import app, reactive_curves_tab
+    Read ``app.py`` as text rather than ``import``-ing the module —
+    importing a Streamlit script executes it top-to-bottom in bare
+    mode, which seeds global Streamlit state (forms, session_state)
+    that leaks into ``AppTest``-based tests later in the run.
+    """
+    from pathlib import Path
+
+    from iidm_viewer import reactive_curves_tab
 
     assert hasattr(reactive_curves_tab, "render_reactive_curves")
-    app_src = inspect.getsource(app)
+    app_path = Path(__file__).resolve().parent.parent / "iidm_viewer" / "app.py"
+    app_src = app_path.read_text(encoding="utf-8")
     assert "from iidm_viewer.reactive_curves_tab import render_reactive_curves" in app_src
     # The old import path must be gone — otherwise we'd re-couple the
     # shared module to Streamlit through a transitive import.

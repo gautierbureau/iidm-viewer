@@ -340,13 +340,20 @@ def test_operational_limits_shared_module_exposes_public_api():
 def test_operational_limits_tab_module_lives_in_a_separate_file():
     """The Streamlit-only UI must live in ``operational_limits_tab`` so
     PySide6 / NiceGUI can import the shared core without dragging
-    streamlit in."""
-    import inspect
+    streamlit in.
 
-    from iidm_viewer import app, operational_limits_tab
+    Read ``app.py`` as text rather than ``import``-ing the module —
+    importing a Streamlit script executes it top-to-bottom in bare
+    mode, which seeds global Streamlit state that leaks into
+    ``AppTest``-based tests later in the run.
+    """
+    from pathlib import Path
+
+    from iidm_viewer import operational_limits_tab
 
     assert hasattr(operational_limits_tab, "render_operational_limits")
-    app_src = inspect.getsource(app)
+    app_path = Path(__file__).resolve().parent.parent / "iidm_viewer" / "app.py"
+    app_src = app_path.read_text(encoding="utf-8")
     assert (
         "from iidm_viewer.operational_limits_tab import render_operational_limits"
         in app_src
