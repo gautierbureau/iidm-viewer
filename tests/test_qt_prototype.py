@@ -2408,3 +2408,47 @@ def test_app_state_records_load_and_create_empty_and_loadflow(qapp):
         assert seeded[0]["network_id"] == "blank"
     finally:
         script_recorder.reset_store()
+
+
+def test_main_window_carries_an_operational_limits_tab(qapp):
+    """The PySide6 main window must surface ``Operational Limits`` as a
+    top-level tab — parity with Streamlit + NiceGUI."""
+    from iidm_viewer.qt.main_window import MainWindow
+    from iidm_viewer.qt.operational_limits_tab import OperationalLimitsTab
+
+    window = MainWindow()
+    qapp.processEvents()
+    tab_titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert "Operational Limits" in tab_titles
+    assert isinstance(window.operational_limits_tab, OperationalLimitsTab)
+
+
+def test_operational_limits_tab_builds_view_model_for_ieee14(qapp, loaded_window):
+    """End-to-end: with IEEE14 loaded, the tab must populate its
+    element combo via the shared view model."""
+    tab = loaded_window.operational_limits_tab
+    qapp.processEvents()
+    # IEEE14 carries 58 operational-limit rows → element combo
+    # populated, placeholder hidden.
+    assert tab._element_combo.count() > 0
+    assert tab._view_model is not None
+    assert tab._placeholder.isHidden() is True
+
+
+def test_operational_limits_tab_empty_network_shows_placeholder(qapp):
+    """Switching to a network with no limits must show the placeholder
+    and hide both data sections without raising."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.operational_limits_tab import OperationalLimitsTab
+
+    tab = OperationalLimitsTab()
+    network = NetworkProxy(run(pn.create_empty))
+    tab.set_network(network)
+    qapp.processEvents()
+    assert tab._view_model is None
+    assert tab._element_combo.count() == 0
+    # ``_set_data_visible(False)`` hides both group boxes.
+    assert tab._loading_group.isHidden() is True
+    assert tab._detail_group.isHidden() is True
+    assert tab._placeholder.isHidden() is False
