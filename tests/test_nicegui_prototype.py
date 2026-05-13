@@ -627,6 +627,41 @@ def test_refresh_create_panel_no_notify_when_no_node_breaker_vls():
     assert "No busbar sections" in src
 
 
+def test_extensions_explorer_helper_uses_shared_module():
+    """``_build_extensions_explorer`` must funnel everything through
+    the shared :mod:`iidm_viewer.extensions_data` helpers — guards
+    against future inline pypowsybl calls."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_extensions_explorer)
+    for token in (
+        "list_extension_names",
+        "get_extensions_information",
+        "get_extension_df",
+        "remove_extension",
+        "update_extension",
+        "filter_by_id_substring",
+        "EDITABLE_EXTENSIONS",
+        "READONLY_EXTENSIONS",
+    ):
+        assert token in src, f"NiceGUI extensions tab should reference {token}"
+
+
+def test_extensions_tab_registered_in_main_page():
+    """The NiceGUI main page must expose the Extensions Explorer as
+    the fifth tab + invoke ``_build_extensions_explorer`` inside its
+    panel — same UX as Streamlit's two data-explorer tabs."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert "Data Explorer Extensions" in src
+    assert "_build_extensions_explorer()" in src
+    # Refresh hook on LF completion + on network changes.
+    assert "refresh_extensions_tab" in src
+
+
 def test_blank_network_dialog_uses_shared_helper():
     """``_open_blank_network_dialog`` must funnel through the shared
     ``network_loader.create_empty`` + ``_state.install_network`` —

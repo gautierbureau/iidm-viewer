@@ -1539,6 +1539,74 @@ def test_data_explorer_rejects_non_editable_attribute(qapp, loaded_window):
     assert captured == []
 
 
+def test_extensions_tab_renders_active_power_control_against_ieee14(qapp):
+    """End-to-end smoke of ``ExtensionsExplorerTab`` — feed the IEEE14
+    demo, pick ``activePowerControl`` (one of the editable ones), and
+    confirm the picker + summary + Apply / Remove buttons reflect a
+    populated table."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.extensions_explorer_tab import ExtensionsExplorerTab
+
+    net = NetworkProxy(run(pn.create_ieee14))
+    # Seed an extension we can drive — pypowsybl exposes
+    # ``create_extensions("activePowerControl", df)``.
+    raw = object.__getattribute__(net, "_obj")
+    df = pd.DataFrame(
+        {"droop": [3.0], "participate": [True]},
+        index=pd.Index(["B1-G"], name="id"),
+    )
+    run(lambda: raw.create_extensions("activePowerControl", df))
+
+    tab = ExtensionsExplorerTab()
+    tab.set_network(net)
+    # Pick the extension explicitly so the test isn't sensitive to the
+    # alphabetical default.
+    idx = tab._ext_combo.findText("activePowerControl")
+    assert idx >= 0
+    tab._ext_combo.setCurrentIndex(idx)
+    qapp.processEvents()
+
+    assert "activePowerControl" in tab._summary_lbl.text()
+    assert tab._apply_btn.isEnabled() is True  # editable columns present
+    assert tab._remove_btn.isEnabled() is True  # not read-only
+    # The table carries an editable "droop" column.
+    headers = [
+        tab._table.horizontalHeaderItem(c).text()
+        for c in range(tab._table.columnCount())
+    ]
+    assert "droop" in headers
+
+
+def test_extensions_tab_set_network_to_none_resets(qapp):
+    """Clearing the network must wipe the picker + table."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.extensions_explorer_tab import ExtensionsExplorerTab
+
+    tab = ExtensionsExplorerTab()
+    tab.set_network(NetworkProxy(run(pn.create_ieee14)))
+    qapp.processEvents()
+    tab.set_network(None)
+    qapp.processEvents()
+    assert tab._ext_combo.count() == 0
+    assert tab._table.rowCount() == 0
+    assert "No network" in tab._summary_lbl.text()
+
+
+def test_main_window_carries_an_extensions_tab(qapp):
+    """The PySide6 main window must surface the Extensions Explorer as
+    a top-level tab — same UX as Streamlit's two data-explorer tabs."""
+    from iidm_viewer.qt.extensions_explorer_tab import ExtensionsExplorerTab
+    from iidm_viewer.qt.main_window import MainWindow
+
+    window = MainWindow()
+    qapp.processEvents()
+    tab_titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert "Data Explorer Extensions" in tab_titles
+    assert isinstance(window.extensions_tab, ExtensionsExplorerTab)
+
+
 def test_app_state_emits_signal_only_on_change(qapp):
     from iidm_viewer.qt.state import AppState
 

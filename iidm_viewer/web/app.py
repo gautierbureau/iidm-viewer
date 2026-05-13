@@ -3460,6 +3460,352 @@ def _build_change_log_panel(on_revert_refresh) -> None:
     repaint()
 
 
+def _build_extensions_explorer():
+    """Materialise the "Data Explorer Extensions" tab.
+
+    Mirrors Streamlit's ``render_extensions_explorer``: an extension
+    name picker, an ID-substring filter, the extension's DataFrame in
+    an ag-Grid with editable cells (for entries in
+    :data:`EDITABLE_EXTENSIONS`) + a "Remove" checkbox column, and
+    Apply / Remove buttons. The framework-agnostic listing + worker-
+    routed mutations live in :mod:`iidm_viewer.extensions_data`.
+
+    Returns a closure the host calls when the network changes so the
+    extension list + table refresh against the new state.
+    """
+    import pandas as pd
+
+    from iidm_viewer.extensions_data import (
+        EDITABLE_EXTENSIONS,
+        READONLY_EXTENSIONS,
+        filter_by_id_substring,
+        get_extension_df,
+        get_extensions_information,
+        list_extension_names,
+        remove_extension,
+        update_extension,
+    )
+
+    state: dict = {
+        "info_df": None,
+        "current_df": pd.DataFrame(),
+        "pending_edits": {},   # {element_id: {col: new_value}}
+        "pending_removals": set(),
+    }
+
+    with ui.row().classes("items-center w-full q-pa-sm"):
+        ui.label("Extension:")
+        ext_select = ui.select(options=[], value=None) \
+            .props("dense outlined").classes("w-64")
+        filter_input = ui.input(placeholder="Filter by ID (substring)") \
+            .props("dense outlined clearable").classes("flex-grow q-ml-md")
+        summary_lbl = ui.label("").classes("text-caption q-ml-md")
+    detail_lbl = ui.label("").classes("text-caption q-px-sm q-mb-sm")
+
+    grid = ui.aggrid({
+        "columnDefs": [], "rowData": [],
+        "defaultColDef": _DEFAULT_COL_DEF,
+        "rowSelection": "multiple",
+    }).classes("w-full").style("height: 500px")
+
+    status_lbl = ui.label("").classes("text-caption q-mb-sm")
+    with ui.row().classes("items-center q-pa-sm"):
+        apply_btn = ui.button("Apply changes").props("color=primary")
+        remove_btn = ui.button("Remove ticked rows").props("color=negative")
+        apply_btn.set_enabled(False)
+        remove_btn.set_enabled(False)
+
+    def _current_ext() -> Optional[str]:
+        return ext_select.value or None
+
+    def _editable_cols_for(ext: str, df: pd.DataFrame) -> list[str]:
+        return [c for c in EDITABLE_EXTENSIONS.get(ext, []) if c in df.columns]
+
+    def _aggrid_options(view: pd.DataFrame, ext: str) -> dict:
+        if view.empty:
+            return {
+                "columnDefs": [], "rowData": [],
+                "defaultColDef": _DEFAULT_COL_DEF,
+                "rowSelection": "multiple",
+            }
+        readonly = ext in READONLY_EXTENSIONS
+        editable_cols = set(_editable_cols_for(ext, view))
+        column_defs: list[dict] = []
+        if not readonly:
+            column_defs.append({
+                "headerName": "Remove",
+                "field": "_remove",
+                "checkboxSelection": False,
+                "editable": True,
+                "cellRenderer": "agCheckboxCellRenderer",
+                "cellEditor": "agCheckboxCellEditor",
+                "width": 90,
+                "pinned": "left",
+            })
+        column_defs.append({
+            "headerName": "id",
+            "field": "id",
+            "editable": False,
+            "pinned": "left",
+        })
+        for col in view.columns:
+            column_defs.append({
+                "headerName": str(col),
+                "field": str(col),
+                "editable": (str(col) in editable_cols) and not readonly,
+                "sortable": True,
+                "filter": True,
+            })
+
+        rows: list[dict] = []
+        pending_edits = state["pending_edits"]
+        pending_removals = state["pending_removals"]
+        for idx, row in view.iterrows():
+            eid = str(idx)
+            r: dict = {"id": eid}
+            if not readonly:
+                r["_remove"] = eid in pending_removals
+            edits = pending_edits.get(eid, {})
+            for col in view.columns:
+                c = str(col)
+                if c in edits:
+                    r[c] = edits[c]
+                else:
+                    v = row[col]
+                    try:
+                        if isinstance(v, float) and pd.isna(v):
+                            r[c] = None
+                            continue
+                    except Exception:
+                        pass
+                    r[c] = v
+            rows.append(r)
+        return {
+            "columnDefs": column_defs,
+            "rowData": rows,
+            "defaultColDef": _DEFAULT_COL_DEF,
+            "rowSelection": "multiple",
+        }
+
+    def refresh() -> None:
+        ext = _current_ext()
+        status_lbl.set_text("")
+        if _state.network is None or not ext:
+            grid.options.update({
+                "columnDefs": [], "rowData": [],
+                "defaultColDef": _DEFAULT_COL_DEF,
+                "rowSelection": "multiple",
+            })
+            grid.update()
+            summary_lbl.set_text("No network loaded." if _state.network is None else "Pick an extension.")
+            detail_lbl.set_text("")
+            apply_btn.set_enabled(False)
+            remove_btn.set_enabled(False)
+            return
+        try:
+            df = get_extension_df(_state.network, ext)
+        except Exception as exc:
+            summary_lbl.set_text(f"Failed to load {ext!r}: {exc}")
+            grid.options.update({
+                "columnDefs": [], "rowData": [],
+                "defaultColDef": _DEFAULT_COL_DEF,
+                "rowSelection": "multiple",
+            })
+            grid.update()
+            return
+        # Detail caption.
+        info_df = state.get("info_df")
+        detail = ""
+        if info_df is not None and not info_df.empty and ext in info_df.index:
+            try:
+                detail = str(info_df.loc[ext].get("detail") or "")
+            except Exception:
+                detail = ""
+        detail_lbl.set_text(detail)
+        state["current_df"] = df if df is not None else pd.DataFrame()
+        if state["current_df"].empty:
+            summary_lbl.set_text(f"No {ext!r} extensions found.")
+            grid.options.update({
+                "columnDefs": [], "rowData": [],
+                "defaultColDef": _DEFAULT_COL_DEF,
+                "rowSelection": "multiple",
+            })
+            grid.update()
+            apply_btn.set_enabled(False)
+            remove_btn.set_enabled(False)
+            return
+        total = len(state["current_df"])
+        view = filter_by_id_substring(state["current_df"], filter_input.value or "")
+        if view.empty:
+            summary_lbl.set_text(f"No {ext!r} extensions match the filter.")
+            grid.options.update({
+                "columnDefs": [], "rowData": [],
+                "defaultColDef": _DEFAULT_COL_DEF,
+                "rowSelection": "multiple",
+            })
+            grid.update()
+            return
+        readonly = ext in READONLY_EXTENSIONS
+        editable_cols = _editable_cols_for(ext, view)
+        grid.options.update(_aggrid_options(view, ext))
+        grid.update()
+        if len(view) == total:
+            summary_lbl.set_text(f"{total} {ext!r} extension(s)")
+        else:
+            summary_lbl.set_text(f"{len(view)} of {total} {ext!r} extension(s)")
+        apply_btn.set_enabled(bool(editable_cols) and not readonly)
+        remove_btn.set_enabled(not readonly)
+
+    def _populate_extensions(network) -> None:
+        if network is None:
+            ext_select.options = []
+            ext_select.value = None
+            ext_select.update()
+            state["info_df"] = pd.DataFrame()
+            return
+        try:
+            names = list_extension_names()
+        except Exception:
+            names = []
+        try:
+            state["info_df"] = get_extensions_information()
+        except Exception:
+            state["info_df"] = pd.DataFrame()
+        ext_select.options = list(names)
+        ext_select.value = names[0] if names else None
+        ext_select.update()
+
+    def _on_extension_changed(_e=None) -> None:
+        state["pending_edits"] = {}
+        state["pending_removals"] = set()
+        refresh()
+
+    def _on_filter_changed(_e=None) -> None:
+        refresh()
+
+    ext_select.on("update:model-value", _on_extension_changed)
+    filter_input.on("update:model-value", _on_filter_changed)
+
+    def _on_cell_value_changed(e) -> None:
+        """ag-Grid cell edit handler — caches pending edits + removals."""
+        args = e.args or {}
+        data = args.get("data") or {}
+        col_id = args.get("colId") or args.get("column", {}).get("colId")
+        new_value = args.get("newValue")
+        element_id = str(data.get("id") or "")
+        if not element_id or col_id is None:
+            return
+        ext = _current_ext()
+        if not ext:
+            return
+        if col_id == "_remove":
+            if bool(new_value):
+                state["pending_removals"].add(element_id)
+            else:
+                state["pending_removals"].discard(element_id)
+            return
+        # Cast based on the source DataFrame's column dtype.
+        df = state["current_df"]
+        if element_id not in df.index or col_id not in df.columns:
+            return
+        casted = _cast_value_for_col(df[col_id], new_value)
+        state["pending_edits"].setdefault(element_id, {})[col_id] = casted
+
+    grid.on("cellValueChanged", _on_cell_value_changed)
+
+    def _on_apply_click() -> None:
+        ext = _current_ext()
+        if not ext or _state.network is None:
+            return
+        pending = state["pending_edits"]
+        if not pending:
+            status_lbl.set_text("No pending changes.")
+            return
+        changes_df = pd.DataFrame.from_dict(pending, orient="index")
+        try:
+            update_extension(_state.network, ext, changes_df)
+        except Exception as exc:
+            ui.notify(f"Update failed: {exc}", type="negative")
+            return
+        n = len(pending)
+        state["pending_edits"] = {}
+        ui.notify(
+            f"Applied {n} change(s) to {ext!r}.",
+            type="positive", timeout=1500,
+        )
+        status_lbl.set_text(f"Applied {n} change(s).")
+        refresh()
+
+    def _on_remove_click() -> None:
+        ext = _current_ext()
+        if not ext or _state.network is None:
+            return
+        ids = sorted(state["pending_removals"])
+        if not ids:
+            status_lbl.set_text("Tick at least one row to remove.")
+            return
+        try:
+            remove_extension(_state.network, ext, ids)
+        except Exception as exc:
+            ui.notify(f"Remove failed: {exc}", type="negative")
+            return
+        state["pending_removals"] = set()
+        # Drop any cached edits for the just-removed rows.
+        for eid in list(ids):
+            state["pending_edits"].pop(eid, None)
+        ui.notify(
+            f"Removed {len(ids)} {ext!r} extension row(s).",
+            type="positive", timeout=1500,
+        )
+        status_lbl.set_text(f"Removed {len(ids)} row(s).")
+        refresh()
+
+    apply_btn.on_click(_on_apply_click)
+    remove_btn.on_click(_on_remove_click)
+
+    # Listener on AppState — keeps the extensions tab in step with
+    # network loads, reductions and other "the whole topology may have
+    # changed" events. The host also calls ``refresh()`` from the LF
+    # listener so post-LF extension columns surface.
+    def _on_network_changed(network) -> None:
+        _populate_extensions(network)
+        state["pending_edits"] = {}
+        state["pending_removals"] = set()
+        refresh()
+
+    _state.on_network_changed(_on_network_changed)
+    _populate_extensions(_state.network)
+    refresh()
+
+    return refresh
+
+
+def _cast_value_for_col(series, raw):
+    """Best-effort cast for a user-typed cell value, matching the
+    source DataFrame's column dtype."""
+    import pandas as pd
+    sample = None
+    for v in series:
+        if v is not None and not (isinstance(v, float) and pd.isna(v)):
+            sample = v
+            break
+    if isinstance(sample, bool):
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in ("true", "1", "yes", "on")
+    if isinstance(sample, int):
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return raw
+    if isinstance(sample, float):
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return float("nan")
+    return raw if isinstance(raw, str) else (None if raw is None else str(raw))
+
+
 def _after_revert(touched, refresh_data_grid) -> None:
     """Post-revert: invalidate diagram caches for topology-affecting
     attributes and refresh the data grid so the current view reflects
@@ -3693,6 +4039,7 @@ def main_page() -> None:
         nad_tab = ui.tab("Network Area Diagram")
         sld_tab = ui.tab("Single Line Diagram")
         data_tab = ui.tab("Data Explorer Components")
+        extensions_tab = ui.tab("Data Explorer Extensions")
     panels = ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")
     with panels:
         with ui.tab_panel(map_tab).classes("q-pa-none w-full"):
@@ -3744,6 +4091,8 @@ def main_page() -> None:
             ).classes("w-full")
         with ui.tab_panel(data_tab).classes("w-full"):
             refresh_data_grid = _build_data_explorer()
+        with ui.tab_panel(extensions_tab).classes("w-full"):
+            refresh_extensions_tab = _build_extensions_explorer()
 
     # ------------------------------------------------------------------
     # Cross-tab navigation: substation click on map -> SLD tab on that VL.
@@ -3795,7 +4144,7 @@ def main_page() -> None:
     def _on_loadflow_completed(result):
         """LF rewrites line P/Q/I + bus V/angle, baked into the SVGs and
         the enriched DataFrames. Flush the diagram caches and refresh
-        whichever VL is active + the data grid.
+        whichever VL is active + the data grid + the extensions tab.
         """
         _nad_cache.clear()
         _sld_cache.clear()
@@ -3803,6 +4152,7 @@ def main_page() -> None:
             _push_sld(_state.selected_vl)
             _push_nad(_state.selected_vl, _nad_depth)
         refresh_data_grid()
+        refresh_extensions_tab()
 
     # Listeners are registered fresh on every page connect; if a
     # previous registration is still around (browser refresh), the
