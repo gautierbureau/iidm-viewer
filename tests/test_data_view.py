@@ -11,15 +11,19 @@ import pandas as pd
 import pytest
 
 from iidm_viewer import network_loader
+from iidm_viewer.change_log import ChangeLog
 from iidm_viewer.data_view import (
     FILTERS,
     PRIORITY_ANCHOR,
     PRIORITY_COLUMNS,
     VL_FILTERABLE,
+    apply_and_log_bulk_disconnect,
+    apply_and_log_bulk_edit,
     apply_filter_specs,
     build_vl_lookup,
     compute_filter_widget_spec,
     dataframe_to_csv,
+    delete_and_log_elements,
     enrich_with_joins,
     filter_by_voltage_level,
     get_enriched_dataframe,
@@ -199,3 +203,108 @@ def test_dataframe_to_csv_is_utf8_bytes():
     text = out.decode("utf-8")
     assert "a,b" in text
     assert "é" in text and "ø" in text
+
+
+# ---------------------------------------------------------------------------
+# Bulk-action orchestration helpers (PySide6 + NiceGUI consume these)
+# ---------------------------------------------------------------------------
+def test_apply_and_log_bulk_edit_updates_network_and_change_log(ieee14):
+    """End-to-end: bulk-edit ``target_p`` on two IEEE14 generators,
+    confirm the live frame carries the new value, the change log
+    holds the previous-value entries, and the outcome dict reports
+    the topology-affecting flag."""
+    log = ChangeLog()
+    gens = ieee14.get_generators()
+    ids = list(gens.index[:2])
+    assert len(ids) == 2
+
+    outcome = apply_and_log_bulk_edit(
+        ieee14, "Generators", ids, "target_p", 42.0,
+        change_log=log,
+    )
+    assert set(outcome["prev_map"].keys()) == set(ids)
+    assert outcome["display_value"] == 42.0
+    # ``get_dataframe`` returns the id as a column with a RangeIndex.
+    refreshed = outcome["refreshed_df"].set_index("id")
+    for gen_id in ids:
+        assert refreshed.loc[gen_id, "target_p"] == 42.0
+    # target_p is *not* topology-affecting (changes power flow only).
+    assert outcome["topology_affecting"] is False
+    # The change log carries one entry per touched id.
+    entries = log.entries("Generators")
+    assert {e["element_id"] for e in entries} == set(map(str, ids))
+
+
+def test_apply_and_log_bulk_edit_marks_topology_affecting_attributes(ieee14):
+    """A ``connected`` edit must surface ``topology_affecting=True``
+    so hosts can flush their NAD / SLD caches."""
+    gens = ieee14.get_generators()
+    gen_id = str(gens.index[0])
+    outcome = apply_and_log_bulk_edit(
+        ieee14, "Generators", [gen_id], "connected", False,
+    )
+    assert outcome["topology_affecting"] is True
+    # Restore so the module-scoped fixture stays usable.
+    apply_and_log_bulk_edit(
+        ieee14, "Generators", [gen_id], "connected", True,
+    )
+
+
+def test_apply_and_log_bulk_disconnect_records_one_entry_per_attribute():
+    """Lines / 2WTs flip two ``connected*`` attributes; confirm the
+    helper records one bulk entry per touched attribute."""
+    # IEEE14 is a fresh load per call — module fixture would be
+    # corrupted by the disconnect.
+    net = network_loader.load_from_path(str(XIIDM))
+    lines = net.get_lines()
+    line_id = str(lines.index[0])
+    log = ChangeLog()
+    outcome = apply_and_log_bulk_disconnect(
+        net, "Lines", [line_id], change_log=log,
+    )
+    per_attr = outcome["per_attr_prev_map"]
+    assert set(per_attr.keys()) == {"connected1", "connected2"}
+    # One entry per attribute (not per id × attribute).
+    attrs_logged = {e["property"] for e in log.entries("Lines")}
+    assert attrs_logged == {"connected1", "connected2"}
+    refreshed = outcome["refreshed_df"].set_index("id")
+    assert bool(refreshed.loc[line_id, "connected1"]) is False
+    assert bool(refreshed.loc[line_id, "connected2"]) is False
+
+
+def test_delete_and_log_elements_records_removal_with_snapshot():
+    """``delete_and_log_elements`` must (1) call pypowsybl's
+    ``remove_elements`` (cascade-aware), (2) drop edit-log entries
+    for the removed ids, (3) record the removal with the snapshot
+    so the Change Log panel can render it."""
+    net = network_loader.load_from_path(str(XIIDM))
+    gens = net.get_generators()
+    snapshot = gens.copy()
+    snapshot.index = snapshot.index.astype(str)
+    gen_ids = list(gens.index[:2])
+    log = ChangeLog()
+    # Seed an edit-log entry that must be dropped on removal.
+    log.record("Generators", str(gen_ids[0]), "target_p", 0.0, 99.0)
+    assert log.entries("Generators")
+    removed = delete_and_log_elements(
+        net, "Generators", gen_ids,
+        change_log=log,
+        snapshot_df=snapshot.assign(id=snapshot.index),
+    )
+    assert set(map(str, gen_ids)).issubset(set(map(str, removed)))
+    # The stale edit-log entry is gone, the removal entry is in.
+    assert not log.entries("Generators")
+    removals = log.removals("Generators")
+    assert {str(r["element_id"]) for r in removals} >= set(map(str, gen_ids))
+
+
+def test_apply_and_log_helpers_tolerate_no_change_log(ieee14):
+    """When no ChangeLog is passed the helpers still run; only the
+    log-side-effect is skipped."""
+    gens = ieee14.get_generators()
+    gen_id = str(gens.index[0])
+    # No change_log kwarg — must not raise.
+    outcome = apply_and_log_bulk_edit(
+        ieee14, "Generators", [gen_id], "target_p", 33.0,
+    )
+    assert outcome["display_value"] == 33.0

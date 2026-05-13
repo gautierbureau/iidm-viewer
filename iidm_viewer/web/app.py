@@ -53,16 +53,12 @@ app.add_static_files(_SLD_URL, _SLD_DIST)
 from iidm_viewer.component_registry import (
     COMPONENT_TYPES as COMPONENT_GETTERS,
     DISCONNECTABLE_COMPONENTS,
-    DISCONNECT_ATTRS,
     REMOVABLE_COMPONENTS,
     TOPOLOGY_AFFECTING_ATTRIBUTES,
-    apply_bulk_disconnect,
-    apply_bulk_edit,
     apply_cell_edit,
     editable_attributes,
     get_dataframe,
     is_editable,
-    remove_elements,
 )
 from iidm_viewer.component_creation import (
     CREATABLE_BRANCHES,
@@ -103,7 +99,10 @@ from iidm_viewer.component_creation import (
 from iidm_viewer.data_view import (
     FILTERS,
     VL_FILTERABLE,
+    apply_and_log_bulk_disconnect,
+    apply_and_log_bulk_edit,
     dataframe_to_csv,
+    delete_and_log_elements,
     filter_by_voltage_level,
     get_enriched_dataframe,
     reorder_columns,
@@ -3360,8 +3359,9 @@ def _build_data_explorer():
             ui.notify("Select one or more rows first.", type="warning")
             return
         try:
-            prev_map = apply_bulk_edit(
+            outcome = apply_and_log_bulk_edit(
                 _state.network, component, ids, attribute, new_value,
+                change_log=_state.change_log,
             )
         except Exception as exc:
             ui.notify(
@@ -3369,9 +3369,8 @@ def _build_data_explorer():
                 type="negative",
             )
             return
-        _state.change_log.record_bulk(component, attribute, prev_map, new_value)
         ui.notify(
-            f"{component}: {attribute} = {new_value} applied to {len(ids)} rows",
+            f"{component}: {attribute} = {outcome['display_value']} applied to {len(ids)} rows",
             type="positive",
             timeout=1500,
         )
@@ -3379,7 +3378,7 @@ def _build_data_explorer():
         bulk_value.update()
         # Topology-affecting bulk changes flush the diagram caches so
         # a subsequent tab switch shows the updated picture.
-        if attribute in TOPOLOGY_AFFECTING_ATTRIBUTES:
+        if outcome["topology_affecting"]:
             _nad_cache.clear()
             _sld_cache.clear()
             if _state.selected_vl:
@@ -3415,18 +3414,16 @@ def _build_data_explorer():
             ui.notify("Select one or more rows first.", type="warning")
             return
         try:
-            per_attr_prev_map = apply_bulk_disconnect(_state.network, component, ids)
+            apply_and_log_bulk_disconnect(
+                _state.network, component, ids,
+                change_log=_state.change_log,
+            )
         except Exception as exc:
             ui.notify(
                 f"Disconnect rejected — {component}/{len(ids)} rows: {exc}",
                 type="negative",
             )
             return
-        for attribute, prev_map in per_attr_prev_map.items():
-            _state.change_log.record_bulk(
-                component, attribute, prev_map,
-                DISCONNECT_ATTRS[component][attribute],
-            )
         ui.notify(
             f"{component}: disconnected {len(ids)} row(s)",
             type="positive",
@@ -3475,7 +3472,6 @@ def _build_data_explorer():
         # Snapshot the to-be-removed rows for the ChangeLog before the
         # network forgets them.
         try:
-            from iidm_viewer.data_view import get_enriched_dataframe
             df_before = get_enriched_dataframe(_state.network, component)
             snapshot_index = (
                 df_before.set_index("id", drop=False)
@@ -3485,24 +3481,17 @@ def _build_data_explorer():
         except Exception:
             snapshot_index = None
         try:
-            removed = remove_elements(_state.network, component, ids)
+            removed = delete_and_log_elements(
+                _state.network, component, ids,
+                change_log=_state.change_log,
+                snapshot_df=snapshot_index,
+            )
         except Exception as exc:
             ui.notify(
                 f"Delete failed — {component}/{len(ids)} rows: {exc}",
                 type="negative",
             )
             return
-        # Drop edit-log entries for removed ids (no longer revertable
-        # via apply_cell_edit) and record the removal so the panel can
-        # display it.
-        removed_set = set(map(str, removed))
-        for entry in list(_state.change_log.entries(component)):
-            if str(entry.get("element_id")) in removed_set:
-                try:
-                    _state.change_log._entries.remove(entry)
-                except ValueError:
-                    pass
-        _state.change_log.record_removal(component, removed, snapshot=snapshot_index)
         # Deletion always changes topology -> flush diagram caches.
         _nad_cache.clear()
         _sld_cache.clear()

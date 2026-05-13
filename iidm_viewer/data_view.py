@@ -16,6 +16,10 @@ Hosts the things every host's data-table view needs:
   whitelist can target.
 * :func:`dataframe_to_csv` — the CSV-export bytes the download
   button hands the user.
+* :func:`apply_and_log_bulk_edit` / :func:`apply_and_log_bulk_disconnect`
+  / :func:`delete_and_log_elements` — shared orchestration for the
+  bulk-row actions every Data Explorer host exposes (apply / disconnect
+  / delete + ChangeLog bookkeeping).
 
 No streamlit / Qt / NiceGUI imports — the Streamlit
 ``caches.py`` / ``filters.py`` / ``data_explorer.py`` delegate here,
@@ -27,6 +31,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from iidm_viewer.change_log import ChangeLog
 from iidm_viewer.component_registry import COMPONENT_TYPES, get_dataframe
 from iidm_viewer.powsybl_worker import NetworkProxy, run
 
@@ -312,3 +317,138 @@ def get_enriched_dataframe(
 def dataframe_to_csv(df: pd.DataFrame) -> bytes:
     """Encode ``df`` as UTF-8 CSV bytes (suitable for any host's download API)."""
     return df.to_csv(index=False).encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Bulk-row actions (PySide6 + NiceGUI share the orchestration; Streamlit
+# uses a different multi-column edit-frame path via update_components).
+# ---------------------------------------------------------------------------
+def apply_and_log_bulk_edit(
+    network: NetworkProxy,
+    component: str,
+    element_ids: list[str],
+    attribute: str,
+    new_value: Any,
+    change_log: Optional[ChangeLog] = None,
+) -> dict:
+    """Apply the same edit to every id + optionally record it.
+
+    Wraps :func:`iidm_viewer.component_registry.apply_bulk_edit`,
+    re-fetches the live frame so the host can refresh its grid with
+    the coerced values pypowsybl accepted, and — when a
+    :class:`ChangeLog` is provided — records one bulk entry.
+
+    Returns a dict with:
+
+    * ``prev_map`` — previous-value map keyed by element id (the same
+      shape :meth:`ChangeLog.record_bulk` consumes).
+    * ``display_value`` — ``new_value`` coerced against the column's
+      dtype, ready for log + UI display.
+    * ``refreshed_df`` — post-edit ``get_dataframe`` for ``component``;
+      avoids the host doing a second worker hop just to redraw.
+    * ``topology_affecting`` — ``True`` iff the attribute is in
+      :data:`TOPOLOGY_AFFECTING_ATTRIBUTES`; hosts use this to gate
+      their diagram cache flush.
+    """
+    from iidm_viewer.component_registry import (
+        TOPOLOGY_AFFECTING_ATTRIBUTES,
+        _coerce,
+        apply_bulk_edit,
+    )
+
+    prev_map = apply_bulk_edit(
+        network, component, element_ids, attribute, new_value,
+    )
+    refreshed = get_dataframe(network, component)
+    try:
+        display_value = (
+            _coerce(new_value, refreshed[attribute].dtype)
+            if attribute in refreshed.columns else new_value
+        )
+    except Exception:
+        display_value = new_value
+    if change_log is not None:
+        change_log.record_bulk(component, attribute, prev_map, display_value)
+    return {
+        "prev_map": prev_map,
+        "display_value": display_value,
+        "refreshed_df": refreshed,
+        "topology_affecting": attribute in TOPOLOGY_AFFECTING_ATTRIBUTES,
+    }
+
+
+def apply_and_log_bulk_disconnect(
+    network: NetworkProxy,
+    component: str,
+    element_ids: list[str],
+    change_log: Optional[ChangeLog] = None,
+) -> dict:
+    """Disconnect rows + record one ChangeLog entry per touched attribute.
+
+    Wraps :func:`iidm_viewer.component_registry.apply_bulk_disconnect`.
+    Lines / 2-Winding Transformers carry two ``connected*`` attributes;
+    the underlying call already iterates both, so this helper iterates
+    the returned ``{attribute: prev_map}`` mapping to log each one
+    with its specific target value.
+
+    Returns a dict with:
+
+    * ``per_attr_prev_map`` — ``{attribute: {id: prev_value}}`` as
+      returned by ``apply_bulk_disconnect``; useful for hosts that
+      need to fan out per-attribute signals.
+    * ``refreshed_df`` — post-disconnect frame for the component.
+    """
+    from iidm_viewer.component_registry import (
+        DISCONNECT_ATTRS,
+        apply_bulk_disconnect,
+    )
+
+    per_attr_prev_map = apply_bulk_disconnect(network, component, element_ids)
+    if change_log is not None:
+        for attribute, prev_map in per_attr_prev_map.items():
+            change_log.record_bulk(
+                component, attribute, prev_map,
+                DISCONNECT_ATTRS[component][attribute],
+            )
+    refreshed = get_dataframe(network, component)
+    return {
+        "per_attr_prev_map": per_attr_prev_map,
+        "refreshed_df": refreshed,
+    }
+
+
+def delete_and_log_elements(
+    network: NetworkProxy,
+    component: str,
+    element_ids: list[str],
+    change_log: Optional[ChangeLog] = None,
+    snapshot_df: Optional[pd.DataFrame] = None,
+) -> list[str]:
+    """Remove elements + optionally record them in a ChangeLog.
+
+    Wraps :func:`iidm_viewer.component_registry.remove_elements`.
+    pypowsybl's cascade can wipe more than the user asked for (feeder
+    bay switches, HVDC triples, VL contents), so the helper returns
+    the *actually-removed* ids.
+
+    When a :class:`ChangeLog` is supplied, the helper also:
+
+    1. Drops any pending edit-log entries for the removed ids
+       (apply_cell_edit can't revert what's no longer there).
+    2. Records the removal so the panel can display it; ``snapshot_df``
+       — indexed by id — is stashed per entry for a future "recreate"
+       undo.
+    """
+    from iidm_viewer.component_registry import remove_elements
+
+    removed = remove_elements(network, component, element_ids)
+    if change_log is not None:
+        removed_set = {str(r) for r in removed}
+        for entry in list(change_log.entries(component)):
+            if str(entry.get("element_id")) in removed_set:
+                try:
+                    change_log._entries.remove(entry)
+                except ValueError:
+                    pass
+        change_log.record_removal(component, removed, snapshot=snapshot_df)
+    return removed
