@@ -12,6 +12,12 @@ from iidm_viewer import script_recorder
 
 def setup_function(_):
     st.session_state.clear()
+    # These tests exercise the Streamlit storage path; ``init_state`` in
+    # the app does the same wiring on every rerun. Calling it here
+    # keeps the assertions against ``st.session_state`` valid even
+    # though the recorder defaults to a module-level dict for the
+    # PySide6 / NiceGUI hosts.
+    script_recorder.set_store(st.session_state)
 
 
 def test_get_log_returns_empty_when_unset():

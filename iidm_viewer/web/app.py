@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 from nicegui import app, ui
 
+from iidm_viewer import script_recorder
 from iidm_viewer.powsybl_worker import NetworkProxy, run
 from iidm_viewer.web.state import AppState
 
@@ -885,6 +886,7 @@ def _open_blank_network_dialog(file_lbl) -> None:
             try:
                 network = _create_empty_network(network_id)
                 _state.install_network(network)
+                script_recorder.record_create_empty(network_id)
             except Exception as exc:
                 ui.notify(f"Empty network failed: {exc}", type="negative")
                 return
@@ -899,6 +901,107 @@ def _open_blank_network_dialog(file_lbl) -> None:
             ui.button("Cancel", on_click=dialog.close).props("flat")
             ui.button("Create", on_click=_on_create).props("color=primary")
 
+    dialog.open()
+
+
+def _open_session_script_dialog() -> None:
+    """Open the "Session Script" modal — NiceGUI counterpart of the
+    Streamlit + PySide6 dialogs.
+
+    Renders the script produced by
+    :func:`iidm_viewer.script_generator.generate_script` against the
+    op log carried by :mod:`iidm_viewer.script_recorder`. Provides a
+    Recording pause toggle, an "Include reverted edits" toggle, a
+    download button and a clear-log button.
+    """
+    from datetime import datetime
+
+    from iidm_viewer.script_generator import generate_script
+
+    state: dict = {"include_reverted": False, "script": ""}
+
+    with ui.dialog() as dialog, ui.card().style(
+        "min-width: 720px; max-width: 95vw; max-height: 90vh",
+    ):
+        ui.label("Session Script").classes("text-h6")
+        ui.label(
+            "A runnable Python script that replays the operations you "
+            "have performed in this session against any pypowsybl-"
+            "loadable network."
+        ).classes("text-caption")
+
+        with ui.row().classes("items-center q-mb-sm"):
+            recording_toggle = ui.switch(
+                "Recording", value=not script_recorder.is_paused(),
+            )
+            include_reverted_toggle = ui.switch(
+                "Include reverted edits", value=False,
+            )
+
+        paused_lbl = ui.label(
+            "Recording is paused — new operations will not be captured."
+        ).classes(
+            "q-pa-sm bg-yellow-1 text-orange-9 rounded-borders"
+        )
+        paused_lbl.visible = script_recorder.is_paused()
+        count_lbl = ui.label("").classes("text-caption q-mt-sm")
+        preview = ui.codemirror(
+            value="", language="python", theme="vscodeLight",
+        ).props("readonly").classes("w-full").style("height: 360px")
+
+        def _rerender() -> None:
+            ops = script_recorder.get_log()
+            include_reverted = bool(include_reverted_toggle.value)
+            source_filename = script_recorder.get_source_filename()
+            script = generate_script(
+                ops,
+                include_reverted=include_reverted,
+                source_filename=source_filename,
+            )
+            state["script"] = script
+            state["include_reverted"] = include_reverted
+            preview.value = script
+            preview.update()
+            visible_count = sum(
+                1 for o in ops if include_reverted or not o.get("reverted")
+            )
+            total = len(ops)
+            reverted = total - sum(1 for o in ops if not o.get("reverted"))
+            src_blurb = f" — source: {source_filename}" if source_filename else ""
+            rev_blurb = f" ({reverted} reverted)" if reverted else ""
+            count_lbl.set_text(
+                f"{visible_count} of {total} operation(s) emitted{rev_blurb}{src_blurb}"
+            )
+
+        def _on_recording_changed(_e=None) -> None:
+            paused = not bool(recording_toggle.value)
+            script_recorder.set_paused(paused)
+            paused_lbl.visible = paused
+
+        recording_toggle.on("update:model-value", _on_recording_changed)
+        include_reverted_toggle.on("update:model-value", lambda _e=None: _rerender())
+
+        def _on_download() -> None:
+            ts_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ui.download.content(
+                state["script"].encode("utf-8"),
+                filename=f"session_{ts_tag}.py",
+                media_type="text/x-python",
+            )
+
+        def _on_clear() -> None:
+            script_recorder.clear_log()
+            recording_toggle.value = True
+            recording_toggle.update()
+            paused_lbl.visible = False
+            _rerender()
+
+        with ui.row().classes("full-width justify-end q-mt-md"):
+            ui.button("Download", on_click=_on_download).props("color=primary")
+            ui.button("Clear log", on_click=_on_clear).props("flat")
+            ui.button("Close", on_click=dialog.close).props("flat")
+
+    _rerender()
     dialog.open()
 
 
@@ -4426,6 +4529,13 @@ def main_page() -> None:
                     post_processors=_state.import_post_processors or None,
                 )
                 _state.install_network(network)
+                # Mirror Streamlit's load-network recording so the
+                # Session Script reproduces the upload at replay time.
+                script_recorder.record_load_network(
+                    name,
+                    _state.import_params or None,
+                    _state.import_post_processors or None,
+                )
             except Exception as exc:
                 ui.notify(f"Load failed: {exc}", type="negative")
                 return
@@ -4573,6 +4683,13 @@ def main_page() -> None:
         view_logs_btn.on_click(
             lambda: _open_lf_report_dialog(_state.last_report_json),
         )
+
+        # "View live Script" — auto-recorded HMI-mirror script for this
+        # session. Always available; the dialog handles the empty-log
+        # state. Mirrors the Streamlit + PySide6 sidebars.
+        view_script_btn = ui.button("View live Script") \
+            .props("flat dense").classes("full-width q-mt-sm")
+        view_script_btn.on_click(_open_session_script_dialog)
 
     with ui.tabs().classes("w-full") as tabs:
         map_tab = ui.tab("Network Map")

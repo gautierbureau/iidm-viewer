@@ -1053,3 +1053,66 @@ def test_reactive_curves_builder_uses_shared_view_model():
     assert "build_generator_plot_data" in src
     assert "build_containment_summary" in src
     assert "STATUS_DIAMOND_COLOR" in src
+
+
+def test_nicegui_left_drawer_carries_view_script_button():
+    """The NiceGUI sidebar must surface a "View live Script" button so
+    the user can open the auto-recorded HMI-mirror script — parity with
+    Streamlit + PySide6."""
+    import inspect
+
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert 'ui.button("View live Script")' in src
+    assert "view_script_btn.on_click(_open_session_script_dialog)" in src
+
+
+def test_open_session_script_dialog_uses_shared_recorder_and_generator():
+    """The NiceGUI dialog must reuse ``script_recorder`` + ``generate_script``
+    so it stays in lockstep with Streamlit + PySide6."""
+    import inspect
+
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._open_session_script_dialog)
+    assert "from iidm_viewer.script_generator import generate_script" in src
+    assert "script_recorder.get_log" in src
+    assert "script_recorder.is_paused" in src
+    assert "script_recorder.set_paused" in src
+    assert "script_recorder.clear_log" in src
+
+
+def test_nicegui_state_records_load_and_create_empty_and_loadflow():
+    """``AppState`` mutators must drive the shared recorder so the
+    NiceGUI host's Session Script captures the same ops as Streamlit."""
+    import os
+
+    import pypowsybl.network as pn
+
+    from iidm_viewer import script_recorder
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.web.state import AppState
+
+    script_recorder.reset_store()
+    try:
+        state = AppState()
+        # Load a real network — recorder seeds with a ``load_network`` op.
+        xiidm = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), os.pardir, "test_ieee14.xiidm"),
+        )
+        state.load_network_from_path(xiidm)
+        ops = script_recorder.get_log()
+        assert ops and ops[0]["kind"] == "load_network"
+        # Loadflow appends a ``run_loadflow`` op.
+        state.run_loadflow()
+        assert script_recorder.get_log()[-1]["kind"] == "run_loadflow"
+        # Empty network resets the log and seeds with ``create_empty``.
+        empty = NetworkProxy(run(pn.create_empty))
+        state.install_network(empty)
+        script_recorder.record_create_empty("blank")
+        seeded = script_recorder.get_log()
+        assert seeded[0]["kind"] == "create_empty"
+        assert seeded[0]["network_id"] == "blank"
+    finally:
+        script_recorder.reset_store()

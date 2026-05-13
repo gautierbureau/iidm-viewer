@@ -48,7 +48,8 @@ class _Sidebar(QWidget):
     def __init__(
         self, on_load, on_run_loadflow, on_vl_selected, on_view_logs,
         on_lf_parameters, on_save_network, on_import_options,
-        on_network_reduction, on_blank_network, parent=None,
+        on_network_reduction, on_blank_network, on_view_session_script,
+        parent=None,
     ) -> None:
         super().__init__(parent)
         self.setFixedWidth(240)
@@ -129,6 +130,16 @@ class _Sidebar(QWidget):
         self._view_logs_btn.clicked.connect(on_view_logs)
         self._view_logs_btn.setEnabled(False)
 
+        # "View live Script" opens the SessionScriptDialog. Always
+        # enabled — even before a network is loaded the user can see
+        # the empty log + the Recording toggle. Mirrors Streamlit's
+        # session_script.show_session_script_dialog.
+        self._view_script_btn = QPushButton("View live Script")
+        self._view_script_btn.setToolTip(
+            "Open the auto-recorded HMI-mirror script for this session."
+        )
+        self._view_script_btn.clicked.connect(on_view_session_script)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.addWidget(title)
@@ -144,6 +155,7 @@ class _Sidebar(QWidget):
         layout.addLayout(lf_row)
         layout.addWidget(self._lf_status)
         layout.addWidget(self._view_logs_btn)
+        layout.addWidget(self._view_script_btn)
         layout.addStretch(1)
 
     # -- File / status labels --------------------------------------------
@@ -282,6 +294,7 @@ class MainWindow(QMainWindow):
             self._on_import_options_clicked,
             self._on_network_reduction_clicked,
             self._on_blank_network_clicked,
+            self._on_view_session_script_clicked,
         )
 
         central = QWidget()
@@ -393,6 +406,16 @@ class MainWindow(QMainWindow):
         from iidm_viewer.qt.lf_report_dialog import LFReportDialog
         dlg = LFReportDialog(report_json, self)
         dlg.exec()
+
+    def _on_view_session_script_clicked(self) -> None:
+        """Open the SessionScriptDialog showing the auto-recorded log.
+
+        Always available — the dialog handles the empty-log case
+        gracefully so the user can pause / resume Recording even
+        before loading a network.
+        """
+        from iidm_viewer.qt.session_script_dialog import SessionScriptDialog
+        SessionScriptDialog(self).exec()
 
     def _on_network_reduction_clicked(self) -> None:
         """Open the three-mode reduction dialog.
