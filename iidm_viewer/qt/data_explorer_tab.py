@@ -440,29 +440,42 @@ class DataExplorerTab(QWidget):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def _create_panels(self):
+        """Return the tuple of every create-sub-panel hosted by this tab.
+
+        Used by :meth:`set_network` and :meth:`_on_component_created`
+        to fan out network / component updates without listing each
+        panel twice — a fresh in-tab create (Substation, VL, BBS, …)
+        changes what every *other* panel can offer, so they all need
+        the same refresh.
+        """
+        return (
+            self._create_panel,
+            self._create_branch_panel,
+            self._create_container_panel,
+            self._create_hvdc_panel,
+            self._create_tap_changer_panel,
+            self._create_coupling_panel,
+            self._create_reactive_limits_panel,
+            self._create_operational_limits_panel,
+            self._create_svc_panel,
+            self._create_extension_panel,
+        )
+
+    def _fanout_to_create_panels(
+        self, network: Optional[NetworkProxy], component: str,
+    ) -> None:
+        """Push the current network + active component into every
+        create panel. Each panel decides on its own whether to render
+        for the given component."""
+        for panel in self._create_panels():
+            panel.set_network(network)
+            panel.set_component(component)
+
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
         self._change_log_panel.set_network(network)
-        self._create_panel.set_network(network)
-        self._create_panel.set_component(self._combo.currentText())
-        self._create_branch_panel.set_network(network)
-        self._create_branch_panel.set_component(self._combo.currentText())
-        self._create_container_panel.set_network(network)
-        self._create_container_panel.set_component(self._combo.currentText())
-        self._create_hvdc_panel.set_network(network)
-        self._create_hvdc_panel.set_component(self._combo.currentText())
-        self._create_tap_changer_panel.set_network(network)
-        self._create_tap_changer_panel.set_component(self._combo.currentText())
-        self._create_coupling_panel.set_network(network)
-        self._create_coupling_panel.set_component(self._combo.currentText())
-        self._create_reactive_limits_panel.set_network(network)
-        self._create_reactive_limits_panel.set_component(self._combo.currentText())
-        self._create_operational_limits_panel.set_network(network)
-        self._create_operational_limits_panel.set_component(self._combo.currentText())
-        self._create_svc_panel.set_network(network)
-        self._create_svc_panel.set_component(self._combo.currentText())
-        self._create_extension_panel.set_network(network)
-        self._create_extension_panel.set_component(self._combo.currentText())
+        self._fanout_to_create_panels(network, self._combo.currentText())
         if network is None:
             self._model.set_dataframe(pd.DataFrame(), editable_cols=[])
             self._summary.setText("No network loaded.")
@@ -516,10 +529,23 @@ class DataExplorerTab(QWidget):
         self._rebuild_filter_widgets(label)
 
     def _on_component_created(self, component: str, element_id: str) -> None:
-        """Refresh the data grid + diagram caches after a new component
-        is created (topology changes: bay switches + the new feeder)."""
+        """Refresh the data grid + diagram caches + sibling create
+        panels after a new component is created.
+
+        Creating a Substation / Voltage Level / Busbar Section changes
+        what every *other* create panel can offer (e.g. the Generators
+        form needs the new node-breaker VL in its dropdown). Fan the
+        latest network + active component out to every create panel
+        before refreshing the data grid so the user sees the new
+        options without having to reload.
+        """
+        active = self._combo.currentText()
+        # Re-feed every create panel so VL / busbar / target dropdowns
+        # pick up the brand-new element. Each panel is idempotent on a
+        # set_network/set_component pair.
+        self._fanout_to_create_panels(self._network, active)
         # Re-fetch the live frame to surface the new row.
-        if component == self._combo.currentText():
+        if component == active:
             self._refresh(component)
         # Diagram caches store SVGs that don't include the new element;
         # surface this via the bulk_edit_applied path so MainWindow's
