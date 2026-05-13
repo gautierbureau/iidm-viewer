@@ -72,20 +72,20 @@ from iidm_viewer.component_registry import (
     DISCONNECT_ATTRS,
     REMOVABLE_COMPONENTS,
     TOPOLOGY_AFFECTING_ATTRIBUTES,
-    apply_bulk_disconnect,
-    apply_bulk_edit,
     apply_cell_edit,
     editable_attributes,
     get_dataframe,
     is_editable,
-    remove_elements,
 )
 from iidm_viewer.data_view import (
     FILTERS,
     VL_FILTERABLE,
+    apply_and_log_bulk_disconnect,
+    apply_and_log_bulk_edit,
     apply_filter_specs,
     compute_filter_widget_spec,
     dataframe_to_csv,
+    delete_and_log_elements,
     filter_by_voltage_level,
     get_enriched_dataframe,
     reorder_columns,
@@ -854,7 +854,9 @@ class DataExplorerTab(QWidget):
         if component not in DISCONNECTABLE_COMPONENTS:
             return
         try:
-            per_attr_prev_map = apply_bulk_disconnect(self._network, component, ids)
+            outcome = apply_and_log_bulk_disconnect(
+                self._network, component, ids, change_log=self._change_log,
+            )
         except Exception as exc:
             QMessageBox.warning(
                 self,
@@ -862,22 +864,12 @@ class DataExplorerTab(QWidget):
                 f"{component}/{len(ids)} rows\n\n{exc}",
             )
             return
-        # Refresh the live frame so the model reflects the new
-        # connection state.
-        try:
-            df = get_dataframe(self._network, component)
-        except Exception:
-            df = self._model.dataframe()
+        df = outcome["refreshed_df"]
         cols = [c for c in editable_attributes(component) if c in df.columns]
         self._model.set_dataframe(df, editable_cols=cols)
-        # Record one batch per attribute (Lines / 2W flip two).
-        if self._change_log is not None:
-            for attribute, prev_map in per_attr_prev_map.items():
-                target_value = DISCONNECT_ATTRS[component][attribute]
-                self._change_log.record_bulk(component, attribute, prev_map, target_value)
         # Re-emit on bulk_edit_applied so MainWindow flushes NAD/SLD caches
-        # for each touched attribute.
-        for attribute, prev_map in per_attr_prev_map.items():
+        # for each touched attribute (Lines / 2W flip two).
+        for attribute, prev_map in outcome["per_attr_prev_map"].items():
             self.bulk_edit_applied.emit(
                 component, ids, attribute,
                 DISCONNECT_ATTRS[component][attribute], prev_map,
@@ -913,7 +905,11 @@ class DataExplorerTab(QWidget):
             else None
         )
         try:
-            removed = remove_elements(self._network, component, ids)
+            removed = delete_and_log_elements(
+                self._network, component, ids,
+                change_log=self._change_log,
+                snapshot_df=snapshot,
+            )
         except Exception as exc:
             QMessageBox.warning(
                 self,
@@ -921,17 +917,6 @@ class DataExplorerTab(QWidget):
                 f"{component}/{len(ids)} rows\n\n{exc}",
             )
             return
-        # Drop any edit-log entries for removed ids (no longer
-        # revertable via apply_cell_edit) and record the removal so
-        # the panel can display it.
-        if self._change_log is not None:
-            for entry in list(self._change_log.entries(component)):
-                if str(entry.get("element_id")) in set(map(str, removed)):
-                    try:
-                        self._change_log._entries.remove(entry)
-                    except ValueError:
-                        pass
-            self._change_log.record_removal(component, removed, snapshot=snapshot)
         # Refetch the live frame.
         self._refresh(component)
         self.bulk_removed.emit(component, removed)
@@ -960,8 +945,9 @@ class DataExplorerTab(QWidget):
         if not ids or not attribute or self._network is None:
             return
         try:
-            prev_map = apply_bulk_edit(
+            outcome = apply_and_log_bulk_edit(
                 self._network, component, ids, attribute, new_value,
+                change_log=self._change_log,
             )
         except Exception as exc:
             QMessageBox.warning(
@@ -970,29 +956,14 @@ class DataExplorerTab(QWidget):
                 f"{component}/{len(ids)} rows/{attribute}\n\n{exc}",
             )
             return
-        # Re-fetch the live frame once so the model reflects the
-        # coerced/normalised values pypowsybl just accepted. Cheaper
-        # than N individual cell writes and keeps the row index aligned
-        # with the network after potential dtype normalisation.
-        try:
-            df = get_dataframe(self._network, component)
-        except Exception:
-            df = self._model.dataframe()
+        df = outcome["refreshed_df"]
         cols = [c for c in editable_attributes(component) if c in df.columns]
         self._model.set_dataframe(df, editable_cols=cols)
-        # apply_bulk_edit already coerced new_value once against the
-        # column dtype; report that to listeners.
-        try:
-            from iidm_viewer.component_registry import _coerce
-            display_value = _coerce(new_value, df[attribute].dtype) if attribute in df.columns else new_value
-        except Exception:
-            display_value = new_value
         self._bulk_value.clear()
-        if self._change_log is not None:
-            self._change_log.record_bulk(
-                component, attribute, prev_map, display_value,
-            )
-        self.bulk_edit_applied.emit(component, ids, attribute, display_value, prev_map)
+        self.bulk_edit_applied.emit(
+            component, ids, attribute,
+            outcome["display_value"], outcome["prev_map"],
+        )
         if getattr(self, "_pending_lf_after_apply", False):
             self.loadflow_requested.emit()
         self._update_bulk_state()
