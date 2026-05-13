@@ -1,36 +1,89 @@
-import streamlit as st
+"""Framework-agnostic helpers for the Operational Limits tab.
+
+This module owns the pypowsybl integration + pure-pandas reductions
+each UI host (Streamlit ``operational_limits_tab``, PySide6, NiceGUI)
+composes into its own widget tree. No streamlit / Qt / NiceGUI imports
+here — the Streamlit-only rendering + per-session caching live in
+:mod:`iidm_viewer.operational_limits_tab`.
+
+Public API:
+
+* :data:`MAX_DOUBLE` — pypowsybl sentinel for "no limit".
+* :func:`side_label` / :func:`duration_label` — pure formatters used
+  by every host's chart labels.
+* :func:`get_current_flows` / :func:`get_branch_losses` —
+  worker-routed pypowsybl fetchers. No caching; hosts wrap with their
+  own (Streamlit uses :mod:`iidm_viewer.caches`, the prototypes use
+  module-level dicts).
+* :func:`compute_loading` — worst-side ``loading_pct`` table.
+* :func:`build_element_chart` — a Plotly ``Figure`` rendering the
+  per-side limit bars + current flow lines for one element.
+* :func:`build_operational_limits_view_model` — the composer that
+  drives the whole tab. Returns ``None`` when the network carries no
+  operational limits, otherwise an :class:`OperationalLimitsViewModel`
+  with everything the host needs.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 
-from iidm_viewer.caches import (
-    _cache_key,
-    get_2wt_all,
-    get_enriched_component,
-    get_lines_all,
-    get_operational_limits_df,
-)
-from iidm_viewer.filters import (
-    FILTERS,
-    render_filters,
-)
+from iidm_viewer.powsybl_worker import NetworkProxy
 
 
-_MAX_DOUBLE = 1.7e308  # pypowsybl sentinel for "no limit"
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+MAX_DOUBLE: float = 1.7e308  # pypowsybl sentinel for "no limit"
 
 
+# ---------------------------------------------------------------------------
+# Pure formatters
+# ---------------------------------------------------------------------------
+def side_label(side: str) -> str:
+    """Human-friendly label for the pypowsybl side enum."""
+    return "Side 1" if side == "ONE" else "Side 2"
+
+
+def duration_label(d: int) -> str:
+    """Human-friendly label for an ``acceptable_duration`` value.
+
+    ``-1`` is the pypowsybl sentinel for "permanent"; positive values
+    are seconds.
+    """
+    if d == -1:
+        return "Permanent"
+    if d < 60:
+        return f"{d}s"
+    if d < 3600:
+        return f"{d // 60}min"
+    return f"{d // 3600}h"
+
+
+# ---------------------------------------------------------------------------
+# Worker-routed pypowsybl fetchers
+# ---------------------------------------------------------------------------
 def _branch_dataframes(network):
-    """Yield (lines_df, 2wt_df) from the shared cache; empty DFs on failure."""
-    for getter in (get_lines_all, get_2wt_all):
+    """Yield ``(lines_df, 2wt_df)`` directly from pypowsybl.
+
+    Each fetch is wrapped in a try/except so that a single failure (no
+    transformers in this network, attribute change in pypowsybl, etc.)
+    doesn't take the whole helper down — the caller can still see
+    whichever frame did come back.
+    """
+    for method_name in ("get_lines", "get_2_windings_transformers"):
         try:
-            df = getter(network)
+            df = getattr(network, method_name)(all_attributes=True)
         except Exception:
             df = pd.DataFrame()
         yield df
 
 
-def _get_current_flows(network) -> dict[str, dict[str, float]]:
-    """Return {element_id: {'i1': ..., 'i2': ...}} for lines and transformers."""
+def get_current_flows(network: NetworkProxy) -> dict[str, dict[str, float]]:
+    """Return ``{element_id: {'i1': …, 'i2': …}}`` for lines + 2WTs."""
     flows: dict[str, dict[str, float]] = {}
     for df in _branch_dataframes(network):
         if df.empty or "i1" not in df.columns or "i2" not in df.columns:
@@ -40,12 +93,12 @@ def _get_current_flows(network) -> dict[str, dict[str, float]]:
     return flows
 
 
-def _get_branch_losses(network) -> dict[str, float]:
-    """Return {element_id: losses_MW} for lines and 2-winding transformers.
+def get_branch_losses(network: NetworkProxy) -> dict[str, float]:
+    """Return ``{element_id: losses_MW}`` for lines + 2-winding transformers.
 
-    Active-power losses = p1 + p2 (pypowsybl sign convention: both flows
-    positive when entering the branch). Returns NaN where p1 or p2 is NaN
-    (typically before any load flow has run).
+    Active-power losses = ``p1 + p2`` (pypowsybl sign convention: both
+    flows positive when entering the branch). Returns NaN where ``p1``
+    or ``p2`` is NaN (typically before any load flow has run).
     """
     losses: dict[str, float] = {}
     for df in _branch_dataframes(network):
@@ -60,49 +113,103 @@ def _get_branch_losses(network) -> dict[str, float]:
     return losses
 
 
-def _side_label(side: str) -> str:
-    return "Side 1" if side == "ONE" else "Side 2"
+# ---------------------------------------------------------------------------
+# Loading compute
+# ---------------------------------------------------------------------------
+def compute_loading(
+    network: NetworkProxy,
+    limits_reset: pd.DataFrame,
+) -> pd.DataFrame:
+    """Worst-side ``loading_pct = I_actual / I_permanent_limit * 100``.
+
+    Returns a DataFrame sorted by descending loading with columns:
+    ``element_id``, ``element_name``, ``element_type``, ``side``,
+    ``permanent_limit``, ``current``, ``loading_pct``, ``losses``. One
+    row per element (the worst of its two sides). Empty when the
+    network has no lines / 2WTs or no load flow has been run.
+
+    No caching here — hosts that need it wrap this call with their own
+    (Streamlit's tab keeps a per-``(net_key, lf_gen)`` cache).
+    """
+    # Permanent limits only, drop the "no limit" sentinel.
+    perm = limits_reset[
+        (limits_reset["acceptable_duration"] == -1)
+        & (limits_reset["value"] < MAX_DOUBLE)
+    ][["element_id", "side", "value", "element_type"]].copy()
+    perm = perm.rename(columns={"value": "permanent_limit"})
+
+    rows = []
+    for df in _branch_dataframes(network):
+        if df.empty or "i1" not in df.columns or "i2" not in df.columns:
+            continue
+        sub = df[["i1", "i2", "name"]] if "name" in df.columns else df[["i1", "i2"]]
+        for idx, r in sub.iterrows():
+            name = r["name"] if "name" in sub.columns else idx
+            rows.append({"element_id": idx, "side": "ONE",
+                         "current": r["i1"], "element_name": name})
+            rows.append({"element_id": idx, "side": "TWO",
+                         "current": r["i2"], "element_name": name})
+
+    if not rows:
+        return pd.DataFrame()
+
+    currents = pd.DataFrame(rows)
+    merged = perm.merge(currents, on=["element_id", "side"], how="inner")
+    merged = merged.dropna(subset=["current"])
+    merged = merged[merged["current"] > 0]
+    if merged.empty:
+        return pd.DataFrame()
+    merged["loading_pct"] = (merged["current"] / merged["permanent_limit"]) * 100
+
+    # Keep the worst side per element.
+    idx_max = merged.groupby("element_id")["loading_pct"].idxmax()
+    worst = merged.loc[idx_max].sort_values("loading_pct", ascending=False)
+
+    # Attach per-element losses (p1 + p2).
+    losses = get_branch_losses(network)
+    worst["losses"] = worst["element_id"].map(losses)
+    return worst.reset_index(drop=True)
 
 
-def _duration_label(d: int) -> str:
-    if d == -1:
-        return "Permanent"
-    if d < 60:
-        return f"{d}s"
-    if d < 3600:
-        return f"{d // 60}min"
-    return f"{d // 3600}h"
+# ---------------------------------------------------------------------------
+# Per-element plot
+# ---------------------------------------------------------------------------
+def build_element_chart(
+    element_id: str,
+    elem_df: pd.DataFrame,
+    current_flow: Optional[dict],
+) -> go.Figure:
+    """Bar chart of limits by ``acceptable_duration`` for one element.
 
-
-def _build_element_chart(element_id: str, elem_df: pd.DataFrame,
-                         current_flow: dict[str, float] | None) -> go.Figure:
-    """Bar chart of limits by acceptable_duration for one element, per side."""
+    One trace per side (Side 1 / Side 2) — the bars are grouped by
+    duration label. When ``current_flow`` is provided, the actual
+    ``i1`` / ``i2`` are overlaid as horizontal dashed lines so the
+    user can spot which limit the current is approaching.
+    """
     fig = go.Figure()
 
     sides = elem_df["side"].unique()
     for side in sorted(sides):
         side_df = elem_df[elem_df["side"] == side].copy()
-        # Filter out sentinel "no limit" values and sort by duration
-        side_df = side_df[side_df["value"] < _MAX_DOUBLE]
+        side_df = side_df[side_df["value"] < MAX_DOUBLE]
         side_df = side_df.sort_values("acceptable_duration")
 
         durations = side_df["acceptable_duration"].values
         values = side_df["value"].values
-        labels = [_duration_label(int(d)) for d in durations]
+        labels = [duration_label(int(d)) for d in durations]
         names = side_df["name"].values
 
-        hover = [f"{n}<br>{_duration_label(int(d))}<br>{v:.0f} A"
+        hover = [f"{n}<br>{duration_label(int(d))}<br>{v:.0f} A"
                  for n, d, v in zip(names, durations, values)]
 
         fig.add_trace(go.Bar(
             x=labels,
             y=values,
-            name=_side_label(side),
+            name=side_label(side),
             hovertext=hover,
             hoverinfo="text",
         ))
 
-        # Add current flow as a horizontal line for this side
         if current_flow:
             i_key = "i1" if side == "ONE" else "i2"
             i_val = current_flow.get(i_key)
@@ -111,7 +218,7 @@ def _build_element_chart(element_id: str, elem_df: pd.DataFrame,
                     y=i_val,
                     line_dash="dash",
                     line_color="red" if side == "ONE" else "orange",
-                    annotation_text=f"I {_side_label(side)}: {i_val:.0f} A",
+                    annotation_text=f"I {side_label(side)}: {i_val:.0f} A",
                     annotation_position="top left" if side == "ONE" else "top right",
                 )
 
@@ -125,203 +232,86 @@ def _build_element_chart(element_id: str, elem_df: pd.DataFrame,
     return fig
 
 
-def _compute_loading(network, limits_reset: pd.DataFrame) -> pd.DataFrame:
-    """Compute loading % = I_actual / I_permanent_limit for every element/side.
+# ---------------------------------------------------------------------------
+# View-model composer
+# ---------------------------------------------------------------------------
+@dataclass
+class OperationalLimitsViewModel:
+    """Everything an Operational Limits tab needs in one shape.
 
-    Returns a DataFrame sorted by descending loading with columns:
-    element_id, element_type, side, permanent_limit, current, loading_pct,
-    losses.  Result is cached per ``(net_key, lf_gen)``; limits_reset is
-    deterministic from the cached operational-limits DF so the key is sufficient.
+    The composer fetches + reduces; the host renders. ``loading_df``
+    is the worst-side-per-element table sorted by descending loading.
+    ``display_limits_df`` is the same as ``limits_df`` minus the
+    pypowsybl ``MAX_DOUBLE`` sentinel rows.
     """
-    key = _cache_key(network)
-    cached = st.session_state.get("_loading_cache")
-    if cached is not None and cached.get("key") == key:
-        return cached["df"]
-
-    # Permanent limits only, no sentinel
-    perm = limits_reset[
-        (limits_reset["acceptable_duration"] == -1)
-        & (limits_reset["value"] < _MAX_DOUBLE)
-    ][["element_id", "side", "value", "element_type"]].copy()
-    perm = perm.rename(columns={"value": "permanent_limit"})
-
-    # Gather actual currents from the shared lines / 2WT caches.
-    rows = []
-    for df in _branch_dataframes(network):
-        if df.empty or "i1" not in df.columns or "i2" not in df.columns:
-            continue
-        sub = df[["i1", "i2", "name"]] if "name" in df.columns else df[["i1", "i2"]]
-        for idx, r in sub.iterrows():
-            name = r["name"] if "name" in sub.columns else idx
-            rows.append({"element_id": idx, "side": "ONE", "current": r["i1"], "element_name": name})
-            rows.append({"element_id": idx, "side": "TWO", "current": r["i2"], "element_name": name})
-
-    if not rows:
-        st.session_state["_loading_cache"] = {"key": key, "df": pd.DataFrame()}
-        return pd.DataFrame()
-
-    currents = pd.DataFrame(rows)
-    merged = perm.merge(currents, on=["element_id", "side"], how="inner")
-    merged = merged.dropna(subset=["current"])
-    merged = merged[merged["current"] > 0]
-    if merged.empty:
-        st.session_state["_loading_cache"] = {"key": key, "df": pd.DataFrame()}
-        return pd.DataFrame()
-    merged["loading_pct"] = (merged["current"] / merged["permanent_limit"]) * 100
-
-    # Keep the worst side per element
-    idx_max = merged.groupby("element_id")["loading_pct"].idxmax()
-    worst = merged.loc[idx_max].sort_values("loading_pct", ascending=False)
-
-    # Attach per-element losses (p1 + p2)
-    losses = _get_branch_losses(network)
-    worst["losses"] = worst["element_id"].map(losses)
-    result = worst.reset_index(drop=True)
-    st.session_state["_loading_cache"] = {"key": key, "df": result}
-    return result
+    limits_df: "pd.DataFrame"                # raw, with sentinel rows
+    display_limits_df: "pd.DataFrame"        # MAX_DOUBLE rows dropped
+    loading_df: "pd.DataFrame"               # worst-side loading per element
+    element_ids: list                         # IDs that have ≥1 displayable limit
+    flows: dict                               # {id: {'i1', 'i2'}}
+    losses: dict                              # {id: loss_MW}
 
 
-def _get_filtered_element_ids(network, selected_vl) -> set[str]:
-    """Load lines + transformers, apply filters, return surviving element IDs."""
-    all_ids: set[str] = set()
+def build_operational_limits_view_model(
+    network: NetworkProxy,
+    *,
+    limits_df: Optional["pd.DataFrame"] = None,
+    loading_df: Optional["pd.DataFrame"] = None,
+    flows: Optional[dict] = None,
+    losses: Optional[dict] = None,
+) -> Optional[OperationalLimitsViewModel]:
+    """Build the view model for the Operational Limits tab.
 
-    for component, method_name in [
-        ("Lines", "get_lines"),
-        ("2-Winding Transformers", "get_2_windings_transformers"),
-    ]:
-        df = get_enriched_component(network, method_name)
-        if df.empty:
-            continue
+    Pipeline:
 
-        # VL filter — show all by default, check to restrict to selected VL
-        if selected_vl:
-            vl_cols = [c for c in df.columns
-                       if c in ("voltage_level1_id", "voltage_level2_id")]
-            if vl_cols:
-                mask = pd.Series(False, index=df.index)
-                for col in vl_cols:
-                    mask |= df[col] == selected_vl
-                vl_subset = df[mask]
-                if not vl_subset.empty:
-                    filter_vl = st.checkbox(
-                        f"Only {component.lower()} in VL {selected_vl}",
-                        value=False,
-                        key=f"limits_vl_only_{component}",
-                    )
-                    if filter_vl:
-                        df = vl_subset
+    1. Fetch ``get_operational_limits()`` (or use the caller-supplied
+       ``limits_df`` so Streamlit can pass its session-state cache).
+    2. Return ``None`` when there are no limits at all.
+    3. Drop ``MAX_DOUBLE`` sentinel rows for the display frame.
+    4. Compute worst-side loading per element.
+    5. Surface the list of element IDs that have at least one
+       displayable limit.
+    6. Pre-fetch current flows + losses so hosts can render the
+       per-element chart without an extra worker hop.
+    """
+    if limits_df is None:
+        try:
+            limits_df = network.get_operational_limits()
+        except Exception:
+            limits_df = pd.DataFrame()
+    if limits_df is None or limits_df.empty:
+        return None
 
-        filter_cols = FILTERS.get(component, [])
-        df = render_filters(df, filter_cols, key_prefix=f"lim_flt_{component}",
-                            label=f"Filter {component}")
-        all_ids.update(df.index.tolist())
+    limits_reset = limits_df.reset_index()
+    display = limits_reset[limits_reset["value"] < MAX_DOUBLE].copy()
+    element_ids = list(display["element_id"].unique())
 
-    return all_ids
+    if loading_df is None:
+        loading_df = compute_loading(network, limits_reset)
+    if flows is None:
+        flows = get_current_flows(network)
+    if losses is None:
+        losses = get_branch_losses(network)
 
-
-def render_operational_limits(network, selected_vl):
-    limits_df = get_operational_limits_df(network)
-
-    if limits_df.empty:
-        st.info("No operational limits found in this network.")
-        return
-
-    limits = limits_df.reset_index()
-    # Filter out sentinel values for display
-    display_df = limits[limits["value"] < _MAX_DOUBLE].copy()
-
-    # --- Most loaded elements ---
-    st.subheader("Most loaded elements")
-    loading = _compute_loading(network, limits)
-    if loading.empty:
-        st.info("No loading data available (run a load flow first).")
-    else:
-        threshold = st.slider(
-            "Show elements loaded above (%)",
-            min_value=0, max_value=100, value=50,
-            key="loading_threshold",
-        )
-        above = loading[loading["loading_pct"] >= threshold].copy()
-        if above.empty:
-            st.info(f"No elements loaded above {threshold}%.")
-        else:
-            st.caption(f"{len(above)} elements above {threshold}%")
-
-            def _color_loading(val):
-                if val >= 100:
-                    return "background-color: #ff4b4b; color: white"
-                if val >= 80:
-                    return "background-color: #ffa500; color: white"
-                return ""
-
-            show = above[["element_id", "element_name", "element_type", "side",
-                          "current", "permanent_limit", "loading_pct",
-                          "losses"]].copy()
-            show.columns = ["Element", "Name", "Type", "Worst side",
-                            "I (A)", "Permanent limit (A)", "Loading (%)",
-                            "Losses (MW)"]
-            show["Worst side"] = show["Worst side"].map(
-                {"ONE": "Side 1", "TWO": "Side 2"})
-            show["I (A)"] = show["I (A)"].round(1)
-            show["Loading (%)"] = show["Loading (%)"].round(1)
-            show["Losses (MW)"] = show["Losses (MW)"].round(3)
-
-            styled = show.style.map(_color_loading, subset=["Loading (%)"])
-            st.dataframe(styled, use_container_width=True, hide_index=True)
-
-    # --- Per-element detail ---
-    st.subheader("Element detail")
-
-    # Apply component filters to narrow elements for the detail section
-    filtered_ids = _get_filtered_element_ids(network, selected_vl)
-    if not filtered_ids:
-        st.info("No elements match the current filters.")
-        return
-
-    element_ids = [e for e in display_df["element_id"].unique()
-                   if e in filtered_ids]
-
-    id_filter = st.text_input(
-        "Filter by element ID (substring, case-insensitive)",
-        key="limits_id_filter",
-    )
-    if id_filter:
-        element_ids = [e for e in element_ids
-                       if id_filter.lower() in e.lower()]
-
-    if not element_ids:
-        st.info("No elements match the current filters.")
-        return
-
-    st.caption(f"{len(element_ids)} elements with limits")
-
-    selected_element = st.selectbox(
-        "Element",
-        options=element_ids,
-        key="limits_element_select",
+    return OperationalLimitsViewModel(
+        limits_df=limits_reset,
+        display_limits_df=display,
+        loading_df=loading_df,
+        element_ids=element_ids,
+        flows=flows,
+        losses=losses,
     )
 
-    elem_limits = display_df[display_df["element_id"] == selected_element]
 
-    # Get current flows for the chart
-    flows = _get_current_flows(network)
-    current_flow = flows.get(selected_element)
-
-    # Losses for this element (p1 + p2)
-    elem_losses = _get_branch_losses(network).get(selected_element)
-    if elem_losses is not None and pd.notna(elem_losses):
-        st.metric("Active-power losses", f"{elem_losses:.3f} MW")
-    else:
-        st.caption("Losses unavailable (run a load flow to compute p1 + p2).")
-
-    fig = _build_element_chart(selected_element, elem_limits, current_flow)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Show the raw limits table
-    show_cols = ["side", "name", "acceptable_duration", "value", "element_type"]
-    show_cols = [c for c in show_cols if c in elem_limits.columns]
-    st.dataframe(
-        elem_limits[show_cols].sort_values(["side", "acceptable_duration"]),
-        use_container_width=True,
-        hide_index=True,
-    )
+# ---------------------------------------------------------------------------
+# Legacy aliases — existing tests + the Streamlit tab consume the
+# underscored names. Keep them re-exported so the rename can land
+# without breakage.
+# ---------------------------------------------------------------------------
+_MAX_DOUBLE = MAX_DOUBLE
+_side_label = side_label
+_duration_label = duration_label
+_get_current_flows = get_current_flows
+_get_branch_losses = get_branch_losses
+_compute_loading = compute_loading
+_build_element_chart = build_element_chart
