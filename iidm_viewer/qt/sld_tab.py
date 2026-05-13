@@ -88,6 +88,14 @@ class SldTab(QWidget):
             if network is not None
             else "No network loaded."
         )
+        # Wipe the previously-rendered SVG. Without this an empty-network
+        # swap (or any swap that doesn't pick a default VL) would leave
+        # the prior network's diagram on screen — ``_render`` short-
+        # circuits on ``_current_vl is None`` so it would never overwrite.
+        if self._ready:
+            self._view.render_component(
+                svg="", metadata="", height=700, svgType="voltage-level",
+            )
 
     def show_voltage_level(self, vl_id: str) -> None:
         if not vl_id or self._network is None:

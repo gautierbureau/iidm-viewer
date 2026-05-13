@@ -1717,6 +1717,58 @@ def test_data_explorer_refreshes_sibling_create_panels_after_container_create(qa
     assert "BBS1" in bbs_ids
 
 
+def test_sld_and_nad_tabs_blank_their_view_on_set_network(qapp):
+    """Regression for the empty-network swap bug: after loading IEEE14
+    then installing a fresh empty network, the SLD and NAD webviews
+    must be wiped — otherwise the previous network's diagram stays on
+    screen because ``_render`` short-circuits on ``_current_vl is None``.
+    """
+    from iidm_viewer.qt.nad_tab import NadTab
+    from iidm_viewer.qt.sld_tab import SldTab
+
+    sld = SldTab()
+    nad = NadTab()
+    # Bypass the WebView readiness gate so render_component fires
+    # synchronously — the WebView itself is async in headless tests.
+    sld._ready = True
+    nad._ready = True
+
+    sld_renders: list[dict] = []
+    nad_renders: list[dict] = []
+    sld._view.render_component = lambda **kw: sld_renders.append(kw)
+    nad._view.render_component = lambda **kw: nad_renders.append(kw)
+
+    # Network swap (real network or None — both paths must wipe).
+    import pypowsybl.network as pn
+
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+
+    real = NetworkProxy(run(pn.create_ieee14))
+    sld.set_network(real)
+    nad.set_network(real)
+    qapp.processEvents()
+
+    assert sld_renders, "SldTab.set_network should push a render"
+    assert nad_renders, "NadTab.set_network should push a render"
+    # The push is the *blank* — the real SVG only follows when
+    # ``show_voltage_level`` is called by the MainWindow's listener.
+    assert sld_renders[-1].get("svg") == ""
+    assert sld_renders[-1].get("metadata") == ""
+    assert sld_renders[-1].get("svgType") == "voltage-level"
+    assert nad_renders[-1].get("svg") == ""
+    assert nad_renders[-1].get("metadata") == ""
+
+    # Subsequent swap to ``None`` (e.g. clearing the network) must
+    # also wipe — same code path.
+    sld_renders.clear()
+    nad_renders.clear()
+    sld.set_network(None)
+    nad.set_network(None)
+    qapp.processEvents()
+    assert sld_renders and sld_renders[-1].get("svg") == ""
+    assert nad_renders and nad_renders[-1].get("svg") == ""
+
+
 def test_main_window_carries_an_extensions_tab(qapp):
     """The PySide6 main window must surface the Extensions Explorer as
     a top-level tab — same UX as Streamlit's two data-explorer tabs."""
