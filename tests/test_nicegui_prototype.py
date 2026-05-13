@@ -627,6 +627,39 @@ def test_refresh_create_panel_no_notify_when_no_node_breaker_vls():
     assert "No busbar sections" in src
 
 
+def test_create_extension_panel_uses_shared_module():
+    """The NiceGUI extension-create panel builder + refresh helpers
+    must funnel everything through :mod:`iidm_viewer.extension_creation`
+    — guards against re-introducing inline pypowsybl calls."""
+    import inspect
+    from iidm_viewer.web import app
+
+    for fn in (
+        app._build_create_extension_panel_widgets,
+        app._refresh_create_extension_panel,
+        app._populate_for_extension,
+    ):
+        src = inspect.getsource(fn)
+        assert "iidm_viewer.extension_creation" in src or (
+            "CREATABLE_EXTENSIONS" in src
+            or "create_extension" in src
+            or "list_extensions_for_component" in src
+            or "list_extension_candidates" in src
+        ), f"{fn.__name__} should reference the shared module"
+
+
+def test_extension_create_panel_wired_into_data_explorer():
+    """The Data Explorer builder must construct + refresh the
+    extension-create panel alongside the other create expansions."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_data_explorer)
+    assert "_build_create_extension_panel_widgets" in src
+    assert "_refresh_create_extension_panel" in src
+    assert "extension_create_state" in src
+
+
 def test_extensions_explorer_helper_uses_shared_module():
     """``_build_extensions_explorer`` must funnel everything through
     the shared :mod:`iidm_viewer.extensions_data` helpers — guards
