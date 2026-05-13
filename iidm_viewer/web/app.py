@@ -413,6 +413,28 @@ def _push_nad(vl_id: str, depth: int) -> None:
         _send_render("nad", args)
 
 
+def _clear_diagrams() -> None:
+    """Wipe the NAD + SLD iframes and their caches.
+
+    Called when the open network is swapped (load / start-empty /
+    reduction). Without this the previous network's diagrams stay
+    visible until the user picks a VL — and for an empty network no VL
+    can be picked, so the stale SVG would never go away.
+    """
+    global _last_nad, _last_sld
+    _nad_cache.clear()
+    _sld_cache.clear()
+    blank_sld = {"svg": "", "metadata": "", "height": 700,
+                 "svgType": "voltage-level"}
+    blank_nad = {"svg": "", "metadata": "", "height": 700}
+    _last_sld = blank_sld
+    _last_nad = blank_nad
+    if _sld_ready:
+        _send_render("sld", blank_sld)
+    if _nad_ready:
+        _send_render("nad", blank_nad)
+
+
 def _open_lf_report_dialog(report_json: Optional[str]) -> None:
     """Open a modal showing the parsed LoadFlow report tree.
 
@@ -4321,6 +4343,11 @@ def main_page() -> None:
         save_btn.set_enabled(network is not None)
         reduction_btn.set_enabled(network is not None)
         lf_status_lbl.set_text("")
+        # Swap-network → wipe whatever was rendered for the previous
+        # network. ``_on_state_vl`` will refill if a default VL is
+        # picked; an empty network has no default VL so the diagrams
+        # stay blank rather than showing the previous topology.
+        _clear_diagrams()
         if network is None:
             vl_picker_state["df"] = None
             vl_filter_input.visible = False
