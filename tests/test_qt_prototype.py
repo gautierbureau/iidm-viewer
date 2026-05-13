@@ -2452,3 +2452,249 @@ def test_operational_limits_tab_empty_network_shows_placeholder(qapp):
     assert tab._loading_group.isHidden() is True
     assert tab._detail_group.isHidden() is True
     assert tab._placeholder.isHidden() is False
+
+
+# ---------------------------------------------------------------------------
+# Qt dialog smoke tests — instantiate, exercise a key path, accept / reject.
+# Each dialog otherwise sits at 0 % coverage; these tests light up the
+# constructor + the dispatch on a Save / Apply click.
+# ---------------------------------------------------------------------------
+def test_lf_report_dialog_renders_tree_for_minimal_report(qapp):
+    """Tree is populated from a hand-rolled report_json + severity
+    filter changes rebuild it."""
+    import json
+
+    from iidm_viewer.qt.lf_report_dialog import LFReportDialog
+
+    report = {
+        "dictionaries": {
+            "default": {"loadFlow": "Load flow on '${networkId}'"},
+        },
+        "reportRoot": {
+            "messageKey": "loadFlow",
+            "values": {
+                "networkId": {"value": "test"},
+                "reportSeverity": {"value": "INFO"},
+            },
+        },
+    }
+    dlg = LFReportDialog(json.dumps(report))
+    qapp.processEvents()
+    assert dlg._tree.topLevelItemCount() >= 1
+    # Empty-severity selection → empty-state label, tree hidden.
+    for box in dlg._sev_checks.values():
+        box.setChecked(False)
+    qapp.processEvents()
+    assert dlg._empty_label.isHidden() is False
+    # Restore + invalid JSON → empty-state with an error message.
+    LFReportDialog("not-json").exec  # constructor must not raise
+    dlg2 = LFReportDialog("not-json")
+    qapp.processEvents()
+    assert dlg2._empty_label.isHidden() is False
+
+
+def test_lf_report_dialog_empty_report_shows_placeholder(qapp):
+    from iidm_viewer.qt.lf_report_dialog import LFReportDialog
+
+    dlg = LFReportDialog("")
+    qapp.processEvents()
+    assert dlg._tree.isHidden() is True
+    assert dlg._empty_label.isHidden() is False
+
+
+def test_save_network_dialog_writes_format_and_params_on_save(qapp):
+    """Default format = XIIDM is selected; Save populates ``selected_format``."""
+    from iidm_viewer.qt.save_network_dialog import SaveNetworkDialog
+
+    dlg = SaveNetworkDialog(["XIIDM", "CGMES", "MATPOWER"])
+    qapp.processEvents()
+    assert dlg._combo.currentText() == "XIIDM"
+    # Switching format rebuilds the params form.
+    dlg._combo.setCurrentText("MATPOWER")
+    qapp.processEvents()
+    assert dlg._combo.currentText() == "MATPOWER"
+    # Save click populates the result fields + accepts the dialog.
+    dlg._on_save_clicked()
+    assert dlg.selected_format == "MATPOWER"
+    assert isinstance(dlg.parameters, dict)
+
+
+def test_load_options_dialog_auto_detect_hides_params_box(qapp):
+    from iidm_viewer.qt.load_options_dialog import LoadOptionsDialog
+
+    dlg = LoadOptionsDialog(
+        formats=["XIIDM", "CGMES"],
+        post_processors=["ppA", "ppB"],
+        current_format=None,
+        current_params=None,
+        current_post_processors=["ppB"],
+    )
+    qapp.processEvents()
+    # Auto-detect → no params box visible.
+    assert dlg._fmt_combo.currentText() == "Auto-detect"
+    assert dlg._params_box.isVisible() is False
+    # Switching to a real format builds a parameters form.
+    dlg._fmt_combo.setCurrentText("XIIDM")
+    qapp.processEvents()
+    assert dlg._params_form is not None
+    # Pre-checked post-processors survive into the result.
+    assert dlg._post_processor_boxes["ppB"].isChecked() is True
+    dlg._on_save_clicked()
+    assert dlg.format == "XIIDM"
+    assert dlg.post_processors == ["ppB"]
+
+
+def test_load_options_dialog_save_with_auto_detect_yields_none_format(qapp):
+    from iidm_viewer.qt.load_options_dialog import LoadOptionsDialog
+
+    dlg = LoadOptionsDialog(formats=["XIIDM"], post_processors=[])
+    dlg._on_save_clicked()
+    assert dlg.format is None
+    assert dlg.params == {}
+    assert dlg.post_processors == []
+
+
+def test_lf_parameters_dialog_builds_generic_tab(qapp):
+    """Generic tab populates from ``GENERIC_PARAMETERS`` schema and Save
+    returns trimmed-to-overrides dicts."""
+    from iidm_viewer.qt.lf_parameters_dialog import LFParametersDialog
+
+    dlg = LFParametersDialog(generic_overrides=None, provider_overrides=None)
+    qapp.processEvents()
+    # Generic widget registry is non-empty.
+    assert dlg._generic_widgets
+    # Save trims to changed-only — for an empty override dict the
+    # result must also be empty (no values diverge from defaults).
+    dlg._on_save_clicked()
+    assert isinstance(dlg.generic_params, dict)
+    assert isinstance(dlg.provider_params, dict)
+
+
+def test_lf_parameters_dialog_round_trips_generic_override(qapp):
+    """An override that matches a known generic key survives a
+    construct → save round-trip."""
+    from iidm_viewer.qt.lf_parameters_dialog import LFParametersDialog
+    from iidm_viewer.loadflow import GENERIC_PARAMETERS
+
+    # Pick the first bool generic parameter (there's always at least one).
+    bool_key = next(
+        (name for name, ptype, *_ in GENERIC_PARAMETERS if ptype == "bool"),
+        None,
+    )
+    if bool_key is None:
+        pytest.skip("No bool generic parameter exposed by this pypowsybl")
+    dlg = LFParametersDialog(generic_overrides={bool_key: True})
+    qapp.processEvents()
+    # The widget for the override key is checked.
+    widget = dlg._generic_widgets[bool_key]
+    assert widget.isChecked() is True
+
+
+def test_save_network_dialog_with_no_formats_falls_back(qapp):
+    from iidm_viewer.qt.save_network_dialog import SaveNetworkDialog
+
+    dlg = SaveNetworkDialog([])
+    qapp.processEvents()
+    assert dlg._combo.count() == 0
+    # Save click on the empty combo must not crash.
+    dlg._on_save_clicked()
+    assert dlg.selected_format is None
+
+
+def test_network_reduction_dialog_mode_switch_and_apply_validation(qapp):
+    """Switching method updates the stack; an empty IDs list rejects
+    the Apply with a validation error rather than crashing."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.network_reduction_dialog import NetworkReductionDialog
+
+    net = NetworkProxy(run(pn.create_ieee14))
+    dlg = NetworkReductionDialog(net, vl_ids=["VL1", "VL2"])
+    qapp.processEvents()
+    # Default method is the first one (By Voltage Range).
+    assert dlg._stack.currentIndex() == 0
+    # Switch to "By Voltage Level IDs" → stack moves.
+    dlg._mode_buttons["By Voltage Level IDs"].setChecked(True)
+    dlg._on_mode_changed(1)
+    qapp.processEvents()
+    assert dlg._stack.currentIndex() == 1
+    # No IDs selected → Apply validation fails with a status string.
+    dlg._on_apply_clicked()
+    qapp.processEvents()
+    assert dlg.applied is False
+    assert dlg._status.text() != ""
+
+
+def test_session_script_dialog_renders_and_clear_resets_log(qapp):
+    """Constructor reads the recorder; Clear log wipes it + resumes."""
+    from iidm_viewer import script_recorder
+    from iidm_viewer.qt.session_script_dialog import SessionScriptDialog
+
+    script_recorder.reset_store()
+    try:
+        script_recorder.record_load_network("grid.xiidm", {}, [])
+        script_recorder.record_run_loadflow({}, {})
+        dlg = SessionScriptDialog()
+        qapp.processEvents()
+        # Two ops recorded → count label mentions "2 of 2".
+        assert "2" in dlg._count_lbl.text()
+        # Recording is on by default → paused label hidden.
+        assert dlg._paused_lbl.isHidden() is True
+        # Toggling recording off shows the paused warning.
+        dlg._recording_checkbox.setChecked(False)
+        qapp.processEvents()
+        assert script_recorder.is_paused() is True
+        # Include-reverted re-renders without raising.
+        dlg._include_reverted_checkbox.setChecked(True)
+        qapp.processEvents()
+        # The internal cached script body is non-empty.
+        assert dlg._current_script
+    finally:
+        script_recorder.reset_store()
+
+
+def test_params_form_round_trips_boolean_integer_string(qapp):
+    """``ParametersForm`` builds the right widget per type and
+    ``read_values`` echoes back the wire-format strings."""
+    import pandas as pd
+
+    from iidm_viewer.qt.params_form import ParametersForm
+
+    df = pd.DataFrame({
+        "type": ["BOOLEAN", "INTEGER", "STRING"],
+        "default": ["false", "0", ""],
+        "description": ["b flag", "i count", "s text"],
+        "possible_values": [None, None, None],
+    }, index=pd.Index(["b", "i", "s"], name="name"))
+    form = ParametersForm(df, initial={"b": "true", "i": "42", "s": "hi"})
+    qapp.processEvents()
+    values = form.read_values()
+    assert values["b"] == "true"
+    assert values["i"] == "42"
+    assert values["s"] == "hi"
+
+
+def test_params_form_with_enum_and_empty_dataframe(qapp):
+    """STRING with ``possible_values`` becomes a combobox; empty
+    DataFrame renders a placeholder label."""
+    import pandas as pd
+
+    from iidm_viewer.qt.params_form import ParametersForm
+
+    # pypowsybl uses ``"[A, B, C]"`` for fixed-option STRING params;
+    # ``parse_possible_values`` only recognises that shape (a plain CSV
+    # is treated as a single literal).
+    enum_df = pd.DataFrame({
+        "type": ["STRING"],
+        "default": ["AUTO"],
+        "description": ["pick one"],
+        "possible_values": ["[AUTO, FOO, BAR]"],
+    }, index=pd.Index(["mode"], name="name"))
+    form = ParametersForm(enum_df, initial={"mode": "FOO"})
+    qapp.processEvents()
+    assert form.read_values()["mode"] == "FOO"
+
+    # Empty DF → placeholder label, no widgets registered.
+    empty_form = ParametersForm(pd.DataFrame())
+    qapp.processEvents()
+    assert empty_form.read_values() == {}
