@@ -2698,3 +2698,89 @@ def test_params_form_with_enum_and_empty_dataframe(qapp):
     empty_form = ParametersForm(pd.DataFrame())
     qapp.processEvents()
     assert empty_form.read_values() == {}
+
+
+def test_main_window_carries_a_security_analysis_tab(qapp):
+    """The PySide6 main window must surface ``Security Analysis`` as a
+    top-level tab — parity with Streamlit + NiceGUI."""
+    from iidm_viewer.qt.main_window import MainWindow
+    from iidm_viewer.qt.security_analysis_tab import SecurityAnalysisTab
+
+    window = MainWindow()
+    qapp.processEvents()
+    tab_titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert "Security Analysis" in tab_titles
+    assert isinstance(window.security_analysis_tab, SecurityAnalysisTab)
+
+
+def test_security_analysis_tab_renders_run_results(qapp, loaded_window):
+    """The tab builds the contingency list from the shared builder and
+    renders the runner's result dict into the summary + violations
+    models.
+
+    ``run_security_analysis`` is mocked with a canned result dict —
+    the real runner is integration-tested in
+    ``tests/test_security_analysis.py``; here we only exercise the
+    PySide6 rendering path (which would otherwise re-run heavy
+    pypowsybl-security C calls in a QtWebEngine-heavy process).
+    """
+    from unittest.mock import patch
+
+    import pandas as pd
+
+    tab = loaded_window.security_analysis_tab
+    qapp.processEvents()
+    assert tab._config_group.isHidden() is False
+
+    fake_result = {
+        "pre_status": "CONVERGED",
+        "post": {
+            "N1_L1-2-1": {
+                "status": "CONVERGED",
+                "limit_violations": pd.DataFrame({
+                    "subject_id": ["L2-3-1"],
+                    "limit_name": ["permanent"],
+                    "value": [620.0],
+                }),
+            },
+            "N1_L2-3-1": {
+                "status": "CONVERGED",
+                "limit_violations": pd.DataFrame(),
+            },
+        },
+    }
+    with patch(
+        "iidm_viewer.qt.security_analysis_tab.run_security_analysis",
+        return_value=fake_result,
+    ) as mock_run:
+        tab._on_run()
+        qapp.processEvents()
+    mock_run.assert_called_once()
+    # The contingency list passed to the runner was built from the
+    # real shared builder against IEEE14 → non-empty.
+    contingencies = mock_run.call_args[0][1]
+    assert contingencies and contingencies[0]["id"].startswith("N1_")
+    # Results rendered: pre-status line + 2-row summary + 1 violation row.
+    assert tab._results is fake_result
+    assert "CONVERGED" in tab._pre_status_lbl.text()
+    assert tab._summary_model.rowCount() == 2
+    assert tab._violations_model.rowCount() == 1
+
+
+def test_security_analysis_tab_empty_network_shows_placeholder(qapp):
+    """An empty network has no lines → the run yields no contingencies
+    and the tab reports it without raising."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.security_analysis_tab import SecurityAnalysisTab
+
+    tab = SecurityAnalysisTab()
+    network = NetworkProxy(run(pn.create_empty))
+    tab.set_network(network)
+    qapp.processEvents()
+    assert tab._placeholder.isHidden() is True  # config still shows
+    tab._on_run()
+    qapp.processEvents()
+    # No lines → builder returns [] → status message, no results.
+    assert tab._results is None
+    assert "No contingencies" in tab._status_lbl.text()
