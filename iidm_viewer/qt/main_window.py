@@ -41,6 +41,7 @@ from iidm_viewer.qt.map_tab import MapTab
 from iidm_viewer.qt.nad_tab import NadTab
 from iidm_viewer.qt.operational_limits_tab import OperationalLimitsTab
 from iidm_viewer.qt.reactive_curves_tab import ReactiveCurvesTab
+from iidm_viewer.qt.security_analysis_tab import SecurityAnalysisTab
 from iidm_viewer.qt.sld_tab import SldTab
 from iidm_viewer.qt.state import AppState
 
@@ -272,6 +273,7 @@ class MainWindow(QMainWindow):
         self.extensions_tab = ExtensionsExplorerTab()
         self.reactive_curves_tab = ReactiveCurvesTab()
         self.operational_limits_tab = OperationalLimitsTab()
+        self.security_analysis_tab = SecurityAnalysisTab()
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.map_tab, "Network Map")
@@ -281,6 +283,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.extensions_tab, "Data Explorer Extensions")
         self.tabs.addTab(self.reactive_curves_tab, "Reactive Capability Curves")
         self.tabs.addTab(self.operational_limits_tab, "Operational Limits")
+        self.tabs.addTab(self.security_analysis_tab, "Security Analysis")
 
         # The Data Explorer reports cell + bulk edits to the AppState's
         # ChangeLog so the panel below shows a unified history that
@@ -637,6 +640,7 @@ class MainWindow(QMainWindow):
         self.extensions_tab.set_network(network)
         self.reactive_curves_tab.set_network(network)
         self.operational_limits_tab.set_network(network)
+        self.security_analysis_tab.set_network(network)
         self.tabs.setCurrentWidget(self.map_tab)
 
     def _on_sidebar_vl_selected(self, vl_id: str) -> None:

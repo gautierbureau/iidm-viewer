@@ -4671,6 +4671,185 @@ def _build_operational_limits():
     return refresh
 
 
+def _build_security_analysis():
+    """Materialise the "Security Analysis" tab.
+
+    A focused port of the Streamlit Security Analysis tab: the
+    automatic N-1 / N-2 contingency builder + an AC run + a results
+    overview. The advanced configuration (monitored elements, limit
+    reductions, remedial actions, operator strategies, JSON import)
+    stays Streamlit-only for now — those are heavily form-driven.
+
+    All pypowsybl work goes through the shared
+    :mod:`iidm_viewer.security_analysis` core
+    (``build_n1_contingencies`` / ``build_n2_contingencies`` /
+    ``run_security_analysis`` / ``summarize_security_results``), so
+    this tab and the Streamlit / PySide6 ones stay in lockstep.
+
+    Returns a closure the page-wide listeners call on network change.
+    """
+    import pandas as pd
+
+    from iidm_viewer.security_analysis import (
+        AUTO_MODES,
+        ELEMENT_TYPES,
+        build_n1_contingencies,
+        build_n2_contingencies,
+        get_nominal_voltages,
+        run_security_analysis,
+        summarize_security_results,
+    )
+
+    state: dict = {"results": None, "selected_cid": None}
+
+    placeholder = ui.label(
+        "Load a network to run a security analysis."
+    ).classes("text-caption q-pa-md")
+
+    config_card = ui.card().classes("w-full q-pa-sm")
+    with config_card:
+        ui.label("Contingency configuration").classes("text-h6")
+        with ui.row().classes("items-center w-full"):
+            ui.label("Mode:")
+            mode_select = ui.select(options=list(AUTO_MODES), value="N-1") \
+                .props("dense outlined").classes("w-32")
+            ui.label("Element type:")
+            element_select = ui.select(
+                options=list(ELEMENT_TYPES), value=ELEMENT_TYPES[0],
+            ).props("dense outlined").classes("w-64")
+        with ui.row().classes("items-center w-full"):
+            ui.label("Nominal voltage filter (optional):")
+            nominal_v_select = ui.select(
+                options=[], value=[], multiple=True,
+            ).props("dense outlined").classes("w-72")
+        with ui.row().classes("items-center w-full"):
+            run_btn = ui.button("Run security analysis")
+            run_status = ui.label("").classes("text-caption q-ml-md")
+
+    results_card = ui.card().classes("w-full q-pa-sm")
+    with results_card:
+        ui.label("Results").classes("text-h6")
+        pre_status_lbl = ui.label("").classes("text-subtitle2")
+        summary_grid = ui.aggrid({
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }).classes("w-full").style("height: 240px")
+        ui.label("Per-contingency limit violations:") \
+            .classes("text-caption q-mt-sm")
+        violations_grid = ui.aggrid({
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }).classes("w-full").style("height: 260px")
+    results_card.visible = False
+
+    def _render_results() -> None:
+        results = state["results"]
+        if results is None:
+            results_card.visible = False
+            return
+        results_card.visible = True
+        pre = results.get("pre_status", "?")
+        pre_status_lbl.set_text(f"Pre-contingency load flow: {pre}")
+        summary = summarize_security_results(results)
+        summary_grid.options.update({
+            "columnDefs": [{"field": c, "headerName": c}
+                           for c in summary.columns],
+            "rowData": summary.to_dict("records"),
+            "defaultColDef": _DEFAULT_COL_DEF,
+        })
+        summary_grid.update()
+        # Concatenate every post-contingency violation frame, tagged
+        # with its contingency id.
+        frames = []
+        for cid, cr in (results.get("post") or {}).items():
+            viol = cr.get("limit_violations")
+            if viol is not None and not viol.empty:
+                tagged = viol.copy()
+                tagged.insert(0, "contingency_id", cid)
+                frames.append(tagged)
+        if frames:
+            all_viol = pd.concat(frames, ignore_index=True)
+            violations_grid.options.update({
+                "columnDefs": [{"field": str(c), "headerName": str(c)}
+                               for c in all_viol.columns],
+                "rowData": all_viol.fillna("").astype(str).to_dict("records"),
+                "defaultColDef": _DEFAULT_COL_DEF,
+            })
+        else:
+            violations_grid.options.update({"columnDefs": [], "rowData": []})
+        violations_grid.update()
+
+    async def _on_run() -> None:
+        if _state.network is None:
+            return
+        mode = mode_select.value
+        element_type = element_select.value
+        selected_v = nominal_v_select.value or []
+        nominal_v_set = {float(v) for v in selected_v} if selected_v else None
+        run_status.set_text("Building contingencies…")
+        builder = (
+            build_n1_contingencies if mode == "N-1" else build_n2_contingencies
+        )
+        try:
+            contingencies = await asyncio.to_thread(
+                builder, _state.network, element_type, nominal_v_set,
+            )
+        except Exception as exc:
+            run_status.set_text(f"Contingency build failed: {exc}")
+            return
+        if not contingencies:
+            run_status.set_text(
+                "No contingencies for this element type / voltage filter."
+            )
+            state["results"] = None
+            _render_results()
+            return
+        run_status.set_text(
+            f"Running AC security analysis on {len(contingencies)} "
+            f"contingenc{'y' if len(contingencies) == 1 else 'ies'}…"
+        )
+        try:
+            results = await asyncio.to_thread(
+                run_security_analysis, _state.network, contingencies,
+            )
+        except Exception as exc:
+            run_status.set_text(f"Security analysis failed: {exc}")
+            return
+        state["results"] = results
+        run_status.set_text(
+            f"Done — {len(contingencies)} contingenc"
+            f"{'y' if len(contingencies) == 1 else 'ies'} analysed."
+        )
+        _render_results()
+
+    run_btn.on_click(_on_run)
+
+    def refresh() -> None:
+        if _state.network is None:
+            placeholder.set_text("Load a network to run a security analysis.")
+            placeholder.visible = True
+            config_card.visible = False
+            results_card.visible = False
+            state["results"] = None
+            return
+        placeholder.visible = False
+        config_card.visible = True
+        # Repopulate the nominal-voltage filter; clear stale results.
+        try:
+            voltages = get_nominal_voltages(_state.network)
+        except Exception:
+            voltages = []
+        nominal_v_select.options = [str(v) for v in voltages]
+        nominal_v_select.value = []
+        nominal_v_select.update()
+        run_status.set_text("")
+        state["results"] = None
+        _render_results()
+
+    refresh()
+    return refresh
+
+
 def _cast_value_for_col(series, raw):
     """Best-effort cast for a user-typed cell value, matching the
     source DataFrame's column dtype."""
@@ -4947,6 +5126,7 @@ def main_page() -> None:
         extensions_tab = ui.tab("Data Explorer Extensions")
         reactive_curves_tab = ui.tab("Reactive Capability Curves")
         operational_limits_tab = ui.tab("Operational Limits")
+        security_analysis_tab = ui.tab("Security Analysis")
     panels = ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")
     with panels:
         with ui.tab_panel(map_tab).classes("q-pa-none w-full"):
@@ -5004,6 +5184,8 @@ def main_page() -> None:
             refresh_reactive_curves = _build_reactive_curves()
         with ui.tab_panel(operational_limits_tab).classes("w-full"):
             refresh_operational_limits = _build_operational_limits()
+        with ui.tab_panel(security_analysis_tab).classes("w-full"):
+            refresh_security_analysis = _build_security_analysis()
 
     # ------------------------------------------------------------------
     # Cross-tab navigation: substation click on map -> SLD tab on that VL.
@@ -5043,6 +5225,7 @@ def main_page() -> None:
         refresh_data_grid()
         refresh_reactive_curves()
         refresh_operational_limits()
+        refresh_security_analysis()
 
     def _on_state_vl(vl_id):
         vl_lbl.set_text(f"VL: {vl_id}" if vl_id else "VL: —")

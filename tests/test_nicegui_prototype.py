@@ -1140,3 +1140,28 @@ def test_operational_limits_builder_uses_shared_view_model():
     src = inspect.getsource(app._build_operational_limits)
     assert "build_operational_limits_view_model" in src
     assert "build_element_chart" in src
+
+
+def test_security_analysis_tab_registered_in_main_page():
+    """``Security Analysis`` must be a top-level tab + its refresh
+    closure must be wired into the network-changed listener."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert 'ui.tab("Security Analysis")' in src
+    assert "refresh_security_analysis = _build_security_analysis()" in src
+    assert "refresh_security_analysis()" in src
+
+
+def test_security_analysis_builder_uses_shared_core():
+    """The NiceGUI builder must compose the shared contingency builders
+    + runner + summary so PySide6 + Streamlit stay in sync."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_security_analysis)
+    assert "build_n1_contingencies" in src
+    assert "build_n2_contingencies" in src
+    assert "run_security_analysis" in src
+    assert "summarize_security_results" in src

@@ -580,6 +580,31 @@ def run_security_analysis(
 
 
 # ---------------------------------------------------------------------------
+# Result summary — host-agnostic table the PySide6 / NiceGUI tabs render
+# ---------------------------------------------------------------------------
+def summarize_security_results(results: dict) -> pd.DataFrame:
+    """One row per contingency: ``contingency_id`` / ``status`` /
+    ``violations`` (the limit-violation count).
+
+    Pure reduction over the dict :func:`run_security_analysis`
+    returns, so every host renders the same Results overview. Returns
+    an empty frame when there are no post-contingency results.
+    """
+    rows = []
+    for cid, cr in (results.get("post") or {}).items():
+        viol = cr.get("limit_violations")
+        n = 0 if viol is None or getattr(viol, "empty", True) else len(viol)
+        rows.append({
+            "contingency_id": cid,
+            "status": cr.get("status", "?"),
+            "violations": n,
+        })
+    return pd.DataFrame(
+        rows, columns=["contingency_id", "status", "violations"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Legacy aliases — existing tests + the Streamlit tab consume the
 # underscored names. Keep them re-exported so the rename can land
 # without breakage.
