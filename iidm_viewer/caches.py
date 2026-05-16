@@ -245,51 +245,9 @@ def get_vl_lookup(network) -> pd.DataFrame:
     return df
 
 
-def enrich_with_joins(df: pd.DataFrame, vl_lookup: pd.DataFrame) -> pd.DataFrame:
-    """Left-join VL/substation-derived columns (``nominal_v``, ``country``) onto ``df``.
-
-    Inspects ``df`` for ``substation_id``, ``voltage_level_id``, and
-    ``voltage_level{1,2}_id`` columns and adds the corresponding lookup
-    columns when they are missing.  Returns a new DataFrame; the index is
-    preserved when possible.
-    """
-    idx_name = df.index.name
-    out = df.reset_index()
-
-    if "substation_id" in out.columns and "country" not in out.columns:
-        out = out.merge(
-            vl_lookup[["substation_id", "country"]].drop_duplicates("substation_id"),
-            on="substation_id",
-            how="left",
-        )
-
-    if "voltage_level_id" in out.columns:
-        missing = [c for c in ("nominal_v", "country") if c not in out.columns]
-        if missing:
-            lookup = vl_lookup.rename(columns={"id": "voltage_level_id"})[
-                ["voltage_level_id", *missing]
-            ].copy()
-            lookup["voltage_level_id"] = lookup["voltage_level_id"].astype(str)
-            out["voltage_level_id"] = out["voltage_level_id"].astype(str)
-            out = out.merge(lookup, on="voltage_level_id", how="left")
-
-    for side in ("1", "2"):
-        col = f"voltage_level{side}_id"
-        if col in out.columns:
-            lookup = vl_lookup.rename(
-                columns={
-                    "id": col,
-                    "nominal_v": f"nominal_v{side}",
-                    "country": f"country{side}",
-                }
-            )[[col, f"nominal_v{side}", f"country{side}"]].copy()
-            lookup[col] = lookup[col].astype(str)
-            out[col] = out[col].astype(str)
-            out = out.merge(lookup, on=col, how="left")
-
-    if idx_name and idx_name in out.columns:
-        out = out.set_index(idx_name)
-    return out
+# ``enrich_with_joins`` lives in iidm_viewer.data_view so the prototypes
+# share it. Imported above; re-exported here for the existing callers.
+from iidm_viewer.data_view import enrich_with_joins  # noqa: E402, F401
 
 
 def get_enriched_component(network, method_name: str) -> pd.DataFrame:

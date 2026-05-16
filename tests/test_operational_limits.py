@@ -10,6 +10,8 @@ from iidm_viewer.operational_limits import (
     _duration_label,
     _get_branch_losses,
     _get_current_flows,
+)
+from iidm_viewer.operational_limits_tab import (
     _get_filtered_element_ids,
     render_operational_limits,
 )
@@ -193,7 +195,7 @@ def test_compute_loading_valid_mocked_data():
     net.get_lines.return_value = lines_df
     net.get_2_windings_transformers.side_effect = RuntimeError("unavailable")
 
-    with patch("iidm_viewer.operational_limits._get_branch_losses", return_value={}):
+    with patch("iidm_viewer.operational_limits.get_branch_losses", return_value={}):
         result = _compute_loading(net, _perm_limits("L1"))
 
     assert not result.empty
@@ -207,7 +209,7 @@ def test_compute_loading_valid_mocked_data():
 def test_get_filtered_element_ids_exception_skips_method():
     """Both component getters raise → get_enriched_component returns empty → empty set."""
     net = _mock_net(get_lines=True, get_2_windings_transformers=True)
-    with patch("iidm_viewer.operational_limits.get_enriched_component", return_value=pd.DataFrame()):
+    with patch("iidm_viewer.operational_limits_tab.get_enriched_component", return_value=pd.DataFrame()):
         result = _get_filtered_element_ids(net, None)
     assert result == set()
 
@@ -215,7 +217,7 @@ def test_get_filtered_element_ids_exception_skips_method():
 def test_get_filtered_element_ids_empty_df_skips():
     """Both component getters return empty df → empty set."""
     net = _mock_net(get_lines=pd.DataFrame(), get_2_windings_transformers=pd.DataFrame())
-    with patch("iidm_viewer.operational_limits.get_enriched_component", return_value=pd.DataFrame()):
+    with patch("iidm_viewer.operational_limits_tab.get_enriched_component", return_value=pd.DataFrame()):
         result = _get_filtered_element_ids(net, None)
     assert result == set()
 
@@ -241,56 +243,154 @@ def _loading_df_fixture():
 
 
 def test_render_operational_limits_no_limits_shows_info():
-    """Lines 215-216: empty limits_df → st.info called once."""
+    """Empty limits_df → st.info called once."""
     net = MagicMock()
-    net.get_operational_limits.return_value = pd.DataFrame()
-    with patch("iidm_viewer.operational_limits.st") as mock_st:
+    with patch("iidm_viewer.operational_limits_tab.st") as mock_st, \
+         patch("iidm_viewer.operational_limits_tab.get_operational_limits_df",
+               return_value=pd.DataFrame()):
         render_operational_limits(net, None)
         mock_st.info.assert_called_once()
 
 
 def test_render_operational_limits_no_filtered_elements():
-    """Lines 267-268: when _get_filtered_element_ids returns empty set → st.info."""
+    """When ``_get_filtered_element_ids`` returns empty set → st.info."""
     net = MagicMock()
-    net.get_operational_limits.return_value = _limits_df_fixture()
-    with patch("iidm_viewer.operational_limits.st") as mock_st, \
-         patch("iidm_viewer.operational_limits._compute_loading", return_value=pd.DataFrame()), \
-         patch("iidm_viewer.operational_limits._get_filtered_element_ids", return_value=set()):
+    with patch("iidm_viewer.operational_limits_tab.st") as mock_st, \
+         patch("iidm_viewer.operational_limits_tab.get_operational_limits_df",
+               return_value=_limits_df_fixture()), \
+         patch("iidm_viewer.operational_limits_tab._compute_loading_cached",
+               return_value=pd.DataFrame()), \
+         patch("iidm_viewer.operational_limits_tab._get_filtered_element_ids",
+               return_value=set()):
         render_operational_limits(net, None)
     mock_st.info.assert_called()
 
 
 def test_render_operational_limits_with_loading_and_id_filter():
-    """Lines 237-259 (loading table) and 278 (id filter applied) are hit."""
-    import pytest as _pytest
+    """Loading table + id-filter path are both rendered."""
     net = MagicMock()
-    net.get_operational_limits.return_value = _limits_df_fixture()
-    with patch("iidm_viewer.operational_limits.st") as mock_st, \
-         patch("iidm_viewer.operational_limits._compute_loading",
+    with patch("iidm_viewer.operational_limits_tab.st") as mock_st, \
+         patch("iidm_viewer.operational_limits_tab.get_operational_limits_df",
+               return_value=_limits_df_fixture()), \
+         patch("iidm_viewer.operational_limits_tab._compute_loading_cached",
                return_value=_loading_df_fixture()), \
-         patch("iidm_viewer.operational_limits._get_filtered_element_ids",
+         patch("iidm_viewer.operational_limits_tab._get_filtered_element_ids",
                return_value={"L1"}), \
-         patch("iidm_viewer.operational_limits._get_current_flows", return_value={}), \
-         patch("iidm_viewer.operational_limits._get_branch_losses", return_value={}):
+         patch("iidm_viewer.operational_limits_tab.get_current_flows", return_value={}), \
+         patch("iidm_viewer.operational_limits_tab.get_branch_losses", return_value={}):
         mock_st.slider.return_value = 0   # threshold=0 → all elements above
         mock_st.text_input.return_value = "L1"  # filter that still matches L1
         mock_st.selectbox.return_value = "L1"
         render_operational_limits(net, None)
-    # The loading table and the raw limits table are both rendered
     assert mock_st.dataframe.call_count >= 1
 
 
 def test_render_operational_limits_id_filter_no_match():
-    """Lines 282-283: id filter removes all elements → st.info and early return."""
+    """Id filter removes all elements → st.info and early return."""
     net = MagicMock()
-    net.get_operational_limits.return_value = _limits_df_fixture()
-    with patch("iidm_viewer.operational_limits.st") as mock_st, \
-         patch("iidm_viewer.operational_limits._compute_loading", return_value=pd.DataFrame()), \
-         patch("iidm_viewer.operational_limits._get_filtered_element_ids",
+    with patch("iidm_viewer.operational_limits_tab.st") as mock_st, \
+         patch("iidm_viewer.operational_limits_tab.get_operational_limits_df",
+               return_value=_limits_df_fixture()), \
+         patch("iidm_viewer.operational_limits_tab._compute_loading_cached",
+               return_value=pd.DataFrame()), \
+         patch("iidm_viewer.operational_limits_tab._get_filtered_element_ids",
                return_value={"L1"}), \
-         patch("iidm_viewer.operational_limits._get_current_flows", return_value={}), \
-         patch("iidm_viewer.operational_limits._get_branch_losses", return_value={}):
+         patch("iidm_viewer.operational_limits_tab.get_current_flows", return_value={}), \
+         patch("iidm_viewer.operational_limits_tab.get_branch_losses", return_value={}):
         mock_st.slider.return_value = 0
         mock_st.text_input.return_value = "ZZZZ"  # matches nothing
         render_operational_limits(net, None)
     mock_st.info.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Shared/Streamlit split — guards the refactor so future work doesn't
+# accidentally re-couple the shared module to Streamlit.
+# ---------------------------------------------------------------------------
+def test_operational_limits_shared_module_has_no_streamlit_dependency():
+    """``iidm_viewer.operational_limits`` is the framework-agnostic core
+    consumed by Streamlit (via ``operational_limits_tab``), PySide6 and
+    NiceGUI. The shared module must not import streamlit — that's the
+    contract that lets the non-Streamlit hosts boot."""
+    import inspect
+    import iidm_viewer.operational_limits as ol
+
+    src = inspect.getsource(ol)
+    assert "import streamlit" not in src
+    assert "from streamlit" not in src
+
+
+def test_operational_limits_shared_module_exposes_public_api():
+    """The non-underscored public API consumed by hosts."""
+    from iidm_viewer import operational_limits as ol
+
+    for name in (
+        "side_label",
+        "duration_label",
+        "get_current_flows",
+        "get_branch_losses",
+        "compute_loading",
+        "build_element_chart",
+        "build_operational_limits_view_model",
+    ):
+        assert callable(getattr(ol, name, None)), f"missing public callable: {name}"
+    assert isinstance(ol.MAX_DOUBLE, float)
+
+
+def test_operational_limits_tab_module_lives_in_a_separate_file():
+    """The Streamlit-only UI must live in ``operational_limits_tab`` so
+    PySide6 / NiceGUI can import the shared core without dragging
+    streamlit in.
+
+    Read ``app.py`` as text rather than ``import``-ing the module —
+    importing a Streamlit script executes it top-to-bottom in bare
+    mode, which seeds global Streamlit state that leaks into
+    ``AppTest``-based tests later in the run.
+    """
+    from pathlib import Path
+
+    from iidm_viewer import operational_limits_tab
+
+    assert hasattr(operational_limits_tab, "render_operational_limits")
+    app_path = Path(__file__).resolve().parent.parent / "iidm_viewer" / "app.py"
+    app_src = app_path.read_text(encoding="utf-8")
+    assert (
+        "from iidm_viewer.operational_limits_tab import render_operational_limits"
+        in app_src
+    )
+    assert (
+        "from iidm_viewer.operational_limits import render_operational_limits"
+        not in app_src
+    )
+
+
+def test_build_view_model_returns_view_model_against_ieee14(xiidm_upload):
+    """End-to-end smoke against IEEE14: the composer must return a
+    populated view model with classified loading + non-empty element_ids."""
+    from iidm_viewer.operational_limits import (
+        OperationalLimitsViewModel,
+        build_operational_limits_view_model,
+    )
+
+    network = _load_and_run_lf(xiidm_upload)
+    vm = build_operational_limits_view_model(network)
+    assert isinstance(vm, OperationalLimitsViewModel)
+    assert not vm.limits_df.empty
+    # ``display_limits_df`` drops the ``MAX_DOUBLE`` sentinel rows.
+    assert (vm.display_limits_df["value"] < 1.7e308).all()
+    assert vm.element_ids
+    # IEEE14 has lines with current; loading_df should be populated.
+    assert not vm.loading_df.empty
+    assert "loading_pct" in vm.loading_df.columns
+
+
+def test_build_view_model_returns_none_when_no_limits():
+    """A network with no operational limits must yield ``None`` so hosts
+    can render a "no data" placeholder."""
+    import pypowsybl.network as pn
+
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.operational_limits import build_operational_limits_view_model
+
+    net = NetworkProxy(run(pn.create_empty))
+    assert build_operational_limits_view_model(net) is None

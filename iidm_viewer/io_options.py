@@ -1,103 +1,59 @@
-"""Helpers for rendering pypowsybl import/export parameter forms in Streamlit."""
+"""Streamlit-side renderers for pypowsybl import/export parameter forms.
+
+The framework-agnostic pieces (extension → format mapping, worker-
+routed pypowsybl probes, possible-values parsing, "changed vs
+default" filter) live in :mod:`iidm_viewer.io_options_schema` so the
+PySide6 and NiceGUI prototypes share them. This module keeps only the
+Streamlit-specific widgets + session-state caching.
+"""
 import pandas as pd
 import streamlit as st
 
-from iidm_viewer.powsybl_worker import run
-
-_EXT_TO_FORMAT = {
-    "xiidm": "XIIDM",
-    "iidm": "XIIDM",
-    "xml": "XIIDM",
-    "uct": "UCTE",
-    "ucte": "UCTE",
-    "raw": "PSS/E",
-    "rawx": "PSS/E",
-    "m": "MATPOWER",
-    "mat": "MATPOWER",
-    "json": "JIIDM",
-    "bin": "BIIDM",
-    "dgs": "POWER-FACTORY",
-    "cdf": "IEEE-CDF",
-    "dat": "IEEE-CDF",
-}
-
-_FALLBACK_IMPORT_FORMATS = [
-    "XIIDM", "CGMES", "UCTE", "PSS/E", "MATPOWER",
-    "IEEE-CDF", "JIIDM", "BIIDM", "POWER-FACTORY",
-]
-
-
-def ext_to_format(extension: str) -> str | None:
-    """Return a best-guess import format name for a file extension, or None."""
-    return _EXT_TO_FORMAT.get(extension.lower().lstrip("."))
+from iidm_viewer.io_options_schema import (
+    EXT_TO_FORMAT as _EXT_TO_FORMAT,  # noqa: F401  (re-exported)
+    FALLBACK_IMPORT_FORMATS as _FALLBACK_IMPORT_FORMATS,  # noqa: F401
+    csv_split as _csv_split,  # noqa: F401  (Streamlit renderers re-use)
+    ext_to_format,
+    get_format_parameters as _shared_get_format_parameters,
+    get_import_formats as _shared_get_import_formats,
+    get_import_post_processors as _shared_get_import_post_processors,
+    parse_possible_values as _parse_possible_values_shared,
+)
 
 
 def get_import_post_processors() -> list[str]:
-    """Return the available import post-processor names (cached per session).
-
-    Post-processors are opt-in transformations applied after the network is
-    parsed.  They are passed as a list of strings to ``load_from_binary_buffer``
-    (``post_processors`` argument).  Typical values include
-    ``'loadflowResultsCompletion'``, ``'geoJsonImporter'``, and
-    ``'replaceTieLinesByLines'``.
-    """
+    """Cached wrapper around the shared worker-routed fetch."""
     if "_import_post_processors" not in st.session_state:
-        def _get():
-            import pypowsybl.network as pn
-            try:
-                return list(pn.get_import_post_processors())
-            except Exception:
-                return []
-        st.session_state["_import_post_processors"] = run(_get)
+        st.session_state["_import_post_processors"] = (
+            _shared_get_import_post_processors()
+        )
     return st.session_state["_import_post_processors"]
 
 
 def get_import_formats() -> list[str]:
-    """Return import format names supported by pypowsybl (cached per session)."""
+    """Cached wrapper around the shared worker-routed fetch."""
     if "_import_formats" not in st.session_state:
-        def _get():
-            import pypowsybl.network as pn
-            try:
-                return list(pn.get_import_formats())
-            except AttributeError:
-                return _FALLBACK_IMPORT_FORMATS
-        st.session_state["_import_formats"] = run(_get)
+        st.session_state["_import_formats"] = _shared_get_import_formats()
     return st.session_state["_import_formats"]
 
 
 def get_format_parameters(which: str, fmt: str) -> pd.DataFrame:
-    """Fetch import or export parameters for *fmt* (cached per session).
+    """Cached wrapper around the shared worker-routed fetch.
 
-    *which* must be ``'import'`` or ``'export'``.
     Returns an empty DataFrame when the format has no parameters.
     """
     cache_key = f"_fmt_params_{which}_{fmt}"
     if cache_key not in st.session_state:
-        def _get():
-            import pypowsybl.network as pn
-            try:
-                if which == "import":
-                    return pn.get_import_parameters(fmt)
-                else:
-                    return pn.get_export_parameters(fmt)
-            except Exception:
-                return pd.DataFrame()
-        st.session_state[cache_key] = run(_get)
+        st.session_state[cache_key] = _shared_get_format_parameters(which, fmt)
     return st.session_state[cache_key]
 
 
 def _parse_possible_values(raw: str) -> list[str] | None:
-    """Parse a `[a, b, c]`-style possible_values string into a list, or None."""
-    s = (raw or "").strip()
-    if not (s.startswith("[") and s.endswith("]")):
-        return None
-    opts = [o.strip() for o in s[1:-1].split(",") if o.strip()]
+    """Streamlit's paired-extension renderer wants ``None`` for the
+    "single-option / not enumerable" case rather than an empty list,
+    so wrap the shared parser to preserve the historical contract."""
+    opts = _parse_possible_values_shared(raw)
     return opts if len(opts) > 1 else None
-
-
-def _csv_split(value: str) -> list[str]:
-    """Split a pypowsybl STRING_LIST value (no spaces) back into items."""
-    return [s.strip() for s in (value or "").split(",") if s.strip()]
 
 
 def _render_paired_extension_lists(

@@ -24,13 +24,13 @@ from iidm_viewer.network_info import render_overview
 from iidm_viewer.diagrams import render_nad_tab, render_sld_tab
 from iidm_viewer.data_explorer import render_data_explorer
 from iidm_viewer.extensions_explorer import render_extensions_explorer
-from iidm_viewer.reactive_curves import render_reactive_curves
-from iidm_viewer.operational_limits import render_operational_limits
+from iidm_viewer.reactive_curves_tab import render_reactive_curves
+from iidm_viewer.operational_limits_tab import render_operational_limits
 from iidm_viewer.network_map import render_network_map
 from iidm_viewer.pmax_visualization import render_pmax_visualization
 from iidm_viewer.voltage_analysis import render_voltage_analysis
 from iidm_viewer.injection_map import render_injection_map
-from iidm_viewer.security_analysis import render_security_analysis
+from iidm_viewer.security_analysis_tab import render_security_analysis
 from iidm_viewer.short_circuit_analysis import render_short_circuit_analysis
 from iidm_viewer.session_script import show_session_script_dialog
 

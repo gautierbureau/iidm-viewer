@@ -1,37 +1,20 @@
 """Whitelist-driven dataframe filters for the Components explorer.
 
-Each component type declares the columns it wants filterable in `FILTERS`.
-`enrich_with_joins` adds voltage-level- and substation-derived columns
-(`nominal_v`, `country`, `nominal_v1`/`nominal_v2`, `country1`/`country2`)
-so those can sit in the whitelist alongside the component's own columns.
+The ``FILTERS`` registry and the structured filter mask helpers live
+in :mod:`iidm_viewer.data_view` so the PySide6 and NiceGUI prototypes
+share them. This module keeps the Streamlit-specific widget
+rendering and re-exports ``FILTERS`` for callers that grep for the
+symbol in this file.
 """
 import pandas as pd
 import streamlit as st
 
-from iidm_viewer.caches import enrich_with_joins, get_vl_lookup
-
-
-FILTERS: dict[str, list[str]] = {
-    "Generators": [
-        "nominal_v", "country", "energy_source",
-        "min_p", "max_p", "target_p",
-        "voltage_regulator_on", "connected",
-    ],
-    "Loads": ["nominal_v", "country", "type", "p0", "connected"],
-    "Batteries": ["nominal_v", "country", "min_p", "max_p", "connected"],
-    "Voltage Levels": ["nominal_v", "country", "topology_kind"],
-    "Substations": ["country", "TSO"],
-    "Buses": ["nominal_v", "v_mag", "connected_component"],
-    "Busbar Sections": ["nominal_v", "connected"],
-    "Lines": ["nominal_v1", "nominal_v2", "p1", "connected1", "connected2"],
-    "2-Winding Transformers": ["nominal_v1", "nominal_v2", "rated_s"],
-    "Shunt Compensators": ["nominal_v", "model_type", "connected"],
-    "Static VAR Compensators": ["nominal_v", "connected"],
-    "VSC Converter Stations": ["nominal_v", "connected"],
-    "LCC Converter Stations": ["nominal_v", "connected"],
-    "Switches": ["nominal_v", "kind", "open"],
-    "Dangling Lines": ["nominal_v", "connected"],
-}
+from iidm_viewer.caches import enrich_with_joins, get_vl_lookup  # noqa: F401 (re-exported)
+from iidm_viewer.data_view import (  # noqa: F401  (re-exported)
+    FILTERS,
+    apply_filter_specs,
+    compute_filter_widget_spec,
+)
 
 
 def build_vl_lookup(network) -> pd.DataFrame:
@@ -40,54 +23,55 @@ def build_vl_lookup(network) -> pd.DataFrame:
 
 
 def render_filters(df: pd.DataFrame, columns: list[str], key_prefix: str, label: str = "Filters") -> pd.DataFrame:
-    """Render a filter widget per whitelisted column and return the narrowed df.
+    """Render one Streamlit widget per whitelisted column and return the
+    narrowed dataframe.
 
-    Numeric → range slider. Bool → Any/True/False. Low-cardinality object →
-    multiselect. Columns absent from the dataframe are silently skipped.
+    Widget shape per column is decided by
+    :func:`iidm_viewer.data_view.compute_filter_widget_spec`; the
+    filtering itself runs through
+    :func:`iidm_viewer.data_view.apply_filter_specs` so the rules
+    stay byte-identical with the PySide6 + NiceGUI prototypes' own
+    filter UIs.
     """
     available = [c for c in columns if c in df.columns]
     if not available:
         return df
 
-    mask = pd.Series(True, index=df.index)
+    specs: dict = {}
     with st.expander(label, expanded=False):
         for col in available:
-            series = df[col]
-            dtype = series.dtype
+            shape = compute_filter_widget_spec(df[col])
             widget_key = f"{key_prefix}_{col}"
+            kind = shape.get("kind")
 
-            if pd.api.types.is_bool_dtype(dtype):
+            if kind == "bool":
                 choice = st.selectbox(
-                    col, options=["Any", "True", "False"], key=widget_key
+                    col, options=["Any", "True", "False"], key=widget_key,
                 )
-                if choice == "True":
-                    mask &= series.fillna(False) == True  # noqa: E712
-                elif choice == "False":
-                    mask &= series.fillna(True) == False  # noqa: E712
+                if choice in ("True", "False"):
+                    specs[col] = choice
 
-            elif pd.api.types.is_numeric_dtype(dtype):
-                clean = series.dropna()
-                if clean.empty:
+            elif kind == "range":
+                state = shape.get("state")
+                if state == "empty":
                     st.caption(f"{col}: no data")
                     continue
-                lo, hi = float(clean.min()), float(clean.max())
-                if lo == hi:
-                    st.caption(f"{col}: constant value {lo}")
+                if state == "constant":
+                    st.caption(f"{col}: constant value {shape['min']}")
                     continue
+                lo, hi = shape["min"], shape["max"]
                 sel = st.slider(
-                    col, min_value=lo, max_value=hi, value=(lo, hi), key=widget_key
+                    col, min_value=lo, max_value=hi, value=(lo, hi), key=widget_key,
                 )
                 if sel != (lo, hi):
-                    mask &= series.between(sel[0], sel[1])
+                    specs[col] = sel
 
-            else:
-                clean = series.dropna().astype(str)
-                clean = clean[clean != ""]
-                uniq = sorted(clean.unique())
-                if not uniq or len(uniq) > 30:
-                    continue
-                sel = st.multiselect(col, options=uniq, default=[], key=widget_key)
+            elif kind == "multiselect":
+                sel = st.multiselect(
+                    col, options=shape["options"], default=[], key=widget_key,
+                )
                 if sel:
-                    mask &= series.astype(str).isin(sel)
+                    specs[col] = sel
+            # ``skip`` (high-cardinality) -> no widget.
 
-    return df[mask]
+    return apply_filter_specs(df, specs)

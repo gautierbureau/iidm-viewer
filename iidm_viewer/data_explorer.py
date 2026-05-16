@@ -50,50 +50,14 @@ from iidm_viewer import script_recorder
 
 
 # Columns to promote right after 'name' for specific component types.
-PRIORITY_COLUMNS: dict[str, list[str]] = {
-    "Generators": ["target_p", "target_q", "target_v", "connected", "voltage_regulator_on", "p", "q", "regulated_element_id"],
-    "Loads": ["p0", "q0", "connected", "p", "q"],
-    "Static VAR Compensators": ["regulation_mode", "voltage_setpoint", "reactive_power_setpoint", "connected", "regulated_element_id"],
-    "VSC Converter Stations": ["target_v", "target_q", "voltage_regulator_on", "connected", "regulated_element_id"],
-    "Lines": ["connected1", "connected2"],
-    "2-Winding Transformers": ["connected1", "connected2"],
-    "3-Winding Transformers": ["connected1", "connected2", "connected3"],
-}
-
-# Column after which the priority columns are inserted (defaults to "name")
-PRIORITY_ANCHOR: dict[str, str] = {
-    "Lines": "i2",
-    "2-Winding Transformers": "i2",
-    "3-Winding Transformers": "i3",
-}
-
-
-def _reorder_columns(df, component: str):
-    """Move priority columns right after the anchor column, preserving the rest."""
-    priority = PRIORITY_COLUMNS.get(component)
-    if not priority:
-        return df
-    anchor = PRIORITY_ANCHOR.get(component, "name")
-    if anchor not in df.columns:
-        return df
-    present = [c for c in priority if c in df.columns]
-    if not present:
-        return df
-    cols = list(df.columns)
-    for c in present:
-        cols.remove(c)
-    insert_at = cols.index(anchor) + 1
-    for i, c in enumerate(present):
-        cols.insert(insert_at + i, c)
-    return df[cols]
-
-
-# Component types that support voltage_level_id filtering
-VL_FILTERABLE = {
-    "Generators", "Loads", "Switches", "Shunt Compensators",
-    "Batteries", "Busbar Sections", "Static VAR Compensators",
-    "VSC Converter Stations", "LCC Converter Stations",
-}
+# Column-ordering registries + the reorder helper live in
+# iidm_viewer.data_view; the Streamlit and prototype paths share them.
+from iidm_viewer.data_view import (  # noqa: F401  (re-exported)
+    PRIORITY_ANCHOR,
+    PRIORITY_COLUMNS,
+    VL_FILTERABLE,
+    reorder_columns as _reorder_columns,
+)
 
 
 def _column_config(df: pd.DataFrame, editable_cols: set[str]) -> dict:
@@ -457,11 +421,6 @@ def _render_create_component_form(network, component: str):
         fields.update(_coerce_field_values(LOCATOR_FIELDS, raw_locator))
         fields["bus_or_busbar_section_id"] = bbs_id
 
-        # rated_s=0 is the form's "unset" sentinel; pypowsybl treats missing
-        # columns as unset, so drop it rather than sending zero.
-        if component == "Generators" and fields.get("rated_s") == 0.0:
-            fields.pop("rated_s", None)
-
         try:
             create_component_bay(network, component, fields)
         except Exception as e:
@@ -547,10 +506,6 @@ def _render_create_branch_form(network, component: str):
         fields.update(_coerce_field_values(branch_side_locator_fields(2), raw_loc2))
         fields["bus_or_busbar_section_id_1"] = bbs1
         fields["bus_or_busbar_section_id_2"] = bbs2
-
-        # rated_s=0 is the form's "unset" sentinel for 2WTs.
-        if component == "2-Winding Transformers" and fields.get("rated_s") == 0.0:
-            fields.pop("rated_s", None)
 
         try:
             create_branch_bay(network, component, fields)

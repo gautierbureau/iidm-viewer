@@ -19,8 +19,14 @@
  *     height: number,
  *   }
  *
- * JS -> Python: nothing for now (tooltips handled entirely in the
- * browser, matching parity with the previous Leaflet implementation).
+ * JS -> Python (setComponentValue):
+ *   { type: 'map-substation-click', substationId, vlIds: string[], ts }
+ *     when the user clicks a substation. ``vlIds`` is ordered by
+ *     descending nominal voltage so the host can default to the
+ *     highest-V VL when navigating to the SLD.
+ *
+ * Tooltips remain handled entirely in the browser (parity with the
+ * previous Leaflet implementation).
  *
  * Uses MapboxOverlay (interleaved: false) from @deck.gl/mapbox on top
  * of MapLibre GL JS v4, matching the integration used by
@@ -44,6 +50,14 @@ import {
 
 type LinePosition = { id: string; coordinates: Coordinate[] };
 
+type FlyToRequest = {
+  substationId?: string;
+  lon?: number;
+  lat?: number;
+  zoom?: number;
+  ts?: number;
+};
+
 type RenderArgs = {
   substations?: MapSubstation[];
   substationPositions?: GeoDataSubstation[];
@@ -51,6 +65,12 @@ type RenderArgs = {
   linePositions?: LinePosition[];
   version?: number;
   height?: number;
+  // Optional "fly the camera to this substation / coordinate" hint.
+  // Hosts use it to implement cross-tab navigation (e.g. SLD-feeder
+  // click -> Map focuses the substation at the line's other end).
+  // The ``ts`` field is honoured for change-detection: every new
+  // request must carry a fresh ``ts`` (Date.now()) to fire again.
+  flyTo?: FlyToRequest;
 };
 
 const ROOT_ID = 'map';
@@ -82,12 +102,33 @@ let overlay: MapboxOverlay | null = null;
 let legendEl: HTMLDivElement | null = null;
 let tooltipEl: HTMLDivElement | null = null;
 let lastDataVersion = -1;
+// Cache of substation coordinates so subsequent ``flyTo({substationId})``
+// hits work without the host having to re-send the whole geometry.
+const substationCoords: Map<string, Coordinate> = new Map();
+// Last applied flyTo timestamp — every new request must carry a
+// fresh ``ts`` (Date.now()) to fire again.
+let lastFlyToTs = -1;
+const DEFAULT_FLY_ZOOM = 11;
 
 function sendParent(msg: Record<string, unknown>): void {
   // Streamlit drops any postMessage whose payload lacks the
   // `isStreamlitMessage` marker (checked via Object.hasOwn), so the
   // iframe handshake never completes without it.
   window.parent.postMessage({ isStreamlitMessage: true, ...msg }, '*');
+}
+
+function setComponentValue(value: unknown): void {
+  // Mirrors the SLD / NAD bundles. Streamlit's component runtime
+  // *also* exposes ``setComponentValue`` as a global polyfill, but
+  // our two non-Streamlit hosts (PySide6 QWebEngineView and NiceGUI
+  // iframe) load the bundle without that runtime — so we define our
+  // own here. The bridge JS in each host listens for this exact
+  // ``streamlit:setComponentValue`` postMessage.
+  sendParent({
+    type: 'streamlit:setComponentValue',
+    dataType: 'json',
+    value,
+  });
 }
 
 function setFrameHeight(h: number): void {
@@ -158,6 +199,21 @@ function formatLineTooltip(line: MapLine): string {
   return `<b>${header}</b><br>P1: ${p1} MW, I1: ${i1} A`;
 }
 
+function emitSubstationClick(sub: MapSubstation): void {
+  // Order voltage levels by descending nominal voltage so hosts that
+  // default to "first" land on the most meaningful VL (e.g. 400 kV
+  // before 90 kV).
+  const vlIds = [...sub.voltageLevels]
+    .sort((a, b) => (b.nominalV ?? 0) - (a.nominalV ?? 0))
+    .map((v) => v.id);
+  setComponentValue({
+    type: 'map-substation-click',
+    substationId: sub.id,
+    vlIds,
+    ts: Date.now(),
+  });
+}
+
 function buildLayers(
   typedLines: MapLineWithType[],
   network: MapEquipments,
@@ -195,8 +251,35 @@ function buildLayers(
       labelSize: 12,
       getNameOrId: (s: MapSubstation) => s.name || s.id,
       pickable: true,
+      onClick: (info: { object?: unknown }) => {
+        const obj = info?.object;
+        if (obj && typeof obj === 'object' && 'voltageLevels' in obj) {
+          emitSubstationClick(obj as MapSubstation);
+        }
+      },
     }),
   ];
+}
+
+function applyFlyTo(req: FlyToRequest | undefined): void {
+  if (!map || !req) return;
+  if (typeof req.ts === 'number' && req.ts === lastFlyToTs) return;
+  let lon: number | undefined = req.lon;
+  let lat: number | undefined = req.lat;
+  if ((lon === undefined || lat === undefined) && req.substationId) {
+    const cached = substationCoords.get(req.substationId);
+    if (cached) {
+      lon = cached.lon;
+      lat = cached.lat;
+    }
+  }
+  if (lon === undefined || lat === undefined) return;
+  const zoom = typeof req.zoom === 'number' ? req.zoom : DEFAULT_FLY_ZOOM;
+  // ``easeTo`` rather than ``flyTo`` keeps the animation short for
+  // map-tab return trips; ``flyTo`` is dramatic but slow for the
+  // back-and-forth cadence the cross-tab navigation produces.
+  map.easeTo({ center: [lon, lat], zoom, duration: 600 });
+  if (typeof req.ts === 'number') lastFlyToTs = req.ts;
 }
 
 function render(args: RenderArgs): void {
@@ -222,7 +305,13 @@ function render(args: RenderArgs): void {
   network.updateLines(lines, true);
 
   const subPosMap = new Map<string, Coordinate>();
-  for (const p of substationPositions) subPosMap.set(p.id, p.coordinate);
+  for (const p of substationPositions) {
+    subPosMap.set(p.id, p.coordinate);
+    // Mirror into the module-level cache so subsequent ``flyTo``
+    // hits work even when the host sends a render without positions
+    // (the wrapper already does this when data is unchanged).
+    substationCoords.set(p.id, p.coordinate);
+  }
 
   const linePosMap = new Map<string, Coordinate[]>();
   for (const lp of linePositions) linePosMap.set(lp.id, lp.coordinates);
@@ -256,6 +345,9 @@ function render(args: RenderArgs): void {
     }
     // Whether or not we rebuilt, height must be reported every render.
     setFrameHeight(height);
+    // Honour the optional flyTo hint on every render so a no-op data
+    // refresh that *only* carries a flyTo still animates.
+    applyFlyTo(args.flyTo);
     return;
   }
 
@@ -271,6 +363,7 @@ function render(args: RenderArgs): void {
   });
 
   const bounds = computeBounds(substationPositions);
+  const initialFlyTo = args.flyTo;
   map.on('load', () => {
     if (!map) return;
     if (bounds) map.fitBounds(bounds, { padding: 40, duration: 0 });
@@ -281,6 +374,11 @@ function render(args: RenderArgs): void {
     });
 
     map.addControl(overlay as unknown as maplibregl.IControl);
+
+    // If the very first render carried a flyTo (e.g. the host
+    // restored state from a previous session), apply it after the
+    // initial fitBounds so the user lands at the requested spot.
+    applyFlyTo(initialFlyTo);
 
     // Diagnostics: check that the deck.gl overlay is properly set up.
     setTimeout(() => {

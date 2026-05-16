@@ -1,31 +1,14 @@
 import streamlit as st
 import pandas as pd
 
+# Source of truth lives in the framework-agnostic registry so the Qt and
+# NiceGUI prototypes can reuse the same component map without dragging
+# streamlit into their dependency graph.
+from iidm_viewer.component_registry import COMPONENT_TYPES  # noqa: F401
+
 
 def _net_key(network) -> int:
     return id(object.__getattribute__(network, "_obj"))
-
-
-COMPONENT_TYPES = {
-    "Substations": "get_substations",
-    "Voltage Levels": "get_voltage_levels",
-    "Buses": "get_buses",
-    "Busbar Sections": "get_busbar_sections",
-    "Generators": "get_generators",
-    "Loads": "get_loads",
-    "Lines": "get_lines",
-    "2-Winding Transformers": "get_2_windings_transformers",
-    "3-Winding Transformers": "get_3_windings_transformers",
-    "Switches": "get_switches",
-    "Shunt Compensators": "get_shunt_compensators",
-    "Static VAR Compensators": "get_static_var_compensators",
-    "HVDC Lines": "get_hvdc_lines",
-    "VSC Converter Stations": "get_vsc_converter_stations",
-    "LCC Converter Stations": "get_lcc_converter_stations",
-    "Batteries": "get_batteries",
-    "Dangling Lines": "get_dangling_lines",
-    "Tie Lines": "get_tie_lines",
-}
 
 
 def _branch_losses_totals(network) -> dict[str, float]:

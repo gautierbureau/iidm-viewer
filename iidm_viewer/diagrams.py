@@ -5,6 +5,7 @@ import re
 import pandas as pd
 import streamlit as st
 from iidm_viewer.nad_component import render_interactive_nad
+from iidm_viewer.navigation import decode_svg_id as _decode_svg_id
 from iidm_viewer.sld_component import render_interactive_sld
 from iidm_viewer.state import EDITABLE_COMPONENTS, add_to_change_log, toggle_switch
 from iidm_viewer import script_recorder
@@ -36,14 +37,9 @@ _SLD_COLOR_RE = re.compile(
 _SLD_BUSBAR_RE = re.compile(
     r'<g\s+class="sld-busbar-section\s+sld-(vl\d+to\d+)\s+sld-bus-(\d+)"\s+id="id([^"]+)"'
 )
-# The SLG renderer encodes non-alphanumeric characters in SVG element IDs as
-# _<decimal ASCII>_  (e.g. underscore '_' → '_95_', hyphen '-' → '_45_').
-_SVG_ID_ENCODE_RE = re.compile(r'_(\d+)_')
-
-
-def _decode_svg_id(encoded: str) -> str:
-    """Decode the SLG id encoding back to the original network element id."""
-    return _SVG_ID_ENCODE_RE.sub(lambda m: chr(int(m.group(1))), encoded)
+# ``_decode_svg_id`` lives in iidm_viewer.navigation so the prototypes
+# share it; imported above. Local re-binding kept for backwards
+# compatibility with anything that grepped for the symbol in this file.
 
 
 def _parse_sld_palette(svg: str) -> dict:
@@ -184,7 +180,7 @@ def _render_bus_legend(network, selected_vl: str, svg: str = "") -> None:
 
 
 def render_nad_tab(network, selected_vl):
-    from pypowsybl.network import NadParameters
+    from iidm_viewer.diagram_services import generate_nad
     depth = st.slider("Depth", min_value=0, max_value=10, value=1, key="nad_depth_slider")
 
     if not selected_vl:
@@ -199,14 +195,7 @@ def render_nad_tab(network, selected_vl):
     else:
         with st.spinner("Generating Network Area Diagram..."):
             try:
-                nad_params = NadParameters(edge_name_displayed=True, power_value_precision=1)
-                nad = network.get_network_area_diagram(
-                    voltage_level_ids=[selected_vl],
-                    depth=depth,
-                    nad_parameters=nad_params,
-                )
-                svg = nad.svg
-                metadata = nad.metadata
+                svg, metadata = generate_nad(network, selected_vl, depth)
             except Exception as e:
                 st.error(f"Error generating NAD: {e}")
                 return
@@ -312,7 +301,6 @@ def _get_bbt_buses(network, vl_id: str):
 
 
 def render_sld_tab(network, selected_vl):
-    from pypowsybl.network import SldParameters
     if not selected_vl:
         st.info("Select a voltage level in the sidebar to display the Single Line Diagram.")
         return
@@ -353,13 +341,8 @@ def render_sld_tab(network, selected_vl):
     else:
         with st.spinner("Generating Single Line Diagram..."):
             try:
-                sld_params = SldParameters(use_name=True, tooltip_enabled=True)
-                sld = network.get_single_line_diagram(
-                    container_id,
-                    parameters=sld_params,
-                )
-                svg = sld.svg
-                metadata = sld.metadata
+                from iidm_viewer.diagram_services import generate_sld
+                svg, metadata = generate_sld(network, container_id)
             except Exception as e:
                 st.error(f"Error generating SLD: {e}")
                 return

@@ -13,22 +13,43 @@
  * Python contract (stable):
  *   render_interactive_sld(svg, metadata, height, key) ->
  *       None
- *       | {"type": "sld-vl-click",     "vl": "VLx",   "ts": <ms>}
- *       | {"type": "sld-breaker-click","breakerId": "SW1", "open": true, "ts": <ms>}
+ *       | {"type": "sld-vl-click",       "vl": "VLx",   "ts": <ms>}
+ *       | {"type": "sld-breaker-click",  "breakerId": "SW1", "open": true, "ts": <ms>}
+ *       | {"type": "sld-feeder-click",   "equipmentId": "L1",
+ *                                        "equipmentType": "LINE",
+ *                                        "x": <px>, "y": <px>, "ts": <ms>}
  *
  * "open" in sld-breaker-click is the *desired new state* (already toggled by
  * the library before the callback fires).
+ *
+ * Optional render arg ``preserveViewport`` (default false): when true,
+ * the pan/zoom state of the previous render is captured via
+ * ``viewer.getViewBox()`` and restored on the new viewer via
+ * ``viewer.setViewBox(...)``. The PySide6 host opts in so VL→VL
+ * navigation and same-VL re-renders (after a switch toggle, a data
+ * edit, …) feel continuous instead of snapping back to the SVG's
+ * auto-fit. Streamlit and NiceGUI leave it off — their default
+ * fit-on-render behaviour is unchanged.
+ *
+ * Note on ``setSvgContent``: the underlying library exposes it but
+ * the implementation is a one-line property setter (it does not
+ * re-render). Preserving pan/zoom across renders therefore goes
+ * through the viewBox round-trip; we still rebuild the viewer
+ * instance on every render.
  */
 import {
   SingleLineDiagramViewer,
   type SLDMetadata,
 } from '@powsybl/network-viewer-core';
 
+type ViewBoxLike = { x: number; y: number; width: number; height: number };
+
 type RenderArgs = {
   svg?: string;
   metadata?: string;
   height?: number;
   svgType?: string;
+  preserveViewport?: boolean;
 };
 
 const ROOT_ID = 'sld';
@@ -66,6 +87,23 @@ function parseMetadata(raw: string | undefined): SLDMetadata | null {
 function render(args: RenderArgs): void {
   const root = document.getElementById(ROOT_ID);
   if (!root) return;
+
+  // Pan/zoom continuity (opt-in via ``preserveViewport``). Captured
+  // before the tear-down on the next line and applied on the new
+  // viewer after construction. ``getViewBox`` returns ``undefined``
+  // when the previous viewer never finished its init, hence the
+  // try/catch + null-check.
+  let savedViewBox: ViewBoxLike | null = null;
+  if (args.preserveViewport && viewer) {
+    try {
+      const vb = viewer.getViewBox();
+      if (vb && typeof vb.width === 'number' && typeof vb.height === 'number') {
+        savedViewBox = { x: vb.x, y: vb.y, width: vb.width, height: vb.height };
+      }
+    } catch {
+      // Library can throw if svgDraw is gone; fall through to a clean fit.
+    }
+  }
 
   root.innerHTML = '';
   const height = typeof args.height === 'number' ? args.height : 700;
@@ -109,11 +147,41 @@ function render(args: RenderArgs): void {
         ts: Date.now(),
       });
     },
-    null,
+    // onFeederCallback: (equipmentId, equipmentType, svgId, x, y) => void
+    //
+    // Fires on a click on the equipment glyph at the end of a feeder
+    // bay (load, generator, line, transformer, …). ``equipmentType``
+    // is the pypowsybl enum string (LINE, TWO_WINDINGS_TRANSFORMER,
+    // HVDC_LINE, LOAD, …). The host uses it to resolve the
+    // "other side" substation and fly the Map tab to it.
+    (equipmentId: string, equipmentType: string | null, _svgId: string, x: number, y: number) => {
+      setComponentValue({
+        type: 'sld-feeder-click',
+        equipmentId,
+        equipmentType,
+        x,
+        y,
+        ts: Date.now(),
+      });
+    },
     null,
     '#009eff',
     null
   );
+
+  if (savedViewBox && viewer) {
+    try {
+      viewer.setViewBox(savedViewBox);
+      // The panZoom plugin clamps to min/max zoom on its next render;
+      // refreshZoom() runs that clamp now so we don't ship an
+      // out-of-range zoom for one frame.
+      viewer.refreshZoom();
+    } catch {
+      // Best-effort restore: a viewBox from a wildly different VL
+      // may not survive validation; the library's auto-fit takes
+      // over silently.
+    }
+  }
 
   setFrameHeight(height);
 }

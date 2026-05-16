@@ -3,27 +3,23 @@ import streamlit as st
 
 from iidm_viewer.caches import get_extension_df
 from iidm_viewer.data_explorer import _column_config, _compute_changes
-from iidm_viewer.powsybl_worker import run
+from iidm_viewer.extensions_data import (
+    READONLY_EXTENSIONS as _READONLY_EXTENSIONS,
+    get_extensions_information as _shared_extensions_information,
+    list_extension_names as _shared_list_extension_names,
+)
 from iidm_viewer.state import EDITABLE_EXTENSIONS, remove_extension, update_extension
 from iidm_viewer import script_recorder
 
 
 @st.cache_data(show_spinner=False)
 def _extensions_names():
-    def _call():
-        import pypowsybl.network as pn
-        return sorted(pn.get_extensions_names())
-
-    return run(_call)
+    return _shared_list_extension_names()
 
 
 @st.cache_data(show_spinner=False)
 def _extensions_information():
-    def _call():
-        import pypowsybl.network as pn
-        return pn.get_extensions_information()
-
-    return run(_call)
+    return _shared_extensions_information()
 
 
 def _add_to_ext_change_log(
@@ -136,7 +132,8 @@ def _render_ext_removal_log(extension_name: str):
         st.caption(f"• {entry['element_id']}")
 
 
-_READONLY_EXTENSIONS = frozenset({"substationPosition", "linePosition"})
+# ``_READONLY_EXTENSIONS`` now lives in :mod:`iidm_viewer.extensions_data`
+# (imported above) so all three prototypes share the same set.
 
 
 def render_extensions_explorer(network):

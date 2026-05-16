@@ -1,0 +1,2418 @@
+"""PySide6 "Create a new <component>" panel.
+
+A single :class:`CreateComponentPanel` widget renders any component
+declared in
+:data:`iidm_viewer.component_creation.CREATABLE_COMPONENTS`. The
+field specs come from the shared registry; the widget toolkit is
+Qt-specific.
+
+Layout:
+
+* VL picker (only node-breaker VLs — bay creation needs busbar
+  sections to attach the feeder to).
+* Busbar section picker (refreshes when the VL changes).
+* Per-field widget grid (3 columns).
+* Locator fields (position_order + direction) — appended to every form.
+* Create button + status label.
+"""
+from __future__ import annotations
+
+from typing import Any, Optional
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFormLayout,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from iidm_viewer.component_creation import (
+    CREATABLE_BRANCHES,
+    CREATABLE_COMPONENTS,
+    CREATABLE_CONTAINERS,
+    CREATABLE_HVDC_LINES,
+    CREATABLE_TAP_CHANGERS,
+    LOCATOR_FIELDS,
+    OPERATIONAL_LIMIT_SIDES,
+    OPERATIONAL_LIMIT_TYPES,
+    OPERATIONAL_LIMITS_TARGETS,
+    PERMANENT_DURATION,
+    REACTIVE_LIMITS_MODES,
+    REACTIVE_LIMITS_TARGETS,
+    branch_side_locator_fields,
+    coerce_field_values,
+    create_branch_bay,
+    create_component_bay,
+    create_container,
+    create_coupling_device,
+    create_hvdc_line,
+    create_operational_limits,
+    create_reactive_limits,
+    create_secondary_voltage_control,
+    create_tap_changer,
+    list_bus_ids,
+    list_busbar_sections,
+    list_converter_stations,
+    list_node_breaker_voltage_levels,
+    list_node_breaker_vls_with_multi_bbs,
+    list_operational_limit_candidates,
+    list_reactive_limit_candidates,
+    list_substations_df,
+    list_transformers_without_tap_changer,
+    list_unit_candidates,
+    next_free_node,
+)
+from iidm_viewer.powsybl_worker import NetworkProxy
+
+
+# ---------------------------------------------------------------------------
+# Shared widget builders — used by both ``CreateComponentPanel`` and
+# ``CreateBranchPanel``.
+# ---------------------------------------------------------------------------
+def make_field_widget(field: dict) -> QWidget:
+    """Build the right Qt widget for a field spec from the shared registry.
+
+    Knows the five widget kinds the registry uses: text / float / int /
+    bool / select. Raises ``ValueError`` on an unknown kind.
+    """
+    kind = field["kind"]
+    if kind == "text":
+        w = QLineEdit()
+        w.setText(str(field.get("default") or ""))
+        return w
+    if kind == "float":
+        w = QDoubleSpinBox()
+        w.setDecimals(6)
+        w.setRange(field.get("min_value", -1e15), 1e15)
+        w.setValue(float(field.get("default", 0.0)))
+        return w
+    if kind == "int":
+        w = QSpinBox()
+        w.setRange(field.get("min_value", -2 ** 31), 2 ** 31 - 1)
+        w.setSingleStep(int(field.get("step", 1)))
+        w.setValue(int(field.get("default", 0)))
+        return w
+    if kind == "bool":
+        w = QCheckBox()
+        w.setChecked(bool(field.get("default", False)))
+        return w
+    if kind == "select":
+        w = QComboBox()
+        options = list(field.get("options", []))
+        for opt in options:
+            w.addItem(str(opt))
+        default = field.get("default")
+        if default in options:
+            w.setCurrentIndex(options.index(default))
+        return w
+    raise ValueError(f"Unknown field kind {kind!r}")
+
+
+def read_field_widget(field: dict, widget: QWidget) -> Any:
+    """Read a widget's value typed per the field spec."""
+    kind = field["kind"]
+    if kind == "text":
+        return widget.text()
+    if kind in ("float", "int"):
+        return widget.value()
+    if kind == "bool":
+        return widget.isChecked()
+    if kind == "select":
+        return widget.currentText()
+    return None
+
+
+class CreateComponentPanel(QWidget):
+    """Generic creation form for any component in CREATABLE_COMPONENTS."""
+
+    # Emitted after a successful create. Payload: (component, element_id).
+    component_created = Signal(str, str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+        self._field_widgets: dict[str, QWidget] = {}
+
+        # Header — collapsible via QGroupBox's checkable style. Note:
+        # ``QGroupBox.setCheckable(True)`` toggles the *enabled* state
+        # of child widgets too, which would make our tests + initial
+        # render brittle. We default to checked, then ``_on_toggled``
+        # only flips visibility of the inner widget.
+        self._group = QGroupBox("Create a new component")
+        self._group.setCheckable(True)
+        self._group.setChecked(False)  # folded by default
+        self._group.toggled.connect(self._on_toggled)
+
+        # VL + busbar picker row.
+        self._vl_combo = QComboBox()
+        self._vl_combo.setMinimumWidth(220)
+        self._vl_combo.currentTextChanged.connect(self._on_vl_changed)
+        self._bbs_combo = QComboBox()
+        self._bbs_combo.setMinimumWidth(180)
+
+        picker_row = QHBoxLayout()
+        picker_row.addWidget(QLabel("Voltage level:"))
+        picker_row.addWidget(self._vl_combo)
+        picker_row.addSpacing(12)
+        picker_row.addWidget(QLabel("Busbar section:"))
+        picker_row.addWidget(self._bbs_combo)
+        picker_row.addStretch(1)
+
+        # Field grid — repopulated on every set_component.
+        self._fields_grid = QGridLayout()
+        self._fields_grid.setSpacing(6)
+        self._fields_widget = QWidget()
+        self._fields_widget.setLayout(self._fields_grid)
+
+        # Action row.
+        self._create_btn = QPushButton("Create")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self._create_btn)
+        action_row.addWidget(self._status, 1)
+
+        # Build the entire body (pickers + fields + action) inside a
+        # single ``_body`` widget so the QGroupBox's checked toggle
+        # can fold the whole panel — matches Streamlit's ``st.expander``
+        # and NiceGUI's ``ui.expansion`` default-collapsed behaviour.
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.setSpacing(6)
+        body_inner.addLayout(picker_row)
+        body_inner.addWidget(self._fields_widget)
+        body_inner.addLayout(action_row)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+        self._body.setVisible(False)  # group starts unchecked → folded
+        # Hidden until a network with node-breaker VLs is loaded.
+        self.setVisible(False)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_vl_combo()
+        self._refresh_visibility()
+
+    def set_component(self, component: Optional[str]) -> None:
+        """Switch the form to a different component (or hide entirely)."""
+        self._component = component
+        self._group.setTitle(
+            f"Create a new {component.lower().rstrip('s')}"
+            if component else "Create a new component"
+        )
+        self._rebuild_field_widgets()
+        self._refresh_visibility()
+        self._status.setText("")
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+    def _refresh_visibility(self) -> None:
+        applicable = (
+            self._network is not None
+            and self._component in CREATABLE_COMPONENTS
+        )
+        self.setVisible(applicable)
+
+    def _on_toggled(self, checked: bool) -> None:
+        # Fold the entire body — pickers + fields + action — to match
+        # Streamlit's collapsed ``st.expander`` UX.
+        self._body.setVisible(checked)
+
+    def _refresh_vl_combo(self) -> None:
+        self._vl_combo.blockSignals(True)
+        self._vl_combo.clear()
+        self._bbs_combo.clear()
+        if self._network is None:
+            self._vl_combo.blockSignals(False)
+            return
+        try:
+            vls = list_node_breaker_voltage_levels(self._network)
+        except Exception:
+            vls = None
+        if vls is None or vls.empty:
+            self._vl_combo.addItem("(no node-breaker VLs in this network)")
+            self._vl_combo.setEnabled(False)
+            self._bbs_combo.setEnabled(False)
+            self._create_btn.setEnabled(False)
+        else:
+            self._vl_combo.setEnabled(True)
+            self._bbs_combo.setEnabled(True)
+            self._create_btn.setEnabled(True)
+            for _, row in vls.iterrows():
+                self._vl_combo.addItem(str(row["display"]), userData=str(row["id"]))
+            self._on_vl_changed(self._vl_combo.currentText())
+        self._vl_combo.blockSignals(False)
+
+    def _on_vl_changed(self, _label: str) -> None:
+        self._bbs_combo.clear()
+        if self._network is None or self._vl_combo.currentData() is None:
+            return
+        vl_id = str(self._vl_combo.currentData())
+        try:
+            ids = list_busbar_sections(self._network, vl_id)
+        except Exception:
+            ids = []
+        if not ids:
+            self._bbs_combo.addItem("(no busbar sections)")
+            self._bbs_combo.setEnabled(False)
+            self._create_btn.setEnabled(False)
+            return
+        for bid in ids:
+            self._bbs_combo.addItem(str(bid))
+        self._bbs_combo.setEnabled(True)
+        self._create_btn.setEnabled(True)
+
+    def _rebuild_field_widgets(self) -> None:
+        # Tear down existing widgets.
+        for w in self._field_widgets.values():
+            w.setParent(None)
+        self._field_widgets.clear()
+        while self._fields_grid.count():
+            item = self._fields_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+        if self._component not in CREATABLE_COMPONENTS:
+            return
+
+        spec = CREATABLE_COMPONENTS[self._component]
+        fields = list(spec["fields"]) + list(LOCATOR_FIELDS)
+
+        # Render in a 3-column grid.
+        for i, f in enumerate(fields):
+            row, col = divmod(i, 3)
+            widget_label = f["label"] + (" *" if f.get("required") else "")
+            label = QLabel(widget_label)
+            if f.get("help"):
+                label.setToolTip(f["help"])
+            widget = self._make_widget(f)
+            cell = QWidget()
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(2)
+            cell_layout.addWidget(label)
+            cell_layout.addWidget(widget)
+            self._fields_grid.addWidget(cell, row, col)
+            self._field_widgets[f["name"]] = widget
+
+    def _make_widget(self, field: dict) -> QWidget:
+        return make_field_widget(field)
+
+    def _read_widget(self, field: dict) -> Any:
+        w = self._field_widgets.get(field["name"])
+        if w is None:
+            return None
+        return read_field_widget(field, w)
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component not in CREATABLE_COMPONENTS:
+            return
+        # The combo is empty when no busbar sections exist (the
+        # network either has no node-breaker VL or the picked VL has
+        # no BBS). ``currentText()`` returns "" in that case, which
+        # the next branch already treats as "no selection".
+        bbs_id = self._bbs_combo.currentText()
+        if not bbs_id or bbs_id.startswith("("):
+            self._status.setText("Select a busbar section first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+
+        spec = CREATABLE_COMPONENTS[self._component]
+        all_fields = list(spec["fields"]) + list(LOCATOR_FIELDS)
+        raw = {f["name"]: self._read_widget(f) for f in all_fields}
+        values = coerce_field_values(all_fields, raw)
+        values["bus_or_busbar_section_id"] = bbs_id
+
+        try:
+            create_component_bay(self._network, self._component, values)
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+
+        created_id = str(values.get("id", ""))
+        self._status.setText(f"Created {self._component.rstrip('s')} {created_id!r}.")
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit(self._component, created_id)
+
+
+# ---------------------------------------------------------------------------
+# Branch creation panel (Lines + 2-Winding Transformers)
+# ---------------------------------------------------------------------------
+class CreateBranchPanel(QWidget):
+    """Generic creation form for any component in CREATABLE_BRANCHES.
+
+    Layout:
+
+    * Side-1 picker:   [VL 1 ▾]  [Busbar section 1 ▾]
+    * Side-2 picker:   [VL 2 ▾]  [Busbar section 2 ▾]
+    * Electrical fields (id, r, x, …)  — registry-driven, 3-column grid.
+    * Side-1 locator:  [position_order 1] [direction 1]
+    * Side-2 locator:  [position_order 2] [direction 2]
+    * Create button + status.
+
+    Same auto-hide rules as :class:`CreateComponentPanel`: hidden when
+    the component isn't in :data:`CREATABLE_BRANCHES` or the network
+    has no node-breaker voltage levels (bay creation needs busbar
+    sections).
+    """
+
+    component_created = Signal(str, str)  # (component, element_id)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+        self._field_widgets: dict[str, QWidget] = {}
+
+        self._group = QGroupBox("Create a new branch")
+        self._group.setCheckable(True)
+        self._group.setChecked(False)  # folded by default
+        self._group.toggled.connect(self._on_toggled)
+
+        # Side pickers.
+        self._vl1 = QComboBox(); self._vl1.setMinimumWidth(200)
+        self._vl1.currentTextChanged.connect(lambda _t: self._on_vl_changed(1))
+        self._bbs1 = QComboBox(); self._bbs1.setMinimumWidth(160)
+        self._vl2 = QComboBox(); self._vl2.setMinimumWidth(200)
+        self._vl2.currentTextChanged.connect(lambda _t: self._on_vl_changed(2))
+        self._bbs2 = QComboBox(); self._bbs2.setMinimumWidth(160)
+
+        side1_row = QHBoxLayout()
+        side1_row.addWidget(QLabel("Side 1 — VL:"))
+        side1_row.addWidget(self._vl1)
+        side1_row.addSpacing(8)
+        side1_row.addWidget(QLabel("Busbar:"))
+        side1_row.addWidget(self._bbs1)
+        side1_row.addStretch(1)
+
+        side2_row = QHBoxLayout()
+        side2_row.addWidget(QLabel("Side 2 — VL:"))
+        side2_row.addWidget(self._vl2)
+        side2_row.addSpacing(8)
+        side2_row.addWidget(QLabel("Busbar:"))
+        side2_row.addWidget(self._bbs2)
+        side2_row.addStretch(1)
+
+        # Electrical fields + per-side locators land in this grid.
+        self._fields_grid = QGridLayout()
+        self._fields_grid.setSpacing(6)
+        self._fields_widget = QWidget()
+        self._fields_widget.setLayout(self._fields_grid)
+
+        # Action row.
+        self._create_btn = QPushButton("Create")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self._create_btn)
+        action_row.addWidget(self._status, 1)
+
+        # Wrap the whole body in a single ``_body`` widget so the
+        # QGroupBox checked toggle folds everything — pickers + fields
+        # + action — matching Streamlit's collapsed-by-default expander.
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.setSpacing(6)
+        body_inner.addLayout(side1_row)
+        body_inner.addLayout(side2_row)
+        body_inner.addWidget(self._fields_widget)
+        body_inner.addLayout(action_row)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+        self._body.setVisible(False)
+        self.setVisible(False)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_vl_combos()
+        self._refresh_visibility()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._group.setTitle(
+            f"Create a new {component.lower().rstrip('s')}"
+            if component else "Create a new branch"
+        )
+        self._rebuild_field_widgets()
+        self._refresh_visibility()
+        self._status.setText("")
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+    def _refresh_visibility(self) -> None:
+        applicable = (
+            self._network is not None
+            and self._component in CREATABLE_BRANCHES
+        )
+        self.setVisible(applicable)
+
+    def _on_toggled(self, checked: bool) -> None:
+        self._body.setVisible(checked)
+
+    def _refresh_vl_combos(self) -> None:
+        for combo in (self._vl1, self._vl2):
+            combo.blockSignals(True)
+            combo.clear()
+        for combo in (self._bbs1, self._bbs2):
+            combo.clear()
+
+        if self._network is None:
+            for combo in (self._vl1, self._vl2):
+                combo.blockSignals(False)
+            return
+        try:
+            vls = list_node_breaker_voltage_levels(self._network)
+        except Exception:
+            vls = None
+        if vls is None or vls.empty:
+            for combo in (self._vl1, self._vl2):
+                combo.addItem("(no node-breaker VLs in this network)")
+                combo.setEnabled(False)
+                combo.blockSignals(False)
+            for combo in (self._bbs1, self._bbs2):
+                combo.setEnabled(False)
+            self._create_btn.setEnabled(False)
+            return
+        for combo in (self._vl1, self._vl2):
+            combo.setEnabled(True)
+        for combo in (self._bbs1, self._bbs2):
+            combo.setEnabled(True)
+        self._create_btn.setEnabled(True)
+        for combo in (self._vl1, self._vl2):
+            for _, row in vls.iterrows():
+                combo.addItem(str(row["display"]), userData=str(row["id"]))
+        # Second VL pre-selects the next one (avoids accidental self-loop).
+        if self._vl2.count() > 1:
+            self._vl2.setCurrentIndex(1)
+        for combo in (self._vl1, self._vl2):
+            combo.blockSignals(False)
+        self._on_vl_changed(1)
+        self._on_vl_changed(2)
+
+    def _on_vl_changed(self, side: int) -> None:
+        vl_combo = self._vl1 if side == 1 else self._vl2
+        bbs_combo = self._bbs1 if side == 1 else self._bbs2
+        bbs_combo.clear()
+        if self._network is None or vl_combo.currentData() is None:
+            return
+        try:
+            ids = list_busbar_sections(self._network, str(vl_combo.currentData()))
+        except Exception:
+            ids = []
+        if not ids:
+            bbs_combo.addItem("(no busbar sections)")
+            bbs_combo.setEnabled(False)
+            self._create_btn.setEnabled(False)
+            return
+        for bid in ids:
+            bbs_combo.addItem(str(bid))
+        bbs_combo.setEnabled(True)
+        self._create_btn.setEnabled(True)
+
+    def _rebuild_field_widgets(self) -> None:
+        for w in self._field_widgets.values():
+            w.setParent(None)
+        self._field_widgets.clear()
+        while self._fields_grid.count():
+            item = self._fields_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+        if self._component not in CREATABLE_BRANCHES:
+            return
+
+        spec = CREATABLE_BRANCHES[self._component]
+        # Electrical fields first; then per-side locator fields (which
+        # carry _1 / _2 name suffixes).
+        fields = (
+            list(spec["fields"])
+            + list(branch_side_locator_fields(1))
+            + list(branch_side_locator_fields(2))
+        )
+        for i, f in enumerate(fields):
+            row, col = divmod(i, 3)
+            widget_label = f["label"] + (" *" if f.get("required") else "")
+            label = QLabel(widget_label)
+            if f.get("help"):
+                label.setToolTip(f["help"])
+            widget = make_field_widget(f)
+            cell = QWidget()
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(2)
+            cell_layout.addWidget(label)
+            cell_layout.addWidget(widget)
+            self._fields_grid.addWidget(cell, row, col)
+            self._field_widgets[f["name"]] = widget
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component not in CREATABLE_BRANCHES:
+            return
+        bbs1 = self._bbs1.currentText()
+        bbs2 = self._bbs2.currentText()
+        if not bbs1 or bbs1.startswith("(") or not bbs2 or bbs2.startswith("("):
+            self._status.setText("Pick a busbar section on both sides first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        spec = CREATABLE_BRANCHES[self._component]
+        all_fields = (
+            list(spec["fields"])
+            + list(branch_side_locator_fields(1))
+            + list(branch_side_locator_fields(2))
+        )
+        raw = {f["name"]: read_field_widget(f, self._field_widgets[f["name"]])
+               for f in all_fields if f["name"] in self._field_widgets}
+        values = coerce_field_values(all_fields, raw)
+        values["bus_or_busbar_section_id_1"] = bbs1
+        values["bus_or_busbar_section_id_2"] = bbs2
+        try:
+            create_branch_bay(self._network, self._component, values)
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        created_id = str(values.get("id", ""))
+        self._status.setText(f"Created {self._component.rstrip('s')} {created_id!r}.")
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit(self._component, created_id)
+
+
+# ---------------------------------------------------------------------------
+# Container creation panel (Substations / Voltage Levels / Busbar Sections)
+# ---------------------------------------------------------------------------
+class CreateContainerPanel(QWidget):
+    """Generic creation form for any component in :data:`CREATABLE_CONTAINERS`.
+
+    Each container type has a different "context" picker on top:
+
+    * **Substations**         — no picker (top-level).
+    * **Voltage Levels**      — optional substation picker.
+    * **Busbar Sections**     — required node-breaker VL picker; the
+      ``node`` field default updates to ``next_free_node(network, vl)``.
+
+    Below the picker comes the registry-driven field grid + Create
+    button + status label.
+    """
+
+    component_created = Signal(str, str)  # (component, element_id)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+        self._field_widgets: dict[str, QWidget] = {}
+
+        self._group = QGroupBox("Create a new container")
+        self._group.setCheckable(True)
+        self._group.setChecked(False)  # folded by default
+        self._group.toggled.connect(self._on_toggled)
+
+        # Context picker — visible only when the component needs one.
+        self._context_lbl = QLabel("")
+        self._context_combo = QComboBox()
+        self._context_combo.setMinimumWidth(240)
+        self._context_combo.currentIndexChanged.connect(self._on_context_changed)
+        picker_row = QHBoxLayout()
+        picker_row.addWidget(self._context_lbl)
+        picker_row.addWidget(self._context_combo)
+        picker_row.addStretch(1)
+        self._picker_widget = QWidget()
+        self._picker_widget.setLayout(picker_row)
+        self._picker_widget.setVisible(False)
+
+        # Field grid — repopulated on every set_component.
+        self._fields_grid = QGridLayout()
+        self._fields_grid.setSpacing(6)
+        self._fields_widget = QWidget()
+        self._fields_widget.setLayout(self._fields_grid)
+
+        self._create_btn = QPushButton("Create")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self._create_btn)
+        action_row.addWidget(self._status, 1)
+
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.setSpacing(6)
+        body_inner.addWidget(self._picker_widget)
+        body_inner.addWidget(self._fields_widget)
+        body_inner.addLayout(action_row)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+        self._body.setVisible(False)
+        self.setVisible(False)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._rebuild_for_current_component()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._group.setTitle(
+            f"Create a new {component.lower().rstrip('s')}"
+            if component else "Create a new container"
+        )
+        self._rebuild_for_current_component()
+        self._status.setText("")
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._body.setVisible(checked)
+
+    def _picker_lbl_text(self) -> Optional[str]:
+        if self._component == "Voltage Levels":
+            return "Substation (optional):"
+        if self._component == "Busbar Sections":
+            return "Voltage level:"
+        return None
+
+    def _rebuild_for_current_component(self) -> None:
+        applicable = (
+            self._network is not None
+            and self._component in CREATABLE_CONTAINERS
+        )
+        self.setVisible(applicable)
+        if not applicable:
+            return
+        self._populate_context_combo()
+        self._rebuild_field_widgets()
+
+    def _populate_context_combo(self) -> None:
+        self._context_combo.blockSignals(True)
+        self._context_combo.clear()
+        text = self._picker_lbl_text()
+        if text is None:
+            self._context_lbl.setText("")
+            self._picker_widget.setVisible(False)
+            self._context_combo.blockSignals(False)
+            return
+        self._context_lbl.setText(text)
+        self._picker_widget.setVisible(True)
+        if self._component == "Voltage Levels":
+            # Optional — first entry is "(no substation)".
+            self._context_combo.addItem("(none — no substation)", userData=None)
+            try:
+                subs = list_substations_df(self._network)
+            except Exception:
+                subs = None
+            if subs is not None and not subs.empty:
+                for _, row in subs.iterrows():
+                    self._context_combo.addItem(
+                        str(row["display"]), userData=str(row["id"]),
+                    )
+            self._create_btn.setEnabled(True)
+        elif self._component == "Busbar Sections":
+            try:
+                vls = list_node_breaker_voltage_levels(self._network)
+            except Exception:
+                vls = None
+            if vls is None or vls.empty:
+                self._context_combo.addItem("(no node-breaker VLs)", userData=None)
+                self._context_combo.setEnabled(False)
+                self._create_btn.setEnabled(False)
+            else:
+                self._context_combo.setEnabled(True)
+                self._create_btn.setEnabled(True)
+                for _, row in vls.iterrows():
+                    label = f"{row['display']} ({row['nominal_v']:.0f} kV)"
+                    self._context_combo.addItem(label, userData=str(row["id"]))
+        self._context_combo.blockSignals(False)
+
+    def _on_context_changed(self, _idx: int) -> None:
+        # For Busbar Sections, update the ``node`` default to the next
+        # free node in the chosen VL.
+        if self._component != "Busbar Sections":
+            return
+        vl_id = self._context_combo.currentData()
+        if not vl_id or self._network is None:
+            return
+        try:
+            suggested = next_free_node(self._network, str(vl_id))
+        except Exception:
+            return
+        node_w = self._field_widgets.get("node")
+        if isinstance(node_w, QSpinBox):
+            node_w.setValue(int(suggested))
+
+    def _rebuild_field_widgets(self) -> None:
+        for w in self._field_widgets.values():
+            w.setParent(None)
+        self._field_widgets.clear()
+        while self._fields_grid.count():
+            item = self._fields_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+        if self._component not in CREATABLE_CONTAINERS:
+            return
+        spec = CREATABLE_CONTAINERS[self._component]
+        fields = list(spec["fields"])
+        # For Busbar Sections, prefill the ``node`` widget with the
+        # next-free-node for the currently-picked VL.
+        suggested_node: Optional[int] = None
+        if self._component == "Busbar Sections":
+            vl_id = self._context_combo.currentData()
+            if vl_id and self._network is not None:
+                try:
+                    suggested_node = next_free_node(self._network, str(vl_id))
+                except Exception:
+                    suggested_node = None
+
+        for i, f in enumerate(fields):
+            row, col = divmod(i, 3)
+            widget_label = f["label"] + (" *" if f.get("required") else "")
+            label = QLabel(widget_label)
+            if f.get("help"):
+                label.setToolTip(f["help"])
+            field_spec = f
+            if f["name"] == "node" and suggested_node is not None:
+                field_spec = {**f, "default": suggested_node}
+            widget = make_field_widget(field_spec)
+            cell = QWidget()
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(2)
+            cell_layout.addWidget(label)
+            cell_layout.addWidget(widget)
+            self._fields_grid.addWidget(cell, row, col)
+            self._field_widgets[f["name"]] = widget
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component not in CREATABLE_CONTAINERS:
+            return
+        spec = CREATABLE_CONTAINERS[self._component]
+        raw = {f["name"]: read_field_widget(f, self._field_widgets[f["name"]])
+               for f in spec["fields"] if f["name"] in self._field_widgets}
+        values = coerce_field_values(spec["fields"], raw)
+        # Inject the context from the picker.
+        if self._component == "Voltage Levels":
+            sub_id = self._context_combo.currentData()
+            if sub_id:
+                values["substation_id"] = str(sub_id)
+        elif self._component == "Busbar Sections":
+            vl_id = self._context_combo.currentData()
+            if not vl_id:
+                self._status.setText("Pick a voltage level first.")
+                self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+                return
+            values["voltage_level_id"] = str(vl_id)
+
+        try:
+            create_container(self._network, self._component, values)
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        created_id = str(values.get("id", ""))
+        self._status.setText(f"Created {self._component.rstrip('s')} {created_id!r}.")
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit(self._component, created_id)
+
+
+# ---------------------------------------------------------------------------
+# HVDC line creation panel
+# ---------------------------------------------------------------------------
+class CreateHvdcLinePanel(QWidget):
+    """Form to create an HVDC line between two existing converter stations.
+
+    Layout:
+
+    * Two station pickers (Converter station 1, Converter station 2),
+      defaulting to the first and second stations so the user can't
+      accidentally pick the same one on both sides.
+    * Electrical fields (id, name, r, nominal_v, max_p, target_p,
+      converters_mode) from :data:`CREATABLE_HVDC_LINES`.
+    * Create button + status label.
+
+    Auto-hides when the active component isn't "HVDC Lines" or the
+    network has fewer than two converter stations (pypowsybl requires
+    both endpoints to already exist).
+    """
+
+    component_created = Signal(str, str)  # ("HVDC Lines", element_id)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+        self._field_widgets: dict[str, QWidget] = {}
+
+        self._group = QGroupBox("Create a new HVDC line")
+        self._group.setCheckable(True)
+        self._group.setChecked(False)  # folded by default
+        self._group.toggled.connect(self._on_toggled)
+
+        # Station pickers — labelled with both the id and the kind so
+        # the user can spot VSC vs. LCC at a glance.
+        self._cs1 = QComboBox(); self._cs1.setMinimumWidth(240)
+        self._cs2 = QComboBox(); self._cs2.setMinimumWidth(240)
+        pickers = QHBoxLayout()
+        pickers.addWidget(QLabel("Converter station 1:"))
+        pickers.addWidget(self._cs1)
+        pickers.addSpacing(12)
+        pickers.addWidget(QLabel("Converter station 2:"))
+        pickers.addWidget(self._cs2)
+        pickers.addStretch(1)
+
+        self._fields_grid = QGridLayout()
+        self._fields_grid.setSpacing(6)
+        self._fields_widget = QWidget()
+        self._fields_widget.setLayout(self._fields_grid)
+
+        self._create_btn = QPushButton("Create")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self._create_btn)
+        action_row.addWidget(self._status, 1)
+
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.setSpacing(6)
+        body_inner.addLayout(pickers)
+        body_inner.addWidget(self._fields_widget)
+        body_inner.addLayout(action_row)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+        self._body.setVisible(False)
+        self.setVisible(False)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._refresh_for_current()
+        self._status.setText("")
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._body.setVisible(checked)
+
+    def _refresh_for_current(self) -> None:
+        applicable = (
+            self._network is not None
+            and self._component == "HVDC Lines"
+        )
+        if not applicable:
+            self.setVisible(False)
+            return
+
+        try:
+            stations = list_converter_stations(self._network)
+        except Exception:
+            stations = []
+        if len(stations) < 2:
+            # pypowsybl needs at least two existing stations.
+            self.setVisible(False)
+            return
+
+        self.setVisible(True)
+        self._cs1.blockSignals(True)
+        self._cs2.blockSignals(True)
+        self._cs1.clear()
+        self._cs2.clear()
+        for sid, kind in stations:
+            label = f"{sid} ({kind})"
+            self._cs1.addItem(label, userData=sid)
+            self._cs2.addItem(label, userData=sid)
+        # Pre-select the second station on side 2.
+        if self._cs2.count() > 1:
+            self._cs2.setCurrentIndex(1)
+        self._cs1.blockSignals(False)
+        self._cs2.blockSignals(False)
+
+        self._rebuild_field_widgets()
+
+    def _rebuild_field_widgets(self) -> None:
+        for w in self._field_widgets.values():
+            w.setParent(None)
+        self._field_widgets.clear()
+        while self._fields_grid.count():
+            item = self._fields_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+        for i, f in enumerate(CREATABLE_HVDC_LINES["fields"]):
+            row, col = divmod(i, 3)
+            widget_label = f["label"] + (" *" if f.get("required") else "")
+            label = QLabel(widget_label)
+            if f.get("help"):
+                label.setToolTip(f["help"])
+            widget = make_field_widget(f)
+            cell = QWidget()
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(2)
+            cell_layout.addWidget(label)
+            cell_layout.addWidget(widget)
+            self._fields_grid.addWidget(cell, row, col)
+            self._field_widgets[f["name"]] = widget
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component != "HVDC Lines":
+            return
+        cs1 = self._cs1.currentData()
+        cs2 = self._cs2.currentData()
+        if not cs1 or not cs2:
+            self._status.setText("Pick both converter stations first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        raw = {
+            f["name"]: read_field_widget(f, self._field_widgets[f["name"]])
+            for f in CREATABLE_HVDC_LINES["fields"]
+            if f["name"] in self._field_widgets
+        }
+        values = coerce_field_values(CREATABLE_HVDC_LINES["fields"], raw)
+        values["converter_station1_id"] = str(cs1)
+        values["converter_station2_id"] = str(cs2)
+        try:
+            create_hvdc_line(self._network, values)
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        created_id = str(values.get("id", ""))
+        self._status.setText(f"Created HVDC line {created_id!r}.")
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit("HVDC Lines", created_id)
+
+
+# ---------------------------------------------------------------------------
+# Tap changer creation panel (ratio + phase, sub-form on a 2WT)
+# ---------------------------------------------------------------------------
+class CreateTapChangerPanel(QWidget):
+    """Sub-form to add a ratio or phase tap changer to an existing 2WT.
+
+    Auto-hides unless the active data-explorer component is
+    "2-Winding Transformers" and the network carries at least one
+    transformer that doesn't yet have a tap changer of the chosen kind.
+
+    Layout:
+      * Kind picker (Ratio / Phase)
+      * Target transformer picker (filtered to ones without that kind)
+      * Main-fields grid built from the shared registry
+      * Editable steps table with a "Number of steps" spinner
+      * Create button + status label
+    """
+
+    component_created = Signal(str, str)  # ("Tap Changers", transformer_id)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+        self._kind: str = "Ratio"
+        self._main_widgets: dict[str, QWidget] = {}
+
+        self._group = QGroupBox("Create a tap changer on a 2-winding transformer")
+        self._group.setCheckable(True)
+        self._group.setChecked(False)  # folded by default
+        self._group.toggled.connect(self._on_toggled)
+
+        # Pickers row
+        self._kind_combo = QComboBox()
+        for k in CREATABLE_TAP_CHANGERS:
+            self._kind_combo.addItem(k)
+        self._kind_combo.currentTextChanged.connect(self._on_kind_changed)
+        self._twt_combo = QComboBox()
+        self._twt_combo.setMinimumWidth(220)
+        pickers = QHBoxLayout()
+        pickers.addWidget(QLabel("Kind"))
+        pickers.addWidget(self._kind_combo)
+        pickers.addSpacing(12)
+        pickers.addWidget(QLabel("Target 2WT"))
+        pickers.addWidget(self._twt_combo, 1)
+
+        # Main-fields grid
+        self._main_grid = QGridLayout()
+        self._main_grid.setSpacing(6)
+        self._main_widget = QWidget()
+        self._main_widget.setLayout(self._main_grid)
+
+        # Steps table + count spinner
+        self._steps_count = QSpinBox()
+        self._steps_count.setRange(1, 50)
+        self._steps_count.setValue(3)
+        self._steps_count.valueChanged.connect(self._resize_steps_table)
+        self._steps_table = QTableWidget(0, 0)
+        self._steps_table.setMinimumHeight(120)
+        self._steps_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        steps_row = QHBoxLayout()
+        steps_row.addWidget(QLabel("Number of steps"))
+        steps_row.addWidget(self._steps_count)
+        steps_row.addStretch(1)
+
+        # Action row
+        self._create_btn = QPushButton("Create tap changer")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self._create_btn)
+        action_row.addWidget(self._status, 1)
+
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.addLayout(pickers)
+        body_inner.addWidget(self._main_widget)
+        body_inner.addLayout(steps_row)
+        body_inner.addWidget(self._steps_table)
+        body_inner.addLayout(action_row)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+        self.setLayout(outer)
+
+        self._body.setVisible(False)
+        self.setVisible(False)
+
+    # -- Public API ------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._refresh_for_current()
+        self._status.setText("")
+
+    # -- Internals -------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._body.setVisible(checked)
+
+    def _on_kind_changed(self, _kind: str) -> None:
+        self._kind = self._kind_combo.currentText()
+        self._refresh_for_current()
+
+    def _refresh_for_current(self) -> None:
+        show = (
+            self._network is not None
+            and self._component == "2-Winding Transformers"
+        )
+        if show:
+            available = list_transformers_without_tap_changer(
+                self._network, self._kind,
+            )
+        else:
+            available = []
+        self.setVisible(bool(show and available))
+        if not (show and available):
+            return
+
+        self._twt_combo.blockSignals(True)
+        self._twt_combo.clear()
+        for tid in available:
+            self._twt_combo.addItem(tid)
+        self._twt_combo.blockSignals(False)
+
+        self._rebuild_main_fields()
+        self._rebuild_steps_table()
+
+    def _rebuild_main_fields(self) -> None:
+        for w in self._main_widgets.values():
+            w.deleteLater()
+        self._main_widgets.clear()
+        while self._main_grid.count():
+            item = self._main_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        spec = CREATABLE_TAP_CHANGERS[self._kind]
+        for idx, f in enumerate(spec["main_fields"]):
+            widget = make_field_widget(f)
+            row, col = divmod(idx, 3)
+            cell = QWidget()
+            box = QVBoxLayout()
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(2)
+            box.addWidget(QLabel(f["label"]))
+            box.addWidget(widget)
+            cell.setLayout(box)
+            self._main_grid.addWidget(cell, row, col)
+            self._main_widgets[f["name"]] = widget
+
+    def _rebuild_steps_table(self) -> None:
+        spec = CREATABLE_TAP_CHANGERS[self._kind]
+        cols = spec["step_columns"]
+        n_rows = self._steps_count.value()
+        self._steps_table.blockSignals(True)
+        self._steps_table.setColumnCount(len(cols))
+        self._steps_table.setHorizontalHeaderLabels(cols)
+        self._steps_table.setRowCount(n_rows)
+        defaults = spec["step_defaults"]
+        for r in range(n_rows):
+            for c, col in enumerate(cols):
+                item = self._steps_table.item(r, c)
+                if item is None:
+                    self._steps_table.setItem(
+                        r, c, QTableWidgetItem(str(defaults[col])),
+                    )
+        self._steps_table.blockSignals(False)
+
+    def _resize_steps_table(self, _n: int) -> None:
+        spec = CREATABLE_TAP_CHANGERS[self._kind]
+        cols = spec["step_columns"]
+        defaults = spec["step_defaults"]
+        n_rows = self._steps_count.value()
+        prev = self._steps_table.rowCount()
+        self._steps_table.setRowCount(n_rows)
+        if n_rows > prev:
+            for r in range(prev, n_rows):
+                for c, col in enumerate(cols):
+                    self._steps_table.setItem(
+                        r, c, QTableWidgetItem(str(defaults[col])),
+                    )
+
+    def _collect_steps(self) -> list[dict]:
+        spec = CREATABLE_TAP_CHANGERS[self._kind]
+        cols = spec["step_columns"]
+        rows: list[dict] = []
+        for r in range(self._steps_table.rowCount()):
+            row: dict = {}
+            for c, col in enumerate(cols):
+                item = self._steps_table.item(r, c)
+                text = (item.text() if item else "").strip()
+                try:
+                    row[col] = float(text) if text != "" else spec["step_defaults"][col]
+                except ValueError:
+                    row[col] = spec["step_defaults"][col]
+            rows.append(row)
+        return rows
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component != "2-Winding Transformers":
+            return
+        transformer_id = self._twt_combo.currentText()
+        if not transformer_id:
+            self._status.setText("Pick a target transformer first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        spec = CREATABLE_TAP_CHANGERS[self._kind]
+        raw = {
+            f["name"]: read_field_widget(f, self._main_widgets[f["name"]])
+            for f in spec["main_fields"]
+            if f["name"] in self._main_widgets
+        }
+        main_fields = coerce_field_values(spec["main_fields"], raw)
+        steps = self._collect_steps()
+        try:
+            create_tap_changer(
+                self._network, self._kind, transformer_id, main_fields, steps,
+            )
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        self._status.setText(
+            f"Created {self._kind.lower()} tap changer on {transformer_id!r} "
+            f"({len(steps)} steps)."
+        )
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit("Tap Changers", transformer_id)
+        # Refresh the target picker — the transformer just got its tap changer.
+        self._refresh_for_current()
+
+
+# ---------------------------------------------------------------------------
+# Coupling device creation panel (switches tying two busbar sections)
+# ---------------------------------------------------------------------------
+class CreateCouplingDevicePanel(QWidget):
+    """Sub-form to create a coupling device inside a node-breaker VL.
+
+    Auto-hides unless the active data-explorer component is "Switches"
+    and the network has at least one node-breaker voltage level carrying
+    two or more busbar sections.
+
+    Layout:
+      * VL picker (only node-breaker VLs with ≥2 BBS).
+      * Two BBS pickers (refresh when the VL changes; default to distinct rows).
+      * Optional switch-prefix text field.
+      * Create button + status label.
+    """
+
+    component_created = Signal(str, str)  # ("Coupling Devices", vl_id)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+
+        self._group = QGroupBox("Create a coupling device")
+        self._group.setCheckable(True)
+        self._group.setChecked(False)  # folded by default
+        self._group.toggled.connect(self._on_toggled)
+
+        self._vl_combo = QComboBox()
+        self._vl_combo.setMinimumWidth(220)
+        self._vl_combo.currentIndexChanged.connect(self._on_vl_changed)
+        self._bbs1_combo = QComboBox()
+        self._bbs1_combo.setMinimumWidth(200)
+        self._bbs2_combo = QComboBox()
+        self._bbs2_combo.setMinimumWidth(200)
+        self._prefix_edit = QLineEdit()
+        self._prefix_edit.setPlaceholderText("optional switch prefix")
+        self._prefix_edit.setMaximumWidth(220)
+
+        row_vl = QHBoxLayout()
+        row_vl.addWidget(QLabel("Voltage level"))
+        row_vl.addWidget(self._vl_combo, 1)
+
+        row_bbs = QHBoxLayout()
+        row_bbs.addWidget(QLabel("BBS 1"))
+        row_bbs.addWidget(self._bbs1_combo, 1)
+        row_bbs.addSpacing(10)
+        row_bbs.addWidget(QLabel("BBS 2"))
+        row_bbs.addWidget(self._bbs2_combo, 1)
+
+        row_prefix = QHBoxLayout()
+        row_prefix.addWidget(QLabel("Switch prefix"))
+        row_prefix.addWidget(self._prefix_edit, 1)
+
+        self._create_btn = QPushButton("Create coupling device")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        row_action = QHBoxLayout()
+        row_action.addWidget(self._create_btn)
+        row_action.addWidget(self._status, 1)
+
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.addLayout(row_vl)
+        body_inner.addLayout(row_bbs)
+        body_inner.addLayout(row_prefix)
+        body_inner.addLayout(row_action)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+        self.setLayout(outer)
+        self._body.setVisible(False)
+        self.setVisible(False)
+
+    # -- Public API ------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._refresh_for_current()
+        self._status.setText("")
+
+    # -- Internals -------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._body.setVisible(checked)
+
+    def _refresh_for_current(self) -> None:
+        show = (
+            self._network is not None
+            and self._component == "Switches"
+        )
+        vls: list[tuple[str, str, float]] = []
+        if show:
+            vls = list_node_breaker_vls_with_multi_bbs(self._network)
+        self.setVisible(bool(show and vls))
+        if not (show and vls):
+            return
+
+        self._vl_combo.blockSignals(True)
+        self._vl_combo.clear()
+        for vl_id, display, kv in vls:
+            label = f"{display} ({kv:.0f} kV)"
+            self._vl_combo.addItem(label, userData=vl_id)
+        self._vl_combo.blockSignals(False)
+        self._refresh_bbs()
+
+    def _on_vl_changed(self, _index: int) -> None:
+        self._refresh_bbs()
+
+    def _refresh_bbs(self) -> None:
+        if self._network is None:
+            return
+        vl_id = self._vl_combo.currentData()
+        if not vl_id:
+            return
+        ids = list_busbar_sections(self._network, vl_id)
+        for combo in (self._bbs1_combo, self._bbs2_combo):
+            combo.blockSignals(True)
+            combo.clear()
+            for bid in ids:
+                combo.addItem(bid)
+            combo.blockSignals(False)
+        if self._bbs2_combo.count() > 1:
+            self._bbs2_combo.setCurrentIndex(1)
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component != "Switches":
+            return
+        bbs1 = self._bbs1_combo.currentText()
+        bbs2 = self._bbs2_combo.currentText()
+        prefix = self._prefix_edit.text().strip() or None
+        try:
+            create_coupling_device(self._network, bbs1, bbs2, prefix)
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        self._status.setText(f"Created coupling device between {bbs1} and {bbs2}.")
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        vl_id = str(self._vl_combo.currentData() or "")
+        self.component_created.emit("Coupling Devices", vl_id)
+
+
+# ---------------------------------------------------------------------------
+# Reactive-limits panel (min/max or per-P curve on gens / batteries / VSCs)
+# ---------------------------------------------------------------------------
+class CreateReactiveLimitsPanel(QWidget):
+    """Sub-form to attach reactive limits to a Generator / Battery / VSC.
+
+    Auto-hides unless the active component is one of
+    :data:`REACTIVE_LIMITS_TARGETS` and the network carries at least one
+    candidate element.
+
+    Layout:
+      * Target picker (filtered by the active component).
+      * Mode picker (min/max or curve).
+      * min/max view: two QDoubleSpinBox.
+      * Curve view: "Number of points" spinner driving an editable
+        QTableWidget with p / min_q / max_q columns.
+      * Save button + status label.
+    """
+
+    component_created = Signal(str, str)  # (component, element_id)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+
+        self._group = QGroupBox("Attach reactive limits")
+        self._group.setCheckable(True)
+        self._group.setChecked(False)  # folded by default
+        self._group.toggled.connect(self._on_toggled)
+
+        # Target + mode pickers
+        self._target_combo = QComboBox()
+        self._target_combo.setMinimumWidth(220)
+        self._mode_combo = QComboBox()
+        for m in REACTIVE_LIMITS_MODES:
+            self._mode_combo.addItem("min/max" if m == "minmax" else "curve", userData=m)
+        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        row_pickers = QHBoxLayout()
+        row_pickers.addWidget(QLabel("Target"))
+        row_pickers.addWidget(self._target_combo, 1)
+        row_pickers.addSpacing(12)
+        row_pickers.addWidget(QLabel("Mode"))
+        row_pickers.addWidget(self._mode_combo)
+
+        # min/max view (two spinboxes side-by-side)
+        self._minmax_widget = QWidget()
+        self._min_q = QDoubleSpinBox()
+        self._min_q.setDecimals(3); self._min_q.setRange(-1e9, 1e9); self._min_q.setValue(-100.0)
+        self._max_q = QDoubleSpinBox()
+        self._max_q.setDecimals(3); self._max_q.setRange(-1e9, 1e9); self._max_q.setValue(100.0)
+        minmax_layout = QHBoxLayout(self._minmax_widget)
+        minmax_layout.setContentsMargins(0, 0, 0, 0)
+        minmax_layout.addWidget(QLabel("min_q (MVar)"))
+        minmax_layout.addWidget(self._min_q, 1)
+        minmax_layout.addSpacing(12)
+        minmax_layout.addWidget(QLabel("max_q (MVar)"))
+        minmax_layout.addWidget(self._max_q, 1)
+
+        # Curve view: count spinner + editable table
+        self._curve_widget = QWidget()
+        self._point_count = QSpinBox()
+        self._point_count.setRange(2, 50)
+        self._point_count.setValue(2)
+        self._point_count.valueChanged.connect(self._resize_points_table)
+        self._points_table = QTableWidget(0, 3)
+        self._points_table.setHorizontalHeaderLabels(["p", "min_q", "max_q"])
+        self._points_table.setMinimumHeight(120)
+        self._points_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        curve_layout = QVBoxLayout(self._curve_widget)
+        curve_layout.setContentsMargins(0, 0, 0, 0)
+        row_count = QHBoxLayout()
+        row_count.addWidget(QLabel("Number of points"))
+        row_count.addWidget(self._point_count)
+        row_count.addStretch(1)
+        curve_layout.addLayout(row_count)
+        curve_layout.addWidget(self._points_table)
+
+        self._create_btn = QPushButton("Save reactive limits")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        row_action = QHBoxLayout()
+        row_action.addWidget(self._create_btn)
+        row_action.addWidget(self._status, 1)
+
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.addLayout(row_pickers)
+        body_inner.addWidget(self._minmax_widget)
+        body_inner.addWidget(self._curve_widget)
+        body_inner.addLayout(row_action)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+        self.setLayout(outer)
+        self._body.setVisible(False)
+        self.setVisible(False)
+
+        # Seed curve defaults so the table shows two sensible rows from the start.
+        self._seed_points_defaults()
+        self._apply_mode_visibility()
+
+    # -- Public API ------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._refresh_for_current()
+        self._status.setText("")
+
+    # -- Internals -------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._body.setVisible(checked)
+        if checked:
+            # Mode-specific sub-views only one of which is shown at a time.
+            self._apply_mode_visibility()
+
+    def _current_mode(self) -> str:
+        return str(self._mode_combo.currentData() or "minmax")
+
+    def _on_mode_changed(self, _idx: int) -> None:
+        self._apply_mode_visibility()
+
+    def _apply_mode_visibility(self) -> None:
+        mode = self._current_mode()
+        self._minmax_widget.setVisible(mode == "minmax")
+        self._curve_widget.setVisible(mode == "curve")
+
+    def _refresh_for_current(self) -> None:
+        show = (
+            self._network is not None
+            and self._component in REACTIVE_LIMITS_TARGETS
+        )
+        ids = list_reactive_limit_candidates(
+            self._network, self._component
+        ) if show else []
+        self.setVisible(bool(show and ids))
+        if not (show and ids):
+            return
+        self._target_combo.blockSignals(True)
+        self._target_combo.clear()
+        for eid in ids:
+            self._target_combo.addItem(eid)
+        self._target_combo.blockSignals(False)
+
+    def _seed_points_defaults(self) -> None:
+        self._points_table.blockSignals(True)
+        self._points_table.setRowCount(2)
+        defaults = [(0.0, -100.0, 100.0), (100.0, -80.0, 80.0)]
+        for r, (p, mn, mx) in enumerate(defaults):
+            self._points_table.setItem(r, 0, QTableWidgetItem(str(p)))
+            self._points_table.setItem(r, 1, QTableWidgetItem(str(mn)))
+            self._points_table.setItem(r, 2, QTableWidgetItem(str(mx)))
+        self._points_table.blockSignals(False)
+
+    def _resize_points_table(self, _n: int) -> None:
+        n_rows = self._point_count.value()
+        prev = self._points_table.rowCount()
+        self._points_table.setRowCount(n_rows)
+        # Newly-added rows seed with linearly-spaced p (last + 100) and
+        # the previous row's q-band so the user can edit from a sensible start.
+        if n_rows > prev:
+            try:
+                last_p = float(self._points_table.item(prev - 1, 0).text())
+                last_min = float(self._points_table.item(prev - 1, 1).text())
+                last_max = float(self._points_table.item(prev - 1, 2).text())
+            except (AttributeError, ValueError):
+                last_p, last_min, last_max = 0.0, -100.0, 100.0
+            for r in range(prev, n_rows):
+                self._points_table.setItem(r, 0, QTableWidgetItem(str(last_p + 100.0 * (r - prev + 1))))
+                self._points_table.setItem(r, 1, QTableWidgetItem(str(last_min)))
+                self._points_table.setItem(r, 2, QTableWidgetItem(str(last_max)))
+
+    def _collect_payload(self) -> list[dict]:
+        if self._current_mode() == "minmax":
+            return [{"min_q": self._min_q.value(), "max_q": self._max_q.value()}]
+        rows: list[dict] = []
+        for r in range(self._points_table.rowCount()):
+            try:
+                p = float(self._points_table.item(r, 0).text())
+                mn = float(self._points_table.item(r, 1).text())
+                mx = float(self._points_table.item(r, 2).text())
+            except (AttributeError, ValueError):
+                continue
+            rows.append({"p": p, "min_q": mn, "max_q": mx})
+        return rows
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component not in REACTIVE_LIMITS_TARGETS:
+            return
+        target_id = self._target_combo.currentText()
+        if not target_id:
+            self._status.setText("Pick a target first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        try:
+            create_reactive_limits(
+                self._network, target_id, self._current_mode(), self._collect_payload(),
+            )
+        except Exception as exc:
+            self._status.setText(f"Save failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        label = "min/max" if self._current_mode() == "minmax" else "curve"
+        self._status.setText(f"Saved {label} reactive limits on {target_id!r}.")
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit(self._component or "", target_id)
+
+
+# ---------------------------------------------------------------------------
+# Operational-limits panel (CURRENT / APPARENT_POWER / ACTIVE_POWER groups)
+# ---------------------------------------------------------------------------
+class CreateOperationalLimitsPanel(QWidget):
+    """Sub-form to attach an operational-limits group to a line/2WT/dangling line.
+
+    Auto-hides unless the active component is one of
+    :data:`OPERATIONAL_LIMITS_TARGETS` and the network carries at least
+    one candidate element.
+
+    Layout:
+      * Target picker (filtered by the active component).
+      * Side + type pickers + group-name text input.
+      * QTableWidget of rows (name / value / acceptable_duration / fictitious)
+        sized by a "Number of rows" spinner, seeded with one permanent
+        and one TATL row.
+      * Save button + status label.
+    """
+
+    component_created = Signal(str, str)  # (component, element_id)
+
+    _COL_NAME = 0
+    _COL_VALUE = 1
+    _COL_DURATION = 2
+    _COL_FICTITIOUS = 3
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+
+        self._group = QGroupBox("Attach operational limits")
+        self._group.setCheckable(True)
+        self._group.setChecked(False)  # folded by default
+        self._group.toggled.connect(self._on_toggled)
+
+        # Target + side + type + group
+        self._target_combo = QComboBox()
+        self._target_combo.setMinimumWidth(220)
+        self._side_combo = QComboBox()
+        for s in OPERATIONAL_LIMIT_SIDES:
+            self._side_combo.addItem(s)
+        self._type_combo = QComboBox()
+        for t in OPERATIONAL_LIMIT_TYPES:
+            self._type_combo.addItem(t)
+        self._group_edit = QLineEdit("DEFAULT")
+        self._group_edit.setMaximumWidth(160)
+
+        row_pickers = QHBoxLayout()
+        row_pickers.addWidget(QLabel("Target"))
+        row_pickers.addWidget(self._target_combo, 1)
+        row_pickers.addSpacing(8)
+        row_pickers.addWidget(QLabel("Side"))
+        row_pickers.addWidget(self._side_combo)
+        row_pickers.addSpacing(8)
+        row_pickers.addWidget(QLabel("Type"))
+        row_pickers.addWidget(self._type_combo)
+        row_pickers.addSpacing(8)
+        row_pickers.addWidget(QLabel("Group"))
+        row_pickers.addWidget(self._group_edit)
+
+        # Rows table + count spinner
+        self._row_count = QSpinBox()
+        self._row_count.setRange(1, 50)
+        self._row_count.setValue(2)
+        self._row_count.valueChanged.connect(self._resize_rows_table)
+        self._rows_table = QTableWidget(0, 4)
+        self._rows_table.setHorizontalHeaderLabels(
+            ["name", "value", "acceptable_duration", "fictitious"],
+        )
+        self._rows_table.setMinimumHeight(140)
+        self._rows_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+
+        row_count = QHBoxLayout()
+        row_count.addWidget(QLabel("Number of rows"))
+        row_count.addWidget(self._row_count)
+        row_count.addStretch(1)
+
+        self._create_btn = QPushButton("Save operational limits")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        row_action = QHBoxLayout()
+        row_action.addWidget(self._create_btn)
+        row_action.addWidget(self._status, 1)
+
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.addLayout(row_pickers)
+        body_inner.addLayout(row_count)
+        body_inner.addWidget(self._rows_table)
+        body_inner.addLayout(row_action)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+        self.setLayout(outer)
+        self._body.setVisible(False)
+        self.setVisible(False)
+
+        self._seed_rows_defaults()
+
+    # -- Public API ------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._refresh_for_current()
+        self._status.setText("")
+
+    # -- Internals -------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._body.setVisible(checked)
+
+    def _refresh_for_current(self) -> None:
+        show = (
+            self._network is not None
+            and self._component in OPERATIONAL_LIMITS_TARGETS
+        )
+        ids = list_operational_limit_candidates(
+            self._network, self._component
+        ) if show else []
+        self.setVisible(bool(show and ids))
+        if not (show and ids):
+            return
+        self._target_combo.blockSignals(True)
+        self._target_combo.clear()
+        for eid in ids:
+            self._target_combo.addItem(eid)
+        self._target_combo.blockSignals(False)
+
+    def _seed_rows_defaults(self) -> None:
+        """Two rows: one permanent + one 60-second TATL."""
+        defaults = [
+            ("permanent", "1000.0", str(PERMANENT_DURATION), False),
+            ("TATL_60", "1200.0", "60", False),
+        ]
+        self._rows_table.blockSignals(True)
+        self._rows_table.setRowCount(len(defaults))
+        for r, (name, value, duration, fict) in enumerate(defaults):
+            self._rows_table.setItem(r, self._COL_NAME, QTableWidgetItem(name))
+            self._rows_table.setItem(r, self._COL_VALUE, QTableWidgetItem(value))
+            self._rows_table.setItem(r, self._COL_DURATION, QTableWidgetItem(duration))
+            item = QTableWidgetItem()
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if fict else Qt.Unchecked)
+            self._rows_table.setItem(r, self._COL_FICTITIOUS, item)
+        self._rows_table.blockSignals(False)
+
+    def _resize_rows_table(self, _n: int) -> None:
+        n = self._row_count.value()
+        prev = self._rows_table.rowCount()
+        self._rows_table.setRowCount(n)
+        for r in range(prev, n):
+            # Linearly bump the duration (300, 600, ...) so subsequent TATL
+            # rows are easy to tell apart in the editor.
+            duration = 300 * (r - prev + 2)
+            self._rows_table.setItem(r, self._COL_NAME, QTableWidgetItem(f"TATL_{duration}"))
+            self._rows_table.setItem(r, self._COL_VALUE, QTableWidgetItem("1200.0"))
+            self._rows_table.setItem(r, self._COL_DURATION, QTableWidgetItem(str(duration)))
+            item = QTableWidgetItem()
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            self._rows_table.setItem(r, self._COL_FICTITIOUS, item)
+
+    def _collect_limits(self) -> list[dict]:
+        rows: list[dict] = []
+        for r in range(self._rows_table.rowCount()):
+            name_item = self._rows_table.item(r, self._COL_NAME)
+            value_item = self._rows_table.item(r, self._COL_VALUE)
+            dur_item = self._rows_table.item(r, self._COL_DURATION)
+            fict_item = self._rows_table.item(r, self._COL_FICTITIOUS)
+            if value_item is None or value_item.text().strip() == "":
+                continue
+            try:
+                value = float(value_item.text())
+                duration = int(dur_item.text()) if dur_item else 0
+            except (ValueError, AttributeError):
+                continue
+            rows.append({
+                "name": (name_item.text() if name_item else "") or None,
+                "value": value,
+                "acceptable_duration": duration,
+                "fictitious": bool(fict_item and fict_item.checkState() == Qt.Checked),
+            })
+        return rows
+
+    def _on_create_clicked(self) -> None:
+        if (
+            self._network is None
+            or self._component not in OPERATIONAL_LIMITS_TARGETS
+        ):
+            return
+        element_id = self._target_combo.currentText()
+        if not element_id:
+            self._status.setText("Pick a target first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        side = self._side_combo.currentText()
+        limit_type = self._type_combo.currentText()
+        group_name = self._group_edit.text().strip() or "DEFAULT"
+        limits = self._collect_limits()
+        try:
+            create_operational_limits(
+                self._network, element_id, side, limit_type, limits, group_name,
+            )
+        except Exception as exc:
+            self._status.setText(f"Save failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        self._status.setText(
+            f"Saved {len(limits)} {limit_type.lower()} limit(s) on "
+            f"{element_id} (side {side}, group {group_name!r})."
+        )
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit(self._component or "", element_id)
+
+
+# ---------------------------------------------------------------------------
+# Secondary voltage control panel (network-level: zones + control units)
+# ---------------------------------------------------------------------------
+class CreateSecondaryVoltageControlPanel(QWidget):
+    """Network-level form to (re)define the secondaryVoltageControl extension.
+
+    Shows when the active component is "Voltage Levels" and the network is
+    loaded. Two editable QTableWidgets — one for zones (name / target_v /
+    bus_ids) and one for units (unit_id / zone_name / participate) — are
+    sized by row-count spinners. pypowsybl replaces the whole SVC
+    definition on submit.
+    """
+
+    component_created = Signal(str, str)  # ("Secondary Voltage Control", "")
+
+    _ZONE_COL_NAME = 0
+    _ZONE_COL_TARGET_V = 1
+    _ZONE_COL_BUS_IDS = 2
+
+    _UNIT_COL_ID = 0
+    _UNIT_COL_ZONE = 1
+    _UNIT_COL_PARTICIPATE = 2
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+
+        self._group = QGroupBox("Configure secondary voltage control")
+        self._group.setCheckable(True)
+        self._group.setChecked(False)  # folded by default
+        self._group.toggled.connect(self._on_toggled)
+
+        # Zones table + count spinner
+        self._zone_count = QSpinBox()
+        self._zone_count.setRange(1, 50)
+        self._zone_count.setValue(1)
+        self._zone_count.valueChanged.connect(self._resize_zones_table)
+        self._zones_table = QTableWidget(0, 3)
+        self._zones_table.setHorizontalHeaderLabels(
+            ["name", "target_v (kV)", "bus_ids (space-separated)"],
+        )
+        self._zones_table.setMinimumHeight(110)
+        self._zones_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+
+        # Units table + count spinner
+        self._unit_count = QSpinBox()
+        self._unit_count.setRange(1, 200)
+        self._unit_count.setValue(1)
+        self._unit_count.valueChanged.connect(self._resize_units_table)
+        self._units_table = QTableWidget(0, 3)
+        self._units_table.setHorizontalHeaderLabels(
+            ["unit_id", "zone_name", "participate"],
+        )
+        self._units_table.setMinimumHeight(110)
+        self._units_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+
+        row_zone_count = QHBoxLayout()
+        row_zone_count.addWidget(QLabel("Number of zones"))
+        row_zone_count.addWidget(self._zone_count)
+        row_zone_count.addStretch(1)
+
+        row_unit_count = QHBoxLayout()
+        row_unit_count.addWidget(QLabel("Number of units"))
+        row_unit_count.addWidget(self._unit_count)
+        row_unit_count.addStretch(1)
+
+        self._create_btn = QPushButton("Save secondary voltage control")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        row_action = QHBoxLayout()
+        row_action.addWidget(self._create_btn)
+        row_action.addWidget(self._status, 1)
+
+        zones_label = QLabel("<b>Zones</b>")
+        units_label = QLabel("<b>Control units</b>")
+        zones_label.setTextFormat(Qt.RichText)
+        units_label.setTextFormat(Qt.RichText)
+
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.addWidget(zones_label)
+        body_inner.addLayout(row_zone_count)
+        body_inner.addWidget(self._zones_table)
+        body_inner.addWidget(units_label)
+        body_inner.addLayout(row_unit_count)
+        body_inner.addWidget(self._units_table)
+        body_inner.addLayout(row_action)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+        self.setLayout(outer)
+        self._body.setVisible(False)
+        self.setVisible(False)
+
+        self._seed_zones_defaults()
+        self._seed_units_defaults()
+
+    # -- Public API ------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._refresh_for_current()
+        self._status.setText("")
+
+    # -- Internals -------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._body.setVisible(checked)
+
+    def _refresh_for_current(self) -> None:
+        show = (
+            self._network is not None
+            and self._component == "Voltage Levels"
+        )
+        self.setVisible(bool(show))
+
+    def _seed_zones_defaults(self) -> None:
+        self._zones_table.blockSignals(True)
+        self._zones_table.setRowCount(1)
+        self._zones_table.setItem(
+            0, self._ZONE_COL_NAME, QTableWidgetItem("ZONE_1"),
+        )
+        self._zones_table.setItem(
+            0, self._ZONE_COL_TARGET_V, QTableWidgetItem("400.0"),
+        )
+        self._zones_table.setItem(
+            0, self._ZONE_COL_BUS_IDS, QTableWidgetItem(""),
+        )
+        self._zones_table.blockSignals(False)
+
+    def _seed_units_defaults(self) -> None:
+        self._units_table.blockSignals(True)
+        self._units_table.setRowCount(1)
+        self._units_table.setItem(
+            0, self._UNIT_COL_ID, QTableWidgetItem(""),
+        )
+        self._units_table.setItem(
+            0, self._UNIT_COL_ZONE, QTableWidgetItem("ZONE_1"),
+        )
+        item = QTableWidgetItem()
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked)
+        self._units_table.setItem(0, self._UNIT_COL_PARTICIPATE, item)
+        self._units_table.blockSignals(False)
+
+    def _resize_zones_table(self, _n: int) -> None:
+        n = self._zone_count.value()
+        prev = self._zones_table.rowCount()
+        self._zones_table.setRowCount(n)
+        for r in range(prev, n):
+            self._zones_table.setItem(
+                r, self._ZONE_COL_NAME, QTableWidgetItem(f"ZONE_{r + 1}"),
+            )
+            self._zones_table.setItem(
+                r, self._ZONE_COL_TARGET_V, QTableWidgetItem("400.0"),
+            )
+            self._zones_table.setItem(
+                r, self._ZONE_COL_BUS_IDS, QTableWidgetItem(""),
+            )
+
+    def _resize_units_table(self, _n: int) -> None:
+        n = self._unit_count.value()
+        prev = self._units_table.rowCount()
+        self._units_table.setRowCount(n)
+        for r in range(prev, n):
+            self._units_table.setItem(r, self._UNIT_COL_ID, QTableWidgetItem(""))
+            self._units_table.setItem(
+                r, self._UNIT_COL_ZONE, QTableWidgetItem("ZONE_1"),
+            )
+            item = QTableWidgetItem()
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self._units_table.setItem(r, self._UNIT_COL_PARTICIPATE, item)
+
+    def _collect_zones(self) -> list[dict]:
+        rows: list[dict] = []
+        for r in range(self._zones_table.rowCount()):
+            name_item = self._zones_table.item(r, self._ZONE_COL_NAME)
+            target_item = self._zones_table.item(r, self._ZONE_COL_TARGET_V)
+            bus_item = self._zones_table.item(r, self._ZONE_COL_BUS_IDS)
+            name = (name_item.text() if name_item else "").strip()
+            if not name:
+                continue
+            try:
+                target_v = float(target_item.text()) if target_item else None
+            except (ValueError, AttributeError):
+                target_v = None
+            rows.append({
+                "name": name,
+                "target_v": target_v,
+                "bus_ids": (bus_item.text() if bus_item else "").strip(),
+            })
+        return rows
+
+    def _collect_units(self) -> list[dict]:
+        rows: list[dict] = []
+        for r in range(self._units_table.rowCount()):
+            uid_item = self._units_table.item(r, self._UNIT_COL_ID)
+            zone_item = self._units_table.item(r, self._UNIT_COL_ZONE)
+            part_item = self._units_table.item(r, self._UNIT_COL_PARTICIPATE)
+            uid = (uid_item.text() if uid_item else "").strip()
+            if not uid:
+                continue
+            rows.append({
+                "unit_id": uid,
+                "zone_name": (zone_item.text() if zone_item else "").strip(),
+                "participate": bool(
+                    part_item and part_item.checkState() == Qt.Checked
+                ),
+            })
+        return rows
+
+    def _on_create_clicked(self) -> None:
+        if self._network is None or self._component != "Voltage Levels":
+            return
+        zones = self._collect_zones()
+        units = self._collect_units()
+        try:
+            create_secondary_voltage_control(self._network, zones, units)
+        except Exception as exc:
+            self._status.setText(f"Save failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        self._status.setText(
+            f"Saved {len(zones)} zone(s) and {len(units)} unit(s)."
+        )
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit("Secondary Voltage Control", "")
+
+
+# ---------------------------------------------------------------------------
+# Extension creation panel — sub-form attached to creatable components
+# ---------------------------------------------------------------------------
+class CreateExtensionPanel(QWidget):
+    """Sub-form to attach a pypowsybl extension to an existing element.
+
+    Auto-hides unless the active data-explorer component is in the
+    targets map of *at least one* entry in :data:`CREATABLE_EXTENSIONS`.
+
+    Layout:
+      * Extension picker — narrowed to extensions whose ``targets``
+        include the current component (e.g. on Generators it offers
+        ``position`` / ``activePowerControl`` / ``entsoeCategory``).
+      * Target picker — existing element ids fetched via
+        :func:`list_extension_candidates`.
+      * Per-field widgets built from the extension's ``fields`` list
+        — kinds map to ``QCheckBox`` / ``QSpinBox`` / ``QDoubleSpinBox``
+        / ``QLineEdit`` / ``QComboBox``.
+      * Create button + status label.
+
+    Emits :pyattr:`component_created` with ``("Extension", target_id)``
+    on success so the host can flush diagram caches + refresh tabs.
+    """
+
+    component_created = Signal(str, str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._network: Optional[NetworkProxy] = None
+        self._component: Optional[str] = None
+        # Currently-rendered extension name (drives the per-field widgets).
+        self._extension: Optional[str] = None
+        self._field_widgets: dict[str, QWidget] = {}
+
+        self._group = QGroupBox("Attach extension")
+        self._group.setCheckable(True)
+        self._group.setChecked(False)  # folded by default
+        self._group.toggled.connect(self._on_toggled)
+
+        # Pickers row — extension + target.
+        self._ext_combo = QComboBox()
+        self._ext_combo.setMinimumWidth(280)
+        self._ext_combo.currentIndexChanged.connect(self._on_extension_changed)
+        self._target_combo = QComboBox()
+        self._target_combo.setMinimumWidth(220)
+        picker_row = QHBoxLayout()
+        picker_row.addWidget(QLabel("Extension:"))
+        picker_row.addWidget(self._ext_combo, 1)
+        picker_row.addSpacing(8)
+        picker_row.addWidget(QLabel("Target:"))
+        picker_row.addWidget(self._target_combo, 1)
+
+        # Caption — the extension's ``detail`` text from the registry.
+        self._detail_lbl = QLabel("")
+        self._detail_lbl.setWordWrap(True)
+        self._detail_lbl.setStyleSheet("color: #555; font-style: italic;")
+
+        # Field grid — repopulated on every extension change.
+        self._fields_grid = QGridLayout()
+        self._fields_grid.setSpacing(6)
+        self._fields_widget = QWidget()
+        self._fields_widget.setLayout(self._fields_grid)
+
+        self._create_btn = QPushButton("Create")
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self._create_btn)
+        action_row.addWidget(self._status, 1)
+
+        # Wrap the whole body so the QGroupBox checked toggle folds
+        # everything — same pattern as the other create panels.
+        self._body = QWidget()
+        body_inner = QVBoxLayout(self._body)
+        body_inner.setContentsMargins(6, 2, 6, 6)
+        body_inner.setSpacing(6)
+        body_inner.addLayout(picker_row)
+        body_inner.addWidget(self._detail_lbl)
+        body_inner.addWidget(self._fields_widget)
+        body_inner.addLayout(action_row)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(6, 2, 6, 6)
+        group_layout.addWidget(self._body)
+        self._group.setLayout(group_layout)
+        self._body.setVisible(False)
+        self.setVisible(False)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._group)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_network(self, network: Optional[NetworkProxy]) -> None:
+        self._network = network
+        self._refresh_for_current()
+
+    def set_component(self, component: Optional[str]) -> None:
+        self._component = component
+        self._status.setText("")
+        self._refresh_for_current()
+
+    # ------------------------------------------------------------------
+    # Internals — visibility + extension picker
+    # ------------------------------------------------------------------
+    def _on_toggled(self, checked: bool) -> None:
+        self._body.setVisible(checked)
+
+    def _available_extensions(self) -> list[str]:
+        if not self._component:
+            return []
+        from iidm_viewer.extension_creation import list_extensions_for_component
+        return list_extensions_for_component(self._component)
+
+    def _refresh_for_current(self) -> None:
+        names = self._available_extensions()
+        applicable = bool(self._network is not None and names)
+        self.setVisible(applicable)
+        if not applicable:
+            return
+        # Repopulate the extension dropdown — preserve selection when
+        # the new component still offers the previously-chosen one.
+        current = self._ext_combo.currentText() if self._ext_combo.count() else ""
+        self._ext_combo.blockSignals(True)
+        self._ext_combo.clear()
+        for n in names:
+            self._ext_combo.addItem(n)
+        target_idx = self._ext_combo.findText(current) if current else -1
+        if target_idx >= 0:
+            self._ext_combo.setCurrentIndex(target_idx)
+        else:
+            self._ext_combo.setCurrentIndex(0)
+        self._ext_combo.blockSignals(False)
+        self._rebuild_for_selected_extension()
+
+    def _on_extension_changed(self, _idx: int) -> None:
+        self._rebuild_for_selected_extension()
+
+    def _rebuild_for_selected_extension(self) -> None:
+        from iidm_viewer.extension_creation import (
+            CREATABLE_EXTENSIONS,
+            list_extension_candidates,
+        )
+        self._extension = self._ext_combo.currentText() or None
+        if not self._extension or self._network is None or not self._component:
+            self._detail_lbl.setText("")
+            self._target_combo.clear()
+            self._rebuild_field_widgets([])
+            return
+        schema = CREATABLE_EXTENSIONS.get(self._extension)
+        if schema is None:
+            self._detail_lbl.setText("")
+            self._target_combo.clear()
+            self._rebuild_field_widgets([])
+            return
+        self._detail_lbl.setText(str(schema.get("detail") or ""))
+        # Target picker — eligible element ids for this (extension, component).
+        try:
+            ids = list_extension_candidates(
+                self._network, self._extension, self._component,
+            )
+        except Exception:
+            ids = []
+        self._target_combo.blockSignals(True)
+        self._target_combo.clear()
+        for eid in ids:
+            self._target_combo.addItem(eid)
+        self._target_combo.blockSignals(False)
+        self._rebuild_field_widgets(schema["fields"])
+
+    # ------------------------------------------------------------------
+    # Internals — fields
+    # ------------------------------------------------------------------
+    def _rebuild_field_widgets(self, fields: list[dict]) -> None:
+        for w in self._field_widgets.values():
+            w.deleteLater()
+        self._field_widgets.clear()
+        while self._fields_grid.count():
+            item = self._fields_grid.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        for idx, f in enumerate(fields):
+            widget = self._make_widget_for_field(f)
+            self._field_widgets[f["name"]] = widget
+            label = QLabel(f["name"])
+            if f.get("help"):
+                label.setToolTip(str(f["help"]))
+                widget.setToolTip(str(f["help"]))
+            row = idx
+            self._fields_grid.addWidget(label, row, 0)
+            self._fields_grid.addWidget(widget, row, 1)
+
+    @staticmethod
+    def _make_widget_for_field(field: dict) -> QWidget:
+        kind = field["kind"]
+        default = field.get("default")
+        if kind == "bool":
+            w = QCheckBox()
+            w.setChecked(bool(default))
+            return w
+        if kind == "int":
+            w = QSpinBox()
+            w.setRange(-2 ** 31, 2 ** 31 - 1)
+            try:
+                w.setValue(int(default) if default is not None else 0)
+            except (TypeError, ValueError):
+                w.setValue(0)
+            return w
+        if kind == "float":
+            w = QDoubleSpinBox()
+            w.setDecimals(6)
+            w.setRange(-1e15, 1e15)
+            try:
+                w.setValue(float(default) if default is not None else 0.0)
+            except (TypeError, ValueError):
+                w.setValue(0.0)
+            return w
+        if kind == "choice":
+            w = QComboBox()
+            for opt in field.get("options") or []:
+                w.addItem(str(opt))
+            if default is not None:
+                idx = w.findText(str(default))
+                if idx >= 0:
+                    w.setCurrentIndex(idx)
+            return w
+        # ``str`` (and any unknown kind).
+        return QLineEdit("" if default in (None, "") else str(default))
+
+    def _read_widget(self, field: dict):
+        widget = self._field_widgets.get(field["name"])
+        if widget is None:
+            return None
+        kind = field["kind"]
+        if kind == "bool" and isinstance(widget, QCheckBox):
+            return widget.isChecked()
+        if kind == "int" and isinstance(widget, QSpinBox):
+            return widget.value()
+        if kind == "float" and isinstance(widget, QDoubleSpinBox):
+            return widget.value()
+        if kind == "choice" and isinstance(widget, QComboBox):
+            return widget.currentText()
+        if isinstance(widget, QLineEdit):
+            text = widget.text()
+            return text if text != "" else None
+        return None
+
+    # ------------------------------------------------------------------
+    # Create
+    # ------------------------------------------------------------------
+    def _on_create_clicked(self) -> None:
+        from iidm_viewer.extension_creation import (
+            CREATABLE_EXTENSIONS,
+            create_extension,
+        )
+        if self._network is None or not self._extension:
+            return
+        schema = CREATABLE_EXTENSIONS.get(self._extension)
+        if schema is None:
+            return
+        target_id = self._target_combo.currentText()
+        if not target_id:
+            self._status.setText("Pick a target first.")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        values = {f["name"]: self._read_widget(f) for f in schema["fields"]}
+        try:
+            create_extension(self._network, self._extension, target_id, values)
+        except Exception as exc:
+            self._status.setText(f"Create failed — {exc}")
+            self._status.setStyleSheet("color: #b30000; padding: 0 6px;")
+            return
+        self._status.setText(
+            f"Created {self._extension!r} on {target_id!r}.",
+        )
+        self._status.setStyleSheet("color: #0a7e2a; padding: 0 6px;")
+        self.component_created.emit("Extension", target_id)

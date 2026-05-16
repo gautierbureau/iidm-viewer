@@ -11,44 +11,8 @@ from __future__ import annotations
 
 import streamlit as st
 
+from iidm_viewer.diagram_services import extract_map_data as _extract_map_data
 from iidm_viewer.map_component import render_interactive_map
-from iidm_viewer.powsybl_worker import run
-
-
-def _extract_map_data(network):
-    """Extract map data by delegating to pypowsybl-jupyter's extraction.
-
-    Runs on the pypowsybl worker thread via ``run(...)``.
-    """
-    raw = object.__getattribute__(network, "_obj")
-
-    def _extract():
-        from pypowsybl_jupyter.networkmapwidget import NetworkMapWidget
-
-        # extract_map_data only uses `self` for stateless helpers,
-        # so we can call it directly on a throwaway subclass instance
-        # that skips the widget __init__.
-        class _Extractor(NetworkMapWidget):
-            def __init__(self):  # skip widget init entirely
-                pass
-            def __del__(self):   # suppress ipywidgets cleanup noise
-                pass
-
-        extractor = _Extractor()
-
-        (lmap, lpos, smap, spos, _vl_subs, _sub_vls, _subs_ids, tlmap, hlmap) = (
-            extractor.extract_map_data(raw, display_lines=True, use_line_geodata=False)
-        )
-
-        if not spos:
-            return None
-
-        # Include tie lines and HVDC lines, matching the pypowsybl widget.
-        all_lines = lmap + tlmap + hlmap
-
-        return smap, spos, all_lines, lpos
-
-    return run(_extract)
 
 
 _MISSING = object()  # sentinel: key absent from session state (distinct from None)

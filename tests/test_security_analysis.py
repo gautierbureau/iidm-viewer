@@ -10,8 +10,8 @@ from iidm_viewer.state import (
     load_network,
     run_security_analysis,
 )
-from iidm_viewer.security_analysis import (
-    _action_summary,
+from iidm_viewer.security_analysis import _action_summary
+from iidm_viewer.security_analysis_tab import (
     _get_filterable_df,
     _render_actions_subtab,
     _render_config_tab,
@@ -83,7 +83,7 @@ def test_build_n1_contingencies_none_filter_equals_no_filter(xiidm_upload):
 
 def test_build_n1_contingencies_empty_df_returns_empty():
     net = types.SimpleNamespace(_obj=MagicMock())
-    with patch("iidm_viewer.state.run", return_value=(pd.DataFrame(), None)):
+    with patch("iidm_viewer.security_analysis.run", return_value=(pd.DataFrame(), None)):
         result = build_n1_contingencies(net, "Lines")
     assert result == []
 
@@ -98,7 +98,7 @@ def test_build_n1_contingencies_voltage_filter_no_match():
         index=pd.Index(["VL1", "VL2"], name="id"),
     )
     net = types.SimpleNamespace(_obj=MagicMock())
-    with patch("iidm_viewer.state.run", return_value=(elem_df, vl_df)):
+    with patch("iidm_viewer.security_analysis.run", return_value=(elem_df, vl_df)):
         result = build_n1_contingencies(net, "Lines", {400.0})
     assert result == []
 
@@ -113,7 +113,7 @@ def test_build_n1_contingencies_voltage_filter_match_on_vl1():
         index=pd.Index(["VL_HV", "VL_MV"], name="id"),
     )
     net = types.SimpleNamespace(_obj=MagicMock())
-    with patch("iidm_viewer.state.run", return_value=(elem_df, vl_df)):
+    with patch("iidm_viewer.security_analysis.run", return_value=(elem_df, vl_df)):
         result = build_n1_contingencies(net, "Lines", {400.0})
     assert len(result) == 1
     assert result[0]["element_id"] == "L1"
@@ -131,7 +131,7 @@ def test_build_n1_contingencies_voltage_filter_match_on_vl2():
         index=pd.Index(["VL_MV", "VL_HV"], name="id"),
     )
     net = types.SimpleNamespace(_obj=MagicMock())
-    with patch("iidm_viewer.state.run", return_value=(elem_df, vl_df)):
+    with patch("iidm_viewer.security_analysis.run", return_value=(elem_df, vl_df)):
         result = build_n1_contingencies(net, "2-Winding Transformers", {400.0})
     assert len(result) == 1
     assert result[0]["element_id"] == "T1"
@@ -319,7 +319,7 @@ def _converged_results(violations=False):
 
 
 def test_render_results_tab_no_results_shows_info():
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = {}
         _render_results_tab()
     mock_st.info.assert_called_once()
@@ -332,7 +332,7 @@ def test_render_results_tab_empty_post_shows_info():
         "pre_violations": pd.DataFrame(),
         "post": {},
     }
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sa_results": results}
         mock_st.columns.side_effect = _mock_columns
         _render_results_tab()
@@ -340,7 +340,7 @@ def test_render_results_tab_empty_post_shows_info():
 
 
 def test_render_results_tab_converged_no_violations_calls_success():
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sa_results": _converged_results()}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0
@@ -351,7 +351,7 @@ def test_render_results_tab_converged_no_violations_calls_success():
 
 
 def test_render_results_tab_renders_summary_dataframe():
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sa_results": _converged_results()}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0
@@ -362,7 +362,7 @@ def test_render_results_tab_renders_summary_dataframe():
 
 
 def test_render_results_tab_with_violations_renders_violation_dataframe():
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sa_results": _converged_results(violations=True)}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0
@@ -374,7 +374,7 @@ def test_render_results_tab_with_violations_renders_violation_dataframe():
 
 
 def test_render_results_tab_id_filter_no_match_shows_info():
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sa_results": _converged_results()}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0
@@ -392,11 +392,11 @@ def _cm():
 
 def test_render_contingencies_subtab_empty_shows_info():
     net = MagicMock()
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[132.0]), \
-         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()), \
-         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]), \
-         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=[]):
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._get_nominal_voltages", return_value=[132.0]), \
+         patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()), \
+         patch("iidm_viewer.security_analysis_tab.build_n1_contingencies", return_value=[]), \
+         patch("iidm_viewer.security_analysis_tab.build_n2_contingencies", return_value=[]):
         mock_st.session_state = {}
         mock_st.form.return_value = _cm()
         mock_st.radio.return_value = "N-1"
@@ -411,11 +411,11 @@ def test_render_contingencies_subtab_empty_shows_info():
 def test_render_contingencies_subtab_stores_in_session():
     contingencies = [{"id": "N1_L1", "element_id": "L1", "element_ids": ["L1"]}]
     net = MagicMock()
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[132.0]), \
-         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()), \
-         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=contingencies), \
-         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=[]):
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._get_nominal_voltages", return_value=[132.0]), \
+         patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()), \
+         patch("iidm_viewer.security_analysis_tab.build_n1_contingencies", return_value=contingencies), \
+         patch("iidm_viewer.security_analysis_tab.build_n2_contingencies", return_value=[]):
         mock_st.session_state = {}
         mock_st.form.return_value = _cm()
         mock_st.radio.return_value = "N-1"
@@ -435,11 +435,11 @@ def test_render_contingencies_subtab_n2_mode_uses_n2_builder():
         {"id": "N2_L1_L2", "element_ids": ["L1", "L2"]},
         {"id": "N2_L1_L3", "element_ids": ["L1", "L3"]},
     ]
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[132.0]), \
-         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()), \
-         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]), \
-         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=n2) as mock_n2:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._get_nominal_voltages", return_value=[132.0]), \
+         patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()), \
+         patch("iidm_viewer.security_analysis_tab.build_n1_contingencies", return_value=[]), \
+         patch("iidm_viewer.security_analysis_tab.build_n2_contingencies", return_value=n2) as mock_n2:
         mock_st.session_state = {}
         mock_st.form.return_value = _cm()
         mock_st.radio.return_value = "N-2"
@@ -456,11 +456,11 @@ def test_render_contingencies_subtab_n2_mode_uses_n2_builder():
 def test_render_contingencies_subtab_manual_n1_per_element():
     net = MagicMock()
     state: dict = {}
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[]), \
-         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()), \
-         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]), \
-         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=[]):
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._get_nominal_voltages", return_value=[]), \
+         patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()), \
+         patch("iidm_viewer.security_analysis_tab.build_n1_contingencies", return_value=[]), \
+         patch("iidm_viewer.security_analysis_tab.build_n2_contingencies", return_value=[]):
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.container.return_value = _cm()
@@ -484,11 +484,11 @@ def test_render_contingencies_subtab_manual_grouped_nk():
     net = MagicMock()
     ids = dict(_ids_fixture(), lines=["L1", "L2", "L3"])
     state: dict = {}
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[]), \
-         patch("iidm_viewer.security_analysis._get_ids", return_value=ids), \
-         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]), \
-         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=[]):
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._get_nominal_voltages", return_value=[]), \
+         patch("iidm_viewer.security_analysis_tab._get_ids", return_value=ids), \
+         patch("iidm_viewer.security_analysis_tab.build_n1_contingencies", return_value=[]), \
+         patch("iidm_viewer.security_analysis_tab.build_n2_contingencies", return_value=[]):
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.container.return_value = _cm()
@@ -516,12 +516,12 @@ def test_get_filterable_df_caches_per_network_and_type():
     df = pd.DataFrame({"p": [1.0, 2.0]}, index=pd.Index(["L1", "L2"], name="id"))
     net.get_lines.return_value = df
     net.get_lines.__name__ = "get_lines"
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis.build_vl_lookup",
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab.build_vl_lookup",
                return_value=pd.DataFrame(
                    columns=["id", "substation_id", "nominal_v", "country"])), \
          patch(
-             "iidm_viewer.security_analysis.enrich_with_joins",
+             "iidm_viewer.security_analysis_tab.enrich_with_joins",
              side_effect=lambda d, _: d,
          ):
         mock_st.session_state = {}
@@ -535,7 +535,7 @@ def test_get_filterable_df_caches_per_network_and_type():
 def test_get_filterable_df_empty_returns_empty_dataframe():
     net = MagicMock()
     net.get_generators.return_value = pd.DataFrame()
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = {}
         out = _get_filterable_df(net, "Generators")
     assert out.empty
@@ -549,13 +549,13 @@ def test_render_contingencies_subtab_manual_options_come_from_filtered_df():
     raw_df = pd.DataFrame({"p": [1.0, 2.0, 3.0]},
                           index=pd.Index(["L1", "L2", "L3"], name="id"))
     narrowed = raw_df.loc[["L2"]]
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[]), \
-         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()), \
-         patch("iidm_viewer.security_analysis._get_filterable_df", return_value=raw_df), \
-         patch("iidm_viewer.security_analysis.render_filters", return_value=narrowed) as mock_flt, \
-         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]), \
-         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=[]):
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._get_nominal_voltages", return_value=[]), \
+         patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()), \
+         patch("iidm_viewer.security_analysis_tab._get_filterable_df", return_value=raw_df), \
+         patch("iidm_viewer.security_analysis_tab.render_filters", return_value=narrowed) as mock_flt, \
+         patch("iidm_viewer.security_analysis_tab.build_n1_contingencies", return_value=[]), \
+         patch("iidm_viewer.security_analysis_tab.build_n2_contingencies", return_value=[]):
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.container.return_value = _cm()
@@ -581,11 +581,11 @@ def test_render_contingencies_subtab_manual_options_come_from_filtered_df():
 def test_render_contingencies_subtab_manual_grouped_requires_id():
     net = MagicMock()
     state: dict = {}
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_nominal_voltages", return_value=[]), \
-         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()), \
-         patch("iidm_viewer.security_analysis.build_n1_contingencies", return_value=[]), \
-         patch("iidm_viewer.security_analysis.build_n2_contingencies", return_value=[]):
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._get_nominal_voltages", return_value=[]), \
+         patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()), \
+         patch("iidm_viewer.security_analysis_tab.build_n1_contingencies", return_value=[]), \
+         patch("iidm_viewer.security_analysis_tab.build_n2_contingencies", return_value=[]):
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.radio.side_effect = ["N-1", "Single grouped contingency (N-k)"]
@@ -601,9 +601,9 @@ def test_render_contingencies_subtab_manual_grouped_requires_id():
 
 def test_render_monitored_subtab_empty_shows_info():
     net = MagicMock()
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
          patch(
-             "iidm_viewer.security_analysis._get_ids",
+             "iidm_viewer.security_analysis_tab._get_ids",
              return_value={
                  "branches": ["L1"],
                  "voltage_levels": ["VL1"],
@@ -622,9 +622,9 @@ def test_render_monitored_subtab_empty_shows_info():
 def test_render_monitored_subtab_form_submit_appends_entry():
     net = MagicMock()
     state: dict = {}
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
          patch(
-             "iidm_viewer.security_analysis._get_ids",
+             "iidm_viewer.security_analysis_tab._get_ids",
              return_value={
                  "branches": ["L1"],
                  "voltage_levels": [],
@@ -654,9 +654,9 @@ def test_render_monitored_subtab_form_submit_appends_entry():
 def test_render_monitored_subtab_specific_requires_contingencies():
     net = MagicMock()
     state: dict = {"_sa_contingencies": [{"id": "N1_L1", "element_id": "L1"}]}
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
          patch(
-             "iidm_viewer.security_analysis._get_ids",
+             "iidm_viewer.security_analysis_tab._get_ids",
              return_value={
                  "branches": ["L2"],
                  "voltage_levels": [],
@@ -674,7 +674,7 @@ def test_render_monitored_subtab_specific_requires_contingencies():
 
 
 def test_render_limit_reductions_subtab_empty_shows_info():
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = {}
         mock_st.form.return_value = _cm()
         mock_st.columns.side_effect = _mock_columns
@@ -688,7 +688,7 @@ def test_render_limit_reductions_subtab_empty_shows_info():
 
 def test_render_limit_reductions_subtab_submit_appends_entry():
     state: dict = {}
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.container.return_value = _cm()
@@ -713,7 +713,7 @@ def test_render_limit_reductions_subtab_submit_appends_entry():
 
 def test_render_limit_reductions_subtab_none_selected_warns():
     state: dict = {}
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.columns.side_effect = _mock_columns
@@ -770,14 +770,14 @@ def test_render_config_tab_run_button_passes_all_inputs():
         "_sa_actions": actions,
         "_sa_operator_strategies": strategies,
     }
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._render_contingencies_subtab"), \
-         patch("iidm_viewer.security_analysis._render_monitored_subtab"), \
-         patch("iidm_viewer.security_analysis._render_limit_reductions_subtab"), \
-         patch("iidm_viewer.security_analysis._render_actions_subtab"), \
-         patch("iidm_viewer.security_analysis._render_operator_strategies_subtab"), \
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._render_contingencies_subtab"), \
+         patch("iidm_viewer.security_analysis_tab._render_monitored_subtab"), \
+         patch("iidm_viewer.security_analysis_tab._render_limit_reductions_subtab"), \
+         patch("iidm_viewer.security_analysis_tab._render_actions_subtab"), \
+         patch("iidm_viewer.security_analysis_tab._render_operator_strategies_subtab"), \
          patch(
-             "iidm_viewer.security_analysis.run_security_analysis",
+             "iidm_viewer.security_analysis_tab.run_security_analysis",
              return_value=sa_results,
          ) as mock_run:
         mock_st.session_state = state
@@ -875,8 +875,8 @@ def _ids_fixture():
 
 def test_render_actions_subtab_empty_shows_info():
     net = MagicMock()
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()):
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()):
         mock_st.session_state = {}
         mock_st.form.return_value = _cm()
         mock_st.selectbox.return_value = "SWITCH"
@@ -890,8 +890,8 @@ def test_render_actions_subtab_empty_shows_info():
 def test_render_actions_subtab_submit_appends_switch_action():
     net = MagicMock()
     state: dict = {}
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()):
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()):
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.container.return_value = _cm()
@@ -914,8 +914,8 @@ def test_render_actions_subtab_duplicate_id_warns():
     state = {"_sa_actions": [
         {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
     ]}
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()):
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()):
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.container.return_value = _cm()
@@ -933,8 +933,8 @@ def test_render_actions_subtab_duplicate_id_warns():
 def test_render_actions_subtab_blank_id_warns():
     net = MagicMock()
     state: dict = {}
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()):
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()):
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.columns.side_effect = _mock_columns
@@ -953,7 +953,7 @@ def test_render_actions_subtab_blank_id_warns():
 
 
 def test_render_operator_strategies_subtab_no_inputs_shows_info():
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = {}
         _render_operator_strategies_subtab()
     mock_st.info.assert_called()
@@ -966,7 +966,7 @@ def test_render_operator_strategies_subtab_submit_appends():
             {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
         ],
     }
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.container.return_value = _cm()
@@ -996,8 +996,8 @@ def test_render_operator_strategies_subtab_violation_condition_captures_filters(
             {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
         ],
     }
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._get_ids", return_value=_ids_fixture()):
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()):
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.container.return_value = _cm()
@@ -1022,7 +1022,7 @@ def test_render_operator_strategies_subtab_no_actions_warns():
             {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
         ],
     }
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
         mock_st.text_input.return_value = "strat1"
@@ -1201,7 +1201,7 @@ def test_run_security_analysis_operator_strategy_violation_condition(xiidm_uploa
 
 
 def test_persist_uploaded_json_writes_files_and_records_state():
-    from iidm_viewer.security_analysis import _persist_uploaded_json
+    from iidm_viewer.security_analysis_tab import _persist_uploaded_json
 
     f1 = MagicMock()
     f1.name = "contingencies.json"
@@ -1211,7 +1211,7 @@ def test_persist_uploaded_json_writes_files_and_records_state():
     f2.getvalue.return_value = b'[]'
 
     state = {}
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = state
         added = _persist_uploaded_json([f1, f2], "_sa_x")
     assert added == 2
@@ -1225,13 +1225,13 @@ def test_persist_uploaded_json_writes_files_and_records_state():
 
 
 def test_persist_uploaded_json_skips_duplicates():
-    from iidm_viewer.security_analysis import _persist_uploaded_json
+    from iidm_viewer.security_analysis_tab import _persist_uploaded_json
 
     f = MagicMock()
     f.name = "dup.json"
     f.getvalue.return_value = b'{}'
     state = {}
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = state
         first = _persist_uploaded_json([f], "_sa_y")
         second = _persist_uploaded_json([f], "_sa_y")
@@ -1243,7 +1243,7 @@ def test_persist_uploaded_json_skips_duplicates():
 
 
 def test_render_json_upload_section_stores_paths_on_load():
-    from iidm_viewer.security_analysis import _render_json_upload_section
+    from iidm_viewer.security_analysis_tab import _render_json_upload_section
 
     f = MagicMock()
     f.name = "x.json"
@@ -1255,7 +1255,7 @@ def test_render_json_upload_section_stores_paths_on_load():
         # successful load must not be clicked by the same mock.
         return kwargs.get("key") == "_sa_cj_load_btn"
 
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = state
         mock_st.expander.return_value = _cm()
         mock_st.columns.side_effect = _mock_columns
@@ -1275,10 +1275,10 @@ def test_render_json_upload_section_stores_paths_on_load():
 
 
 def test_render_json_upload_section_no_files_warns():
-    from iidm_viewer.security_analysis import _render_json_upload_section
+    from iidm_viewer.security_analysis_tab import _render_json_upload_section
 
     state: dict = {}
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = state
         mock_st.expander.return_value = _cm()
         mock_st.columns.side_effect = _mock_columns
@@ -1316,14 +1316,14 @@ def test_render_config_tab_forwards_json_paths_to_run():
             {"name": "s.json", "path": "/tmp/s.json"},
         ],
     }
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._render_contingencies_subtab"), \
-         patch("iidm_viewer.security_analysis._render_monitored_subtab"), \
-         patch("iidm_viewer.security_analysis._render_limit_reductions_subtab"), \
-         patch("iidm_viewer.security_analysis._render_actions_subtab"), \
-         patch("iidm_viewer.security_analysis._render_operator_strategies_subtab"), \
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._render_contingencies_subtab"), \
+         patch("iidm_viewer.security_analysis_tab._render_monitored_subtab"), \
+         patch("iidm_viewer.security_analysis_tab._render_limit_reductions_subtab"), \
+         patch("iidm_viewer.security_analysis_tab._render_actions_subtab"), \
+         patch("iidm_viewer.security_analysis_tab._render_operator_strategies_subtab"), \
          patch(
-             "iidm_viewer.security_analysis.run_security_analysis",
+             "iidm_viewer.security_analysis_tab.run_security_analysis",
              return_value=sa_results,
          ) as mock_run:
         mock_st.session_state = state
@@ -1355,12 +1355,12 @@ def test_render_config_tab_run_button_enabled_with_json_only():
             captured["disabled"] = kwargs.get("disabled")
         return False
 
-    with patch("iidm_viewer.security_analysis.st") as mock_st, \
-         patch("iidm_viewer.security_analysis._render_contingencies_subtab"), \
-         patch("iidm_viewer.security_analysis._render_monitored_subtab"), \
-         patch("iidm_viewer.security_analysis._render_limit_reductions_subtab"), \
-         patch("iidm_viewer.security_analysis._render_actions_subtab"), \
-         patch("iidm_viewer.security_analysis._render_operator_strategies_subtab"):
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.security_analysis_tab._render_contingencies_subtab"), \
+         patch("iidm_viewer.security_analysis_tab._render_monitored_subtab"), \
+         patch("iidm_viewer.security_analysis_tab._render_limit_reductions_subtab"), \
+         patch("iidm_viewer.security_analysis_tab._render_actions_subtab"), \
+         patch("iidm_viewer.security_analysis_tab._render_operator_strategies_subtab"):
         mock_st.session_state = state
         mock_st.tabs.return_value = (_cm(), _cm(), _cm(), _cm(), _cm())
         mock_st.columns.side_effect = _mock_columns
@@ -1372,7 +1372,7 @@ def test_render_config_tab_run_button_enabled_with_json_only():
 def test_render_results_tab_renders_download_when_json_export_present():
     results = _converged_results()
     results["json_export"] = b'{"pre":"CONVERGED"}'
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sa_results": results}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0
@@ -1385,7 +1385,7 @@ def test_render_results_tab_renders_download_when_json_export_present():
 
 
 def test_render_results_tab_no_download_when_json_export_missing():
-    with patch("iidm_viewer.security_analysis.st") as mock_st:
+    with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sa_results": _converged_results()}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0
@@ -1405,3 +1405,230 @@ def test_run_security_analysis_json_export_returned(xiidm_upload):
     assert len(results["json_export"]) > 0
     import json
     json.loads(results["json_export"])
+
+
+# ---------------------------------------------------------------------------
+# Shared / Streamlit split — guards the Phase-1 refactor so future work
+# doesn't accidentally re-couple the shared module to Streamlit.
+# ---------------------------------------------------------------------------
+def test_security_analysis_shared_module_has_no_streamlit_dependency():
+    """``iidm_viewer.security_analysis`` is the framework-agnostic core
+    consumed by Streamlit (via ``security_analysis_tab``), PySide6 and
+    NiceGUI. The shared module must not import streamlit — that's the
+    contract that lets the non-Streamlit hosts boot."""
+    import inspect
+
+    import iidm_viewer.security_analysis as sa
+
+    src = inspect.getsource(sa)
+    assert "import streamlit" not in src
+    assert "from streamlit" not in src
+
+
+def test_security_analysis_shared_module_exposes_public_api():
+    """The non-underscored public API consumed by hosts."""
+    from iidm_viewer import security_analysis as sa
+
+    for name in (
+        "build_n1_contingencies",
+        "build_n2_contingencies",
+        "apply_action",
+        "action_summary",
+        "get_element_ids",
+        "get_nominal_voltages",
+        "run_security_analysis",
+    ):
+        assert callable(getattr(sa, name, None)), f"missing public callable: {name}"
+    for name in (
+        "ELEMENT_TYPES", "AUTO_MODES", "MANUAL_TYPES",
+        "MANUAL_TYPE_IDS_KEY", "MANUAL_GROUPINGS", "CTX_TYPES",
+        "ACTION_TYPES", "CONDITION_TYPES", "VIOLATION_TYPES", "SIDES",
+    ):
+        assert getattr(sa, name, None) is not None, f"missing constant: {name}"
+
+
+def test_security_analysis_tab_module_lives_in_a_separate_file():
+    """The Streamlit-only UI must live in ``security_analysis_tab`` so
+    PySide6 / NiceGUI can import the shared core without dragging
+    streamlit in.
+
+    Read ``app.py`` as text rather than ``import``-ing the module —
+    importing a Streamlit script executes it top-to-bottom in bare
+    mode, which seeds global Streamlit state that leaks into
+    ``AppTest``-based tests later in the run.
+    """
+    from pathlib import Path
+
+    from iidm_viewer import security_analysis_tab
+
+    assert hasattr(security_analysis_tab, "render_security_analysis")
+    app_path = Path(__file__).resolve().parent.parent / "iidm_viewer" / "app.py"
+    app_src = app_path.read_text(encoding="utf-8")
+    assert (
+        "from iidm_viewer.security_analysis_tab import render_security_analysis"
+        in app_src
+    )
+    assert (
+        "from iidm_viewer.security_analysis import render_security_analysis"
+        not in app_src
+    )
+
+
+def test_state_re_exports_shared_security_analysis_helpers():
+    """``iidm_viewer.state`` keeps re-exporting the SA runners so the
+    Streamlit tab's existing ``from iidm_viewer.state import …`` imports
+    don't break. All three names must point at the shared module."""
+    import iidm_viewer.security_analysis as sa
+    import iidm_viewer.state as state
+
+    assert state.build_n1_contingencies is sa.build_n1_contingencies
+    assert state.build_n2_contingencies is sa.build_n2_contingencies
+    assert state.run_security_analysis is sa.run_security_analysis
+    assert state._apply_action is sa.apply_action
+
+
+# ---------------------------------------------------------------------------
+# Advanced-configuration builders / validators / summaries
+# ---------------------------------------------------------------------------
+def test_action_fields_registry_covers_every_action_type():
+    """``ACTION_FIELDS`` must carry an entry — with an ``id_key`` + at
+    least one ``id``-kind field — for every supported action type."""
+    from iidm_viewer.security_analysis import ACTION_FIELDS, ACTION_TYPES
+
+    assert set(ACTION_FIELDS) == set(ACTION_TYPES)
+    for atype, spec in ACTION_FIELDS.items():
+        assert spec.get("id_key"), f"{atype} missing id_key"
+        assert spec.get("fields"), f"{atype} missing fields"
+        assert any(f["kind"] == "id" for f in spec["fields"]), (
+            f"{atype} has no id-kind field"
+        )
+
+
+def test_validate_and_make_monitored_element():
+    from iidm_viewer.security_analysis import (
+        make_monitored_element,
+        monitored_element_summary,
+        validate_monitored_element,
+    )
+
+    # No element picked → rejected.
+    assert validate_monitored_element("ALL", [], [], [], [])
+    # SPECIFIC with no contingency → rejected.
+    errs = validate_monitored_element("SPECIFIC", [], ["L1"], [], [])
+    assert any("SPECIFIC" in e for e in errs)
+    # Valid rule → no errors, dict carries the branch ids.
+    assert validate_monitored_element("ALL", [], ["L1"], [], []) == []
+    entry = make_monitored_element("ALL", branch_ids=["L1", "L2"])
+    assert entry["branch_ids"] == ["L1", "L2"]
+    assert entry["contingency_ids"] is None  # not SPECIFIC
+    assert "branches=2" in monitored_element_summary(entry)
+
+
+def test_validate_and_make_limit_reduction():
+    from iidm_viewer.security_analysis import (
+        limit_reduction_summary,
+        make_limit_reduction,
+        validate_limit_reduction,
+    )
+
+    # Neither scope → rejected; out-of-range value → rejected.
+    assert validate_limit_reduction(0.9, False, False)
+    assert validate_limit_reduction(1.5, True, False)
+    assert validate_limit_reduction(0.9, True, True) == []
+    entry = make_limit_reduction(
+        0.8, True, True, min_temporary_duration=60, country="fr",
+    )
+    assert entry["value"] == 0.8
+    assert entry["min_temporary_duration"] == 60
+    assert entry["country"] == "FR"
+    # max_temporary_duration left at 0 → key absent.
+    assert "max_temporary_duration" not in entry
+    assert "0.8" in limit_reduction_summary(entry)
+
+
+def test_validate_and_make_action():
+    from iidm_viewer.security_analysis import make_action, validate_action
+
+    # Blank id + missing id-field → two errors.
+    errs = validate_action("SWITCH", "", {}, [])
+    assert any("Action ID" in e for e in errs)
+    assert any("Switch" in e for e in errs)
+    # Duplicate id → rejected.
+    errs = validate_action(
+        "SWITCH", "a1", {"switch_id": "S1"}, ["a1"],
+    )
+    assert any("already exists" in e for e in errs)
+    # Unknown type → rejected.
+    assert validate_action("BOGUS", "a1", {}, [])
+    # Valid → no errors; make_action stamps id + type.
+    assert validate_action("SWITCH", "a1", {"switch_id": "S1"}, []) == []
+    act = make_action("SWITCH", "  a1  ", {"switch_id": "S1", "open": True})
+    assert act == {"action_id": "a1", "type": "SWITCH",
+                   "switch_id": "S1", "open": True}
+
+
+def test_validate_and_make_operator_strategy():
+    from iidm_viewer.security_analysis import (
+        make_operator_strategy,
+        operator_strategy_summary,
+        validate_operator_strategy,
+    )
+
+    # Blank id + no actions → two errors.
+    errs = validate_operator_strategy("", [], [])
+    assert any("Strategy ID" in e for e in errs)
+    assert any("action" in e for e in errs)
+    # Duplicate id → rejected.
+    assert validate_operator_strategy("s1", ["a1"], ["s1"])
+    # Valid → no errors.
+    assert validate_operator_strategy("s1", ["a1"], []) == []
+    strat = make_operator_strategy(
+        "s1", "N1_L1", ["a1", "a2"], "ANY_VIOLATION_CONDITION",
+        violation_types=["CURRENT"],
+    )
+    assert strat["operator_strategy_id"] == "s1"
+    assert strat["action_ids"] == ["a1", "a2"]
+    assert strat["condition_type"] == "ANY_VIOLATION_CONDITION"
+    summary = operator_strategy_summary(strat)
+    assert "s1" in summary and "N1_L1" in summary
+
+
+def test_run_security_analysis_threads_advanced_config(xiidm_upload):
+    """End-to-end: a monitored-elements rule + a limit reduction +
+    a remedial action + an operator strategy all flow through
+    ``run_security_analysis`` without raising."""
+    pytest.importorskip("pypowsybl.security")
+    from iidm_viewer.security_analysis import (
+        get_element_ids,
+        make_action,
+        make_limit_reduction,
+        make_monitored_element,
+        make_operator_strategy,
+    )
+
+    network = load_network(xiidm_upload)
+    contingencies = build_n1_contingencies(network, "Lines")[:2]
+    cid = contingencies[0]["id"]
+    ids = get_element_ids(network)
+    gen = ids["generators"][0]
+
+    monitored = [make_monitored_element("ALL", branch_ids=ids["branches"][:2])]
+    reductions = [make_limit_reduction(0.95, True, True)]
+    action = make_action(
+        "GENERATOR_ACTIVE_POWER", "gen_down",
+        {"generator_id": gen, "is_relative": True, "active_power": -10.0},
+    )
+    strategy = make_operator_strategy(cid + "_strat", cid, ["gen_down"])
+
+    results = run_security_analysis(
+        network,
+        contingencies,
+        monitored_elements=monitored,
+        limit_reductions=reductions,
+        actions=[action],
+        operator_strategies=[strategy],
+    )
+    assert results["pre_status"] == "CONVERGED"
+    assert cid in results["post"]
+    # The operator strategy produced a result row.
+    assert (cid + "_strat") in results["operator_strategies"]
