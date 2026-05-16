@@ -1485,3 +1485,150 @@ def test_state_re_exports_shared_security_analysis_helpers():
     assert state.build_n2_contingencies is sa.build_n2_contingencies
     assert state.run_security_analysis is sa.run_security_analysis
     assert state._apply_action is sa.apply_action
+
+
+# ---------------------------------------------------------------------------
+# Advanced-configuration builders / validators / summaries
+# ---------------------------------------------------------------------------
+def test_action_fields_registry_covers_every_action_type():
+    """``ACTION_FIELDS`` must carry an entry — with an ``id_key`` + at
+    least one ``id``-kind field — for every supported action type."""
+    from iidm_viewer.security_analysis import ACTION_FIELDS, ACTION_TYPES
+
+    assert set(ACTION_FIELDS) == set(ACTION_TYPES)
+    for atype, spec in ACTION_FIELDS.items():
+        assert spec.get("id_key"), f"{atype} missing id_key"
+        assert spec.get("fields"), f"{atype} missing fields"
+        assert any(f["kind"] == "id" for f in spec["fields"]), (
+            f"{atype} has no id-kind field"
+        )
+
+
+def test_validate_and_make_monitored_element():
+    from iidm_viewer.security_analysis import (
+        make_monitored_element,
+        monitored_element_summary,
+        validate_monitored_element,
+    )
+
+    # No element picked → rejected.
+    assert validate_monitored_element("ALL", [], [], [], [])
+    # SPECIFIC with no contingency → rejected.
+    errs = validate_monitored_element("SPECIFIC", [], ["L1"], [], [])
+    assert any("SPECIFIC" in e for e in errs)
+    # Valid rule → no errors, dict carries the branch ids.
+    assert validate_monitored_element("ALL", [], ["L1"], [], []) == []
+    entry = make_monitored_element("ALL", branch_ids=["L1", "L2"])
+    assert entry["branch_ids"] == ["L1", "L2"]
+    assert entry["contingency_ids"] is None  # not SPECIFIC
+    assert "branches=2" in monitored_element_summary(entry)
+
+
+def test_validate_and_make_limit_reduction():
+    from iidm_viewer.security_analysis import (
+        limit_reduction_summary,
+        make_limit_reduction,
+        validate_limit_reduction,
+    )
+
+    # Neither scope → rejected; out-of-range value → rejected.
+    assert validate_limit_reduction(0.9, False, False)
+    assert validate_limit_reduction(1.5, True, False)
+    assert validate_limit_reduction(0.9, True, True) == []
+    entry = make_limit_reduction(
+        0.8, True, True, min_temporary_duration=60, country="fr",
+    )
+    assert entry["value"] == 0.8
+    assert entry["min_temporary_duration"] == 60
+    assert entry["country"] == "FR"
+    # max_temporary_duration left at 0 → key absent.
+    assert "max_temporary_duration" not in entry
+    assert "0.8" in limit_reduction_summary(entry)
+
+
+def test_validate_and_make_action():
+    from iidm_viewer.security_analysis import make_action, validate_action
+
+    # Blank id + missing id-field → two errors.
+    errs = validate_action("SWITCH", "", {}, [])
+    assert any("Action ID" in e for e in errs)
+    assert any("Switch" in e for e in errs)
+    # Duplicate id → rejected.
+    errs = validate_action(
+        "SWITCH", "a1", {"switch_id": "S1"}, ["a1"],
+    )
+    assert any("already exists" in e for e in errs)
+    # Unknown type → rejected.
+    assert validate_action("BOGUS", "a1", {}, [])
+    # Valid → no errors; make_action stamps id + type.
+    assert validate_action("SWITCH", "a1", {"switch_id": "S1"}, []) == []
+    act = make_action("SWITCH", "  a1  ", {"switch_id": "S1", "open": True})
+    assert act == {"action_id": "a1", "type": "SWITCH",
+                   "switch_id": "S1", "open": True}
+
+
+def test_validate_and_make_operator_strategy():
+    from iidm_viewer.security_analysis import (
+        make_operator_strategy,
+        operator_strategy_summary,
+        validate_operator_strategy,
+    )
+
+    # Blank id + no actions → two errors.
+    errs = validate_operator_strategy("", [], [])
+    assert any("Strategy ID" in e for e in errs)
+    assert any("action" in e for e in errs)
+    # Duplicate id → rejected.
+    assert validate_operator_strategy("s1", ["a1"], ["s1"])
+    # Valid → no errors.
+    assert validate_operator_strategy("s1", ["a1"], []) == []
+    strat = make_operator_strategy(
+        "s1", "N1_L1", ["a1", "a2"], "ANY_VIOLATION_CONDITION",
+        violation_types=["CURRENT"],
+    )
+    assert strat["operator_strategy_id"] == "s1"
+    assert strat["action_ids"] == ["a1", "a2"]
+    assert strat["condition_type"] == "ANY_VIOLATION_CONDITION"
+    summary = operator_strategy_summary(strat)
+    assert "s1" in summary and "N1_L1" in summary
+
+
+def test_run_security_analysis_threads_advanced_config(xiidm_upload):
+    """End-to-end: a monitored-elements rule + a limit reduction +
+    a remedial action + an operator strategy all flow through
+    ``run_security_analysis`` without raising."""
+    pytest.importorskip("pypowsybl.security")
+    from iidm_viewer.security_analysis import (
+        get_element_ids,
+        make_action,
+        make_limit_reduction,
+        make_monitored_element,
+        make_operator_strategy,
+    )
+
+    network = load_network(xiidm_upload)
+    contingencies = build_n1_contingencies(network, "Lines")[:2]
+    cid = contingencies[0]["id"]
+    ids = get_element_ids(network)
+    gen = ids["generators"][0]
+
+    monitored = [make_monitored_element("ALL", branch_ids=ids["branches"][:2])]
+    reductions = [make_limit_reduction(0.95, True, True)]
+    action = make_action(
+        "GENERATOR_ACTIVE_POWER", "gen_down",
+        {"generator_id": gen, "is_relative": True, "active_power": -10.0},
+    )
+    strategy = make_operator_strategy(cid + "_strat", cid, ["gen_down"])
+
+    results = run_security_analysis(
+        network,
+        contingencies,
+        monitored_elements=monitored,
+        limit_reductions=reductions,
+        actions=[action],
+        operator_strategies=[strategy],
+    )
+    assert results["pre_status"] == "CONVERGED"
+    assert cid in results["post"]
+    # The operator strategy produced a result row.
+    assert (cid + "_strat") in results["operator_strategies"]

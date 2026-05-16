@@ -4674,33 +4674,56 @@ def _build_operational_limits():
 def _build_security_analysis():
     """Materialise the "Security Analysis" tab.
 
-    A focused port of the Streamlit Security Analysis tab: the
-    automatic N-1 / N-2 contingency builder + an AC run + a results
-    overview. The advanced configuration (monitored elements, limit
-    reductions, remedial actions, operator strategies, JSON import)
-    stays Streamlit-only for now — those are heavily form-driven.
+    Ports the Streamlit Security Analysis tab: the automatic
+    N-1 / N-2 contingency builder, the advanced configuration
+    (monitored elements, limit reductions, remedial actions, operator
+    strategies), an AC run, and a results overview. JSON import stays
+    Streamlit-only — file upload is host-specific.
 
-    All pypowsybl work goes through the shared
-    :mod:`iidm_viewer.security_analysis` core
-    (``build_n1_contingencies`` / ``build_n2_contingencies`` /
-    ``run_security_analysis`` / ``summarize_security_results``), so
-    this tab and the Streamlit / PySide6 ones stay in lockstep.
+    All pypowsybl work + the config builders / validators go through
+    the shared :mod:`iidm_viewer.security_analysis` core, so this tab
+    and the Streamlit / PySide6 ones stay in lockstep.
 
     Returns a closure the page-wide listeners call on network change.
     """
     import pandas as pd
 
     from iidm_viewer.security_analysis import (
+        ACTION_FIELDS,
         AUTO_MODES,
+        CONDITION_TYPES,
+        CTX_TYPES,
         ELEMENT_TYPES,
+        VIOLATION_TYPES,
+        action_summary,
         build_n1_contingencies,
         build_n2_contingencies,
+        get_element_ids,
         get_nominal_voltages,
+        limit_reduction_summary,
+        make_action,
+        make_limit_reduction,
+        make_monitored_element,
+        make_operator_strategy,
+        monitored_element_summary,
+        operator_strategy_summary,
         run_security_analysis,
         summarize_security_results,
+        validate_action,
+        validate_limit_reduction,
+        validate_monitored_element,
+        validate_operator_strategy,
     )
 
-    state: dict = {"results": None, "selected_cid": None}
+    state: dict = {
+        "results": None,
+        "contingencies": [],          # built contingency dicts
+        "element_ids": {},            # get_element_ids() result
+        "monitored": [],
+        "reductions": [],
+        "actions": [],
+        "strategies": [],
+    }
 
     placeholder = ui.label(
         "Load a network to run a security analysis."
@@ -4723,8 +4746,239 @@ def _build_security_analysis():
                 options=[], value=[], multiple=True,
             ).props("dense outlined").classes("w-72")
         with ui.row().classes("items-center w-full"):
-            run_btn = ui.button("Run security analysis")
-            run_status = ui.label("").classes("text-caption q-ml-md")
+            build_btn = ui.button("Build contingency list")
+            contingency_count_lbl = ui.label("").classes("text-caption q-ml-md")
+
+    # --- Advanced configuration ----------------------------------------
+    adv_expansion = ui.expansion(
+        "Advanced configuration", icon="tune",
+    ).classes("w-full")
+    with adv_expansion:
+        # Monitored elements.
+        with ui.expansion("Monitored elements").classes("w-full"):
+            with ui.row().classes("items-center w-full"):
+                mon_ctx = ui.select(options=list(CTX_TYPES), value="ALL") \
+                    .props("dense outlined").classes("w-40")
+                mon_cids = ui.select(options=[], value=[], multiple=True) \
+                    .props("dense outlined").classes("w-56")
+            with ui.row().classes("items-center w-full"):
+                mon_branches = ui.select(options=[], value=[], multiple=True) \
+                    .props("dense outlined").classes("w-56")
+                mon_vls = ui.select(options=[], value=[], multiple=True) \
+                    .props("dense outlined").classes("w-56")
+                mon_3wt = ui.select(options=[], value=[], multiple=True) \
+                    .props("dense outlined").classes("w-56")
+            ui.button("Add monitored rule", on_click=lambda: _add_monitored())
+            mon_list = ui.column().classes("w-full")
+
+        # Limit reductions.
+        with ui.expansion("Limit reductions").classes("w-full"):
+            with ui.row().classes("items-center w-full"):
+                lr_value = ui.number(
+                    "Value (0–1)", value=0.9, min=0.0, max=1.0, step=0.05,
+                ).props("dense outlined").classes("w-40")
+                lr_perm = ui.checkbox("Permanent", value=True)
+                lr_temp = ui.checkbox("Temporary", value=True)
+            ui.button("Add limit reduction", on_click=lambda: _add_reduction())
+            lr_list = ui.column().classes("w-full")
+
+        # Remedial actions.
+        with ui.expansion("Remedial actions").classes("w-full"):
+            with ui.row().classes("items-center w-full"):
+                act_type = ui.select(
+                    options=list(ACTION_FIELDS), value=list(ACTION_FIELDS)[0],
+                ).props("dense outlined").classes("w-64")
+                act_id = ui.input("Action ID") \
+                    .props("dense outlined").classes("w-48")
+            act_fields_row = ui.column().classes("w-full")
+            ui.button("Add action", on_click=lambda: _add_action())
+            act_list = ui.column().classes("w-full")
+
+        # Operator strategies.
+        with ui.expansion("Operator strategies").classes("w-full"):
+            with ui.row().classes("items-center w-full"):
+                strat_id = ui.input("Strategy ID") \
+                    .props("dense outlined").classes("w-48")
+                strat_cid = ui.select(options=[], value=None) \
+                    .props("dense outlined").classes("w-56")
+            with ui.row().classes("items-center w-full"):
+                strat_actions = ui.select(options=[], value=[], multiple=True) \
+                    .props("dense outlined").classes("w-56")
+                strat_condition = ui.select(
+                    options=list(CONDITION_TYPES), value=CONDITION_TYPES[0],
+                ).props("dense outlined").classes("w-72")
+                strat_vtypes = ui.select(
+                    options=list(VIOLATION_TYPES), value=[], multiple=True,
+                ).props("dense outlined").classes("w-56")
+            ui.button("Add strategy", on_click=lambda: _add_strategy())
+            strat_list = ui.column().classes("w-full")
+
+    run_row = ui.row().classes("items-center w-full q-pa-sm")
+    with run_row:
+        run_btn = ui.button("Run security analysis")
+        run_status = ui.label("").classes("text-caption q-ml-md")
+
+    # --- Advanced-config field widgets (registry-driven actions) -------
+    act_field_widgets: dict = {}
+
+    def _rebuild_action_fields() -> None:
+        act_fields_row.clear()
+        act_field_widgets.clear()
+        spec = ACTION_FIELDS.get(act_type.value)
+        if spec is None:
+            return
+        ids = state["element_ids"].get(spec["id_key"]) or []
+        with act_fields_row:
+            with ui.row().classes("items-center w-full"):
+                for fdef in spec["fields"]:
+                    kind = fdef["kind"]
+                    if kind == "id":
+                        w = ui.select(
+                            options=list(ids),
+                            value=(ids[0] if ids else None),
+                        ).props("dense outlined").classes("w-56")
+                    elif kind == "bool":
+                        w = ui.checkbox(
+                            fdef["label"], value=fdef.get("default", False),
+                        )
+                    elif kind == "choice":
+                        w = ui.select(
+                            options=list(fdef["options"]),
+                            value=fdef.get("default"),
+                        ).props("dense outlined").classes("w-40")
+                    elif kind == "int":
+                        w = ui.number(
+                            fdef["label"], value=fdef.get("default", 0),
+                            step=1, format="%d",
+                        ).props("dense outlined").classes("w-40")
+                    else:  # float
+                        w = ui.number(
+                            fdef["label"], value=fdef.get("default", 0.0),
+                            step=10.0,
+                        ).props("dense outlined").classes("w-40")
+                    act_field_widgets[fdef["name"]] = (fdef, w)
+
+    act_type.on("update:model-value", lambda _e=None: _rebuild_action_fields())
+
+    def _render_entry_list(container, entries, summary_fn, remover) -> None:
+        container.clear()
+        with container:
+            for i, entry in enumerate(entries):
+                with ui.row().classes("items-center w-full"):
+                    ui.label(summary_fn(entry)).classes("text-caption col")
+                    ui.button(
+                        icon="delete",
+                        on_click=lambda _e=None, idx=i: remover(idx),
+                    ).props("flat dense")
+
+    def _add_monitored() -> None:
+        errors = validate_monitored_element(
+            mon_ctx.value, mon_cids.value,
+            mon_branches.value, mon_vls.value, mon_3wt.value,
+        )
+        if errors:
+            ui.notify("; ".join(errors), type="warning")
+            return
+        state["monitored"].append(make_monitored_element(
+            mon_ctx.value, mon_cids.value,
+            mon_branches.value, mon_vls.value, mon_3wt.value,
+        ))
+        _render_entry_list(
+            mon_list, state["monitored"], monitored_element_summary,
+            lambda i: (state["monitored"].pop(i), _render_entry_list(
+                mon_list, state["monitored"], monitored_element_summary,
+                _remove_monitored)),
+        )
+
+    def _remove_monitored(i):
+        state["monitored"].pop(i)
+        _render_entry_list(mon_list, state["monitored"],
+                           monitored_element_summary, _remove_monitored)
+
+    def _add_reduction() -> None:
+        errors = validate_limit_reduction(
+            float(lr_value.value or 0), lr_perm.value, lr_temp.value,
+        )
+        if errors:
+            ui.notify("; ".join(errors), type="warning")
+            return
+        state["reductions"].append(make_limit_reduction(
+            float(lr_value.value or 0), lr_perm.value, lr_temp.value,
+        ))
+        _render_entry_list(lr_list, state["reductions"],
+                           limit_reduction_summary, _remove_reduction)
+
+    def _remove_reduction(i):
+        state["reductions"].pop(i)
+        _render_entry_list(lr_list, state["reductions"],
+                           limit_reduction_summary, _remove_reduction)
+
+    def _add_action() -> None:
+        fields = {}
+        for name, (fdef, w) in act_field_widgets.items():
+            val = w.value
+            if fdef["kind"] == "int":
+                val = int(val or 0)
+            elif fdef["kind"] == "float":
+                val = float(val or 0.0)
+            elif fdef["kind"] == "bool":
+                val = bool(val)
+            fields[name] = val
+        existing = [a["action_id"] for a in state["actions"]]
+        errors = validate_action(act_type.value, act_id.value, fields, existing)
+        if errors:
+            ui.notify("; ".join(errors), type="warning")
+            return
+        state["actions"].append(
+            make_action(act_type.value, act_id.value, fields),
+        )
+        act_id.value = ""
+        act_id.update()
+        _refresh_action_dependents()
+
+    def _remove_action(i):
+        removed = state["actions"].pop(i)
+        # Drop the action from any strategy that referenced it.
+        for s in state["strategies"]:
+            s["action_ids"] = [
+                a for a in s["action_ids"] if a != removed["action_id"]
+            ]
+        _refresh_action_dependents()
+
+    def _add_strategy() -> None:
+        existing = [s["operator_strategy_id"] for s in state["strategies"]]
+        errors = validate_operator_strategy(
+            strat_id.value, strat_actions.value, existing,
+        )
+        if not strat_cid.value:
+            errors = errors + ["Pick a triggering contingency."]
+        if errors:
+            ui.notify("; ".join(errors), type="warning")
+            return
+        state["strategies"].append(make_operator_strategy(
+            strat_id.value, strat_cid.value, strat_actions.value,
+            strat_condition.value, [], strat_vtypes.value,
+        ))
+        strat_id.value = ""
+        strat_id.update()
+        _render_entry_list(strat_list, state["strategies"],
+                           operator_strategy_summary, _remove_strategy)
+
+    def _remove_strategy(i):
+        state["strategies"].pop(i)
+        _render_entry_list(strat_list, state["strategies"],
+                           operator_strategy_summary, _remove_strategy)
+
+    def _refresh_action_dependents() -> None:
+        """Re-render the action list + the strategy action picker."""
+        _render_entry_list(act_list, state["actions"],
+                           action_summary, _remove_action)
+        action_ids = [a["action_id"] for a in state["actions"]]
+        strat_actions.options = action_ids
+        strat_actions.value = [
+            a for a in (strat_actions.value or []) if a in action_ids
+        ]
+        strat_actions.update()
 
     results_card = ui.card().classes("w-full q-pa-sm")
     with results_card:
@@ -4779,14 +5033,26 @@ def _build_security_analysis():
             violations_grid.options.update({"columnDefs": [], "rowData": []})
         violations_grid.update()
 
-    async def _on_run() -> None:
+    def _sync_contingency_dependents() -> None:
+        """Feed the built contingency ids into the monitored + strategy
+        pickers."""
+        cids = [c["id"] for c in state["contingencies"]]
+        mon_cids.options = cids
+        mon_cids.value = [c for c in (mon_cids.value or []) if c in cids]
+        mon_cids.update()
+        strat_cid.options = cids
+        if strat_cid.value not in cids:
+            strat_cid.value = cids[0] if cids else None
+        strat_cid.update()
+
+    async def _on_build() -> None:
         if _state.network is None:
             return
         mode = mode_select.value
         element_type = element_select.value
         selected_v = nominal_v_select.value or []
         nominal_v_set = {float(v) for v in selected_v} if selected_v else None
-        run_status.set_text("Building contingencies…")
+        contingency_count_lbl.set_text("Building contingencies…")
         builder = (
             build_n1_contingencies if mode == "N-1" else build_n2_contingencies
         )
@@ -4795,30 +5061,47 @@ def _build_security_analysis():
                 builder, _state.network, element_type, nominal_v_set,
             )
         except Exception as exc:
-            run_status.set_text(f"Contingency build failed: {exc}")
+            contingency_count_lbl.set_text(f"Build failed: {exc}")
             return
+        state["contingencies"] = contingencies
+        contingency_count_lbl.set_text(
+            f"{len(contingencies)} contingenc"
+            f"{'y' if len(contingencies) == 1 else 'ies'} ready."
+        )
+        run_btn.set_enabled(bool(contingencies))
+        _sync_contingency_dependents()
+
+    build_btn.on_click(_on_build)
+
+    async def _on_run() -> None:
+        if _state.network is None:
+            return
+        contingencies = state["contingencies"]
         if not contingencies:
-            run_status.set_text(
-                "No contingencies for this element type / voltage filter."
-            )
-            state["results"] = None
-            _render_results()
+            run_status.set_text("Build a contingency list first.")
             return
+        n = len(contingencies)
         run_status.set_text(
-            f"Running AC security analysis on {len(contingencies)} "
-            f"contingenc{'y' if len(contingencies) == 1 else 'ies'}…"
+            f"Running AC security analysis on {n} "
+            f"contingenc{'y' if n == 1 else 'ies'}…"
         )
         try:
             results = await asyncio.to_thread(
-                run_security_analysis, _state.network, contingencies,
+                lambda: run_security_analysis(
+                    _state.network,
+                    contingencies,
+                    monitored_elements=state["monitored"],
+                    limit_reductions=state["reductions"],
+                    actions=state["actions"],
+                    operator_strategies=state["strategies"],
+                ),
             )
         except Exception as exc:
             run_status.set_text(f"Security analysis failed: {exc}")
             return
         state["results"] = results
         run_status.set_text(
-            f"Done — {len(contingencies)} contingenc"
-            f"{'y' if len(contingencies) == 1 else 'ies'} analysed."
+            f"Done — {n} contingenc{'y' if n == 1 else 'ies'} analysed."
         )
         _render_results()
 
@@ -4829,12 +5112,16 @@ def _build_security_analysis():
             placeholder.set_text("Load a network to run a security analysis.")
             placeholder.visible = True
             config_card.visible = False
+            adv_expansion.visible = False
+            run_row.visible = False
             results_card.visible = False
             state["results"] = None
             return
         placeholder.visible = False
         config_card.visible = True
-        # Repopulate the nominal-voltage filter; clear stale results.
+        adv_expansion.visible = True
+        run_row.visible = True
+        # Repopulate the nominal-voltage filter.
         try:
             voltages = get_nominal_voltages(_state.network)
         except Exception:
@@ -4842,9 +5129,36 @@ def _build_security_analysis():
         nominal_v_select.options = [str(v) for v in voltages]
         nominal_v_select.value = []
         nominal_v_select.update()
+        # Fetch element-id buckets for the advanced-config selectors.
+        try:
+            ids = get_element_ids(_state.network)
+        except Exception:
+            ids = {}
+        state["element_ids"] = ids
+        mon_branches.options = list(ids.get("branches", []))
+        mon_vls.options = list(ids.get("voltage_levels", []))
+        mon_3wt.options = list(ids.get("three_windings_transformers", []))
+        for w in (mon_branches, mon_vls, mon_3wt):
+            w.value = []
+            w.update()
+        # Reset the per-network config state.
+        for key in ("contingencies", "monitored", "reductions",
+                    "actions", "strategies"):
+            state[key] = []
+        contingency_count_lbl.set_text("")
+        run_btn.set_enabled(False)
         run_status.set_text("")
         state["results"] = None
         _render_results()
+        _rebuild_action_fields()
+        _sync_contingency_dependents()
+        for container, summary_fn, remover in (
+            (mon_list, monitored_element_summary, _remove_monitored),
+            (lr_list, limit_reduction_summary, _remove_reduction),
+            (strat_list, operator_strategy_summary, _remove_strategy),
+        ):
+            _render_entry_list(container, [], summary_fn, remover)
+        _refresh_action_dependents()
 
     refresh()
     return refresh

@@ -580,6 +580,313 @@ def run_security_analysis(
 
 
 # ---------------------------------------------------------------------------
+# Advanced-configuration builders / validators / summaries
+#
+# Each host (Streamlit / PySide6 / NiceGUI) renders its own widgets, then
+# calls the matching ``make_*`` builder + ``validate_*`` checker so the
+# config-dict shape and the validation rules live in one place. The
+# ``*_summary`` helpers give every host the same one-line description.
+# ---------------------------------------------------------------------------
+
+# Declarative per-action-type field registry. ``id_key`` names the
+# :func:`get_element_ids` bucket that feeds the element selector;
+# ``fields`` describes the remaining widgets (kinds: ``id`` / ``bool`` /
+# ``float`` / ``int`` / ``choice``).
+ACTION_FIELDS: dict[str, dict] = {
+    "SWITCH": {
+        "id_key": "switches",
+        "fields": [
+            {"name": "switch_id", "label": "Switch", "kind": "id"},
+            {"name": "open", "label": "Open switch", "kind": "bool",
+             "default": True},
+        ],
+    },
+    "TERMINALS_CONNECTION": {
+        "id_key": "connectables",
+        "fields": [
+            {"name": "element_id", "label": "Element (line / 2WT / generator)",
+             "kind": "id"},
+            {"name": "side", "label": "Side", "kind": "choice",
+             "options": SIDES, "default": "NONE"},
+            {"name": "opening", "label": "Open (disconnect)", "kind": "bool",
+             "default": True},
+        ],
+    },
+    "GENERATOR_ACTIVE_POWER": {
+        "id_key": "generators",
+        "fields": [
+            {"name": "generator_id", "label": "Generator", "kind": "id"},
+            {"name": "is_relative", "label": "Relative change", "kind": "bool",
+             "default": True},
+            {"name": "active_power", "label": "Active power (MW)",
+             "kind": "float", "default": -10.0},
+        ],
+    },
+    "LOAD_ACTIVE_POWER": {
+        "id_key": "loads",
+        "fields": [
+            {"name": "load_id", "label": "Load", "kind": "id"},
+            {"name": "is_relative", "label": "Relative change", "kind": "bool",
+             "default": True},
+            {"name": "active_power", "label": "Active power (MW)",
+             "kind": "float", "default": -10.0},
+        ],
+    },
+    "PHASE_TAP_CHANGER_POSITION": {
+        "id_key": "phase_tap_changers",
+        "fields": [
+            {"name": "transformer_id", "label": "Transformer", "kind": "id"},
+            {"name": "is_relative", "label": "Relative change", "kind": "bool",
+             "default": False},
+            {"name": "tap_position", "label": "Tap position", "kind": "int",
+             "default": 0},
+            {"name": "side", "label": "Side (3WTs only)", "kind": "choice",
+             "options": SIDES, "default": "NONE"},
+        ],
+    },
+    "RATIO_TAP_CHANGER_POSITION": {
+        "id_key": "ratio_tap_changers",
+        "fields": [
+            {"name": "transformer_id", "label": "Transformer", "kind": "id"},
+            {"name": "is_relative", "label": "Relative change", "kind": "bool",
+             "default": False},
+            {"name": "tap_position", "label": "Tap position", "kind": "int",
+             "default": 0},
+            {"name": "side", "label": "Side (3WTs only)", "kind": "choice",
+             "options": SIDES, "default": "NONE"},
+        ],
+    },
+    "SHUNT_COMPENSATOR_POSITION": {
+        "id_key": "shunt_compensators",
+        "fields": [
+            {"name": "shunt_id", "label": "Shunt compensator", "kind": "id"},
+            {"name": "section", "label": "Section count", "kind": "int",
+             "default": 0},
+        ],
+    },
+}
+
+
+# --- Monitored elements ----------------------------------------------------
+def validate_monitored_element(
+    ctx_type: str,
+    contingency_ids,
+    branch_ids,
+    voltage_level_ids,
+    three_windings_transformer_ids,
+) -> list[str]:
+    """Validate a monitored-element rule before it goes into the run."""
+    errors: list[str] = []
+    if not (branch_ids or voltage_level_ids or three_windings_transformer_ids):
+        errors.append("Pick at least one branch, voltage level or 3WT.")
+    if ctx_type == "SPECIFIC" and not contingency_ids:
+        errors.append("Pick at least one contingency for SPECIFIC context.")
+    return errors
+
+
+def make_monitored_element(
+    ctx_type: str,
+    contingency_ids=None,
+    branch_ids=None,
+    voltage_level_ids=None,
+    three_windings_transformer_ids=None,
+) -> dict:
+    """Build a monitored-element dict for :func:`run_security_analysis`."""
+    return {
+        "contingency_context_type": ctx_type,
+        "contingency_ids": (
+            list(contingency_ids)
+            if ctx_type == "SPECIFIC" and contingency_ids else None
+        ),
+        "branch_ids": list(branch_ids) if branch_ids else None,
+        "voltage_level_ids": (
+            list(voltage_level_ids) if voltage_level_ids else None
+        ),
+        "three_windings_transformer_ids": (
+            list(three_windings_transformer_ids)
+            if three_windings_transformer_ids else None
+        ),
+    }
+
+
+def monitored_element_summary(entry: dict) -> str:
+    """One-line description of a monitored-element rule."""
+    parts = [f"context={entry.get('contingency_context_type', 'ALL')}"]
+    if entry.get("contingency_context_type") == "SPECIFIC":
+        parts.append(
+            f"contingencies={', '.join(entry.get('contingency_ids') or [])}"
+        )
+    for key, label in (
+        ("branch_ids", "branches"),
+        ("voltage_level_ids", "VLs"),
+        ("three_windings_transformer_ids", "3WTs"),
+    ):
+        ids = entry.get(key) or []
+        if ids:
+            parts.append(f"{label}={len(ids)}")
+    return " · ".join(parts)
+
+
+# --- Limit reductions ------------------------------------------------------
+def validate_limit_reduction(
+    value: float, permanent: bool, temporary: bool,
+) -> list[str]:
+    """Validate a limit-reduction entry."""
+    errors: list[str] = []
+    if not (permanent or temporary):
+        errors.append("Pick at least one of 'Permanent' or 'Temporary'.")
+    if not (0.0 <= value <= 1.0):
+        errors.append("Reduction value must be in [0, 1].")
+    return errors
+
+
+def make_limit_reduction(
+    value: float,
+    permanent: bool,
+    temporary: bool,
+    *,
+    min_temporary_duration: int = 0,
+    max_temporary_duration: int = 0,
+    country: str = "",
+    min_voltage: float = 0.0,
+    max_voltage: float = 0.0,
+) -> dict:
+    """Build a limit-reduction dict for :func:`run_security_analysis`.
+
+    Optional fields are only added when set to a non-default value —
+    pypowsybl treats absent keys as "no filter".
+    """
+    entry: dict = {
+        "limit_type": "CURRENT",
+        "permanent": bool(permanent),
+        "temporary": bool(temporary),
+        "value": float(value),
+        "contingency_context": "ALL",
+    }
+    if temporary and min_temporary_duration > 0:
+        entry["min_temporary_duration"] = int(min_temporary_duration)
+    if temporary and max_temporary_duration > 0:
+        entry["max_temporary_duration"] = int(max_temporary_duration)
+    if country and country.strip():
+        entry["country"] = country.strip().upper()
+    if min_voltage > 0:
+        entry["min_voltage"] = float(min_voltage)
+    if max_voltage > 0:
+        entry["max_voltage"] = float(max_voltage)
+    return entry
+
+
+def limit_reduction_summary(entry: dict) -> str:
+    """One-line description of a limit-reduction entry."""
+    scope = []
+    if entry.get("permanent"):
+        scope.append("permanent")
+    if entry.get("temporary"):
+        scope.append("temporary")
+    parts = [
+        f"value={entry.get('value')} on {' + '.join(scope) or '?'} "
+        f"{entry.get('limit_type', 'CURRENT')}"
+    ]
+    extras = [
+        f"{k}={entry[k]}"
+        for k in ("min_temporary_duration", "max_temporary_duration",
+                  "country", "min_voltage", "max_voltage")
+        if k in entry
+    ]
+    if extras:
+        parts.append(" · ".join(extras))
+    return "  ·  ".join(parts)
+
+
+# --- Remedial actions ------------------------------------------------------
+def validate_action(
+    action_type: str,
+    action_id: str,
+    fields: dict,
+    existing_ids,
+) -> list[str]:
+    """Validate a remedial-action definition.
+
+    Checks the id is present + unique, the type is known, and every
+    ``id``-kind field carries a non-empty value.
+    """
+    errors: list[str] = []
+    aid = (action_id or "").strip()
+    if not aid:
+        errors.append("Action ID is required.")
+    elif aid in set(existing_ids or ()):
+        errors.append(f"Action ID '{aid}' already exists.")
+    spec = ACTION_FIELDS.get(action_type)
+    if spec is None:
+        errors.append(f"Unknown action type: {action_type!r}")
+        return errors
+    for fdef in spec["fields"]:
+        if fdef["kind"] == "id" and not fields.get(fdef["name"]):
+            errors.append(
+                f"{fdef['label']} is required for a {action_type} action."
+            )
+    return errors
+
+
+def make_action(action_type: str, action_id: str, fields: dict) -> dict:
+    """Build a remedial-action dict for :func:`run_security_analysis`."""
+    return {"action_id": str(action_id).strip(), "type": action_type, **fields}
+
+
+# --- Operator strategies ---------------------------------------------------
+def validate_operator_strategy(
+    strategy_id: str,
+    action_ids,
+    existing_ids,
+) -> list[str]:
+    """Validate an operator-strategy definition."""
+    errors: list[str] = []
+    sid = (strategy_id or "").strip()
+    if not sid:
+        errors.append("Strategy ID is required.")
+    elif sid in set(existing_ids or ()):
+        errors.append(f"Strategy ID '{sid}' already exists.")
+    if not action_ids:
+        errors.append("Pick at least one action.")
+    return errors
+
+
+def make_operator_strategy(
+    strategy_id: str,
+    contingency_id: str,
+    action_ids,
+    condition_type: str = "TRUE_CONDITION",
+    violation_subject_ids=None,
+    violation_types=None,
+) -> dict:
+    """Build an operator-strategy dict for :func:`run_security_analysis`."""
+    return {
+        "operator_strategy_id": str(strategy_id).strip(),
+        "contingency_id": contingency_id,
+        "action_ids": list(action_ids),
+        "condition_type": condition_type,
+        "violation_subject_ids": list(violation_subject_ids or []),
+        "violation_types": list(violation_types or []),
+    }
+
+
+def operator_strategy_summary(entry: dict) -> str:
+    """One-line description of an operator strategy."""
+    parts = [
+        f"`{entry.get('operator_strategy_id')}` ← `{entry.get('contingency_id')}`",
+        f"condition={entry.get('condition_type', 'TRUE_CONDITION')}",
+        f"actions={', '.join(entry.get('action_ids') or [])}",
+    ]
+    subjects = entry.get("violation_subject_ids") or []
+    vtypes = entry.get("violation_types") or []
+    if subjects:
+        parts.append(f"subjects={', '.join(subjects)}")
+    if vtypes:
+        parts.append(f"violation_types={', '.join(vtypes)}")
+    return " · ".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Result summary — host-agnostic table the PySide6 / NiceGUI tabs render
 # ---------------------------------------------------------------------------
 def summarize_security_results(results: dict) -> pd.DataFrame:

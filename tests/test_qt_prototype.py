@@ -2732,6 +2732,12 @@ def test_security_analysis_tab_renders_run_results(qapp, loaded_window):
     qapp.processEvents()
     assert tab._config_group.isHidden() is False
 
+    # Build the contingency list (real shared builder against IEEE14).
+    tab._on_build()
+    qapp.processEvents()
+    assert tab._contingencies and tab._contingencies[0]["id"].startswith("N1_")
+    assert tab._run_btn.isEnabled() is True
+
     fake_result = {
         "pre_status": "CONVERGED",
         "post": {
@@ -2756,10 +2762,9 @@ def test_security_analysis_tab_renders_run_results(qapp, loaded_window):
         tab._on_run()
         qapp.processEvents()
     mock_run.assert_called_once()
-    # The contingency list passed to the runner was built from the
-    # real shared builder against IEEE14 → non-empty.
-    contingencies = mock_run.call_args[0][1]
-    assert contingencies and contingencies[0]["id"].startswith("N1_")
+    # The advanced-config lists are threaded through as keyword args.
+    assert mock_run.call_args.kwargs["monitored_elements"] == []
+    assert mock_run.call_args.kwargs["operator_strategies"] == []
     # Results rendered: pre-status line + 2-row summary + 1 violation row.
     assert tab._results is fake_result
     assert "CONVERGED" in tab._pre_status_lbl.text()
@@ -2767,9 +2772,49 @@ def test_security_analysis_tab_renders_run_results(qapp, loaded_window):
     assert tab._violations_model.rowCount() == 1
 
 
+def test_security_analysis_tab_advanced_config_builds_entries(qapp, loaded_window):
+    """The advanced-config forms append validated entries via the
+    shared make_*/validate_* helpers."""
+    tab = loaded_window.security_analysis_tab
+    qapp.processEvents()
+    tab._on_build()
+    qapp.processEvents()
+
+    # Limit reduction — uncheck both scopes → validation rejects it.
+    tab._lr_perm.setChecked(False)
+    tab._lr_temp.setChecked(False)
+    tab._on_add_reduction()
+    assert tab._reductions == []
+    assert "Permanent" in tab._status_lbl.text()
+    # Re-check one → accepted.
+    tab._lr_perm.setChecked(True)
+    tab._on_add_reduction()
+    assert len(tab._reductions) == 1
+    assert tab._lr_entries_list.count() == 1
+
+    # Remedial action — IEEE14 carries generators, so a
+    # GENERATOR_ACTIVE_POWER action can be built. Blank ID → rejected,
+    # named → accepted.
+    tab._act_type_combo.setCurrentText("GENERATOR_ACTIVE_POWER")
+    qapp.processEvents()
+    tab._act_id_edit.setText("")
+    tab._on_add_action()
+    assert tab._actions == []
+    tab._act_id_edit.setText("gen_down")
+    tab._on_add_action()
+    assert len(tab._actions) == 1
+    assert tab._actions[0]["type"] == "GENERATOR_ACTIVE_POWER"
+    # The new action shows up in the strategy action picker.
+    picker = [
+        tab._strat_actions_list.item(i).text()
+        for i in range(tab._strat_actions_list.count())
+    ]
+    assert "gen_down" in picker
+
+
 def test_security_analysis_tab_empty_network_shows_placeholder(qapp):
-    """An empty network has no lines → the run yields no contingencies
-    and the tab reports it without raising."""
+    """An empty network has no lines → building yields no contingencies
+    and the Run button stays disabled."""
     import pypowsybl.network as pn
     from iidm_viewer.powsybl_worker import NetworkProxy, run
     from iidm_viewer.qt.security_analysis_tab import SecurityAnalysisTab
@@ -2779,8 +2824,9 @@ def test_security_analysis_tab_empty_network_shows_placeholder(qapp):
     tab.set_network(network)
     qapp.processEvents()
     assert tab._placeholder.isHidden() is True  # config still shows
-    tab._on_run()
+    tab._on_build()
     qapp.processEvents()
-    # No lines → builder returns [] → status message, no results.
+    # No lines → builder returns [] → Run stays disabled, no results.
+    assert tab._contingencies == []
+    assert tab._run_btn.isEnabled() is False
     assert tab._results is None
-    assert "No contingencies" in tab._status_lbl.text()
