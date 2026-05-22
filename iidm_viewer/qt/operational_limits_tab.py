@@ -16,10 +16,12 @@ All pypowsybl calls hop through the worker thread via
 """
 from __future__ import annotations
 
+import os
+import tempfile
 from typing import Optional
 
 import pandas as pd
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
@@ -90,6 +92,7 @@ class OperationalLimitsTab(QWidget):
         self._view_model: Optional[OperationalLimitsViewModel] = None
         self._element_id: Optional[str] = None
         self._threshold: int = 50
+        self._plot_tmp: Optional[str] = None  # temp file for Plotly HTML
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -309,6 +312,7 @@ class OperationalLimitsTab(QWidget):
         if vm is None or not element_id:
             self._losses_lbl.setText("")
             self._plot_view.setHtml("")
+            self._cleanup_plot_tmp()
             self._limits_model.set_dataframe(pd.DataFrame())
             return
         elem_limits = vm.display_limits_df[
@@ -317,6 +321,7 @@ class OperationalLimitsTab(QWidget):
         if elem_limits.empty:
             self._losses_lbl.setText("")
             self._plot_view.setHtml("")
+            self._cleanup_plot_tmp()
             self._limits_model.set_dataframe(pd.DataFrame())
             return
         # Losses metric.
@@ -333,8 +338,10 @@ class OperationalLimitsTab(QWidget):
         fig = build_element_chart(
             element_id, elem_limits, vm.flows.get(element_id),
         )
+        # Plotly inline HTML is ~4–5 MB, exceeding QWebEngineView's
+        # ~2 MB setHtml() IPC limit. Write to a temp file instead.
         html = fig.to_html(include_plotlyjs="inline", full_html=True)
-        self._plot_view.setHtml(html)
+        self._load_plot_html(html)
         # Raw limits table.
         cols = [c for c in
                 ("side", "name", "acceptable_duration", "value", "element_type")
@@ -344,3 +351,27 @@ class OperationalLimitsTab(QWidget):
         show = elem_limits[cols].sort_values(sort_cols).reset_index(drop=True)
         self._limits_model.set_dataframe(show)
         self._limits_view.resizeColumnsToContents()
+
+    def _load_plot_html(self, html: str) -> None:
+        """Write *html* to a temp file and point the QWebEngineView at it.
+
+        ``QWebEngineView.setHtml()`` silently truncates content beyond
+        ~2 MB.  Plotly's inline JS alone is ~4.5 MB, so the chart would
+        never render.  A temp file + ``setUrl()`` bypasses the limit.
+        """
+        self._cleanup_plot_tmp()
+        fd, path = tempfile.mkstemp(suffix=".html", prefix="iidm_ol_")
+        try:
+            os.write(fd, html.encode("utf-8"))
+        finally:
+            os.close(fd)
+        self._plot_tmp = path
+        self._plot_view.setUrl(QUrl.fromLocalFile(path))
+
+    def _cleanup_plot_tmp(self) -> None:
+        if self._plot_tmp and os.path.isfile(self._plot_tmp):
+            try:
+                os.unlink(self._plot_tmp)
+            except OSError:
+                pass
+            self._plot_tmp = None

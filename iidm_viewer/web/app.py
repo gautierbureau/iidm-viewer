@@ -289,22 +289,55 @@ def _push_map() -> None:
         _send_render("map", args)
 
 
+_sld_show_substation: bool = False
+
+
+def _get_substation_for_vl(vl_id: str):
+    """Return ``(substation_id, multi_vl)`` for *vl_id*, or ``(None, False)``."""
+    if _state.network is None:
+        return None, False
+    try:
+        vls = _state.network.get_voltage_levels(all_attributes=True)
+        if vls.empty or "substation_id" not in vls.columns:
+            return None, False
+        row = vls.loc[vl_id] if vl_id in vls.index else None
+        if row is None:
+            return None, False
+        sid = str(row["substation_id"]) if row.get("substation_id") else None
+        if sid is None:
+            return None, False
+        multi = int((vls["substation_id"] == sid).sum()) > 1
+        return sid, multi
+    except Exception:
+        return None, False
+
+
 def _push_sld(vl_id: str) -> None:
-    global _last_sld
+    global _last_sld, _sld_show_substation
     if not vl_id or _state.network is None:
         return
-    entry = _sld_cache.get(vl_id)
+
+    sid, multi_vl = _get_substation_for_vl(vl_id)
+
+    if _sld_show_substation and sid:
+        container_id = sid
+        svg_type = "substation"
+    else:
+        container_id = vl_id
+        svg_type = "voltage-level"
+
+    entry = _sld_cache.get(container_id)
     if entry is None:
         try:
-            entry = _generate_sld(_state.network, vl_id)
+            entry = _generate_sld(_state.network, container_id)
         except Exception as exc:
-            ui.notify(f"SLD generation failed for {vl_id}: {exc}", type="negative")
+            ui.notify(f"SLD generation failed for {container_id}: {exc}", type="negative")
             return
-        _sld_cache[vl_id] = entry
+        _sld_cache[container_id] = entry
     svg, metadata = entry
     args = {
         "svg": svg, "metadata": metadata,
-        "height": 700, "svgType": "voltage-level",
+        "height": 700, "svgType": svg_type,
     }
     _last_sld = args
     if _sld_ready:
@@ -421,9 +454,10 @@ def _clear_diagrams() -> None:
     visible until the user picks a VL — and for an empty network no VL
     can be picked, so the stale SVG would never go away.
     """
-    global _last_nad, _last_sld
+    global _last_nad, _last_sld, _sld_show_substation
     _nad_cache.clear()
     _sld_cache.clear()
+    _sld_show_substation = False
     blank_sld = {"svg": "", "metadata": "", "height": 700,
                  "svgType": "voltage-level"}
     blank_nad = {"svg": "", "metadata": "", "height": 700}
@@ -1363,6 +1397,10 @@ _DEFAULT_COL_DEF: dict = {
     # the header row so the wrapped text stays visible.
     "wrapHeaderText": True,
     "autoHeaderHeight": True,
+    # Minimum column width so wide tables (generators, lines) keep
+    # cell values readable.  The grid scrolls horizontally instead
+    # of squeezing every column into the viewport.
+    "minWidth": 100,
 }
 
 
@@ -3139,7 +3177,7 @@ def _refresh_create_extension_panel(state: dict, component: str) -> None:
     state["status_label"].set_text("")
 
 
-def _build_data_explorer():
+def _build_data_explorer(on_topology_changed=None):
     """Materialise the Data Explorer panel and return a refresh closure.
 
     The closure re-fetches the DataFrame for whatever component is
@@ -3147,12 +3185,16 @@ def _build_data_explorer():
     sort are handled inside ag-Grid (per-column floating filters,
     default sort on header click). Edits are dispatched here via the
     ``cellValueChanged`` event.
+
+    ``on_topology_changed`` is an optional callback invoked after a
+    create / delete / disconnect that changes the network topology, so
+    the caller can rebuild the VL picker and flush diagram caches.
     """
     with ui.row().classes("q-pa-sm items-center w-full"):
         ui.label("Component:")
         select = ui.select(
             options=list(COMPONENT_GETTERS),
-            value="Substations",
+            value="Generators",
         ).props("dense outlined").classes("w-64")
         vl_filter = ui.checkbox("Filter by VL").classes("q-ml-md")
         vl_filter.visible = False
@@ -3165,6 +3207,11 @@ def _build_data_explorer():
     # The schema comes from CREATABLE_COMPONENTS; rebuilt on every
     # component change. Hidden when the active component isn't
     # creatable or the network has no node-breaker VLs.
+    def _refresh_after_create():
+        refresh()
+        if on_topology_changed:
+            on_topology_changed()
+
     create_state = {
         "container": None,
         "vl_select": None,
@@ -3173,7 +3220,7 @@ def _build_data_explorer():
         "status_label": None,
         "expansion": None,
     }
-    _build_create_panel_widgets(create_state, refresh_after_create=lambda: refresh())
+    _build_create_panel_widgets(create_state, refresh_after_create=_refresh_after_create)
 
     branch_create_state = {
         "vl1_select": None, "vl2_select": None,
@@ -3183,7 +3230,7 @@ def _build_data_explorer():
         "expansion": None,
     }
     _build_create_branch_panel_widgets(
-        branch_create_state, refresh_after_create=lambda: refresh(),
+        branch_create_state, refresh_after_create=_refresh_after_create,
     )
 
     container_create_state = {
@@ -3194,7 +3241,7 @@ def _build_data_explorer():
         "expansion": None,
     }
     _build_create_container_panel_widgets(
-        container_create_state, refresh_after_create=lambda: refresh(),
+        container_create_state, refresh_after_create=_refresh_after_create,
     )
 
     hvdc_create_state = {
@@ -3204,7 +3251,7 @@ def _build_data_explorer():
         "expansion": None,
     }
     _build_create_hvdc_panel_widgets(
-        hvdc_create_state, refresh_after_create=lambda: refresh(),
+        hvdc_create_state, refresh_after_create=_refresh_after_create,
     )
 
     tap_changer_create_state: dict = {
@@ -3218,7 +3265,7 @@ def _build_data_explorer():
         "current_component": "",
     }
     _build_create_tap_changer_panel_widgets(
-        tap_changer_create_state, refresh_after_create=lambda: refresh(),
+        tap_changer_create_state, refresh_after_create=_refresh_after_create,
     )
 
     coupling_create_state: dict = {
@@ -3229,7 +3276,7 @@ def _build_data_explorer():
         "current_component": "",
     }
     _build_create_coupling_device_panel_widgets(
-        coupling_create_state, refresh_after_create=lambda: refresh(),
+        coupling_create_state, refresh_after_create=_refresh_after_create,
     )
 
     reactive_limits_create_state: dict = {
@@ -3242,7 +3289,7 @@ def _build_data_explorer():
         "current_component": "",
     }
     _build_create_reactive_limits_panel_widgets(
-        reactive_limits_create_state, refresh_after_create=lambda: refresh(),
+        reactive_limits_create_state, refresh_after_create=_refresh_after_create,
     )
 
     operational_limits_create_state: dict = {
@@ -3254,7 +3301,7 @@ def _build_data_explorer():
         "current_component": "",
     }
     _build_create_operational_limits_panel_widgets(
-        operational_limits_create_state, refresh_after_create=lambda: refresh(),
+        operational_limits_create_state, refresh_after_create=_refresh_after_create,
     )
 
     svc_create_state: dict = {
@@ -3265,7 +3312,7 @@ def _build_data_explorer():
         "current_component": "",
     }
     _build_create_secondary_voltage_control_panel_widgets(
-        svc_create_state, refresh_after_create=lambda: refresh(),
+        svc_create_state, refresh_after_create=_refresh_after_create,
     )
 
     extension_create_state: dict = {
@@ -3281,14 +3328,14 @@ def _build_data_explorer():
         "current_component": "",
     }
     _build_create_extension_panel_widgets(
-        extension_create_state, refresh_after_create=lambda: refresh(),
+        extension_create_state, refresh_after_create=_refresh_after_create,
     )
 
     grid = ui.aggrid({
         "columnDefs": [], "rowData": [],
         "defaultColDef": _DEFAULT_COL_DEF,
         "rowSelection": "multiple",
-    }).classes("w-full").style("height: 600px")
+    }, auto_size_columns=False).classes("w-full").style("height: 600px")
 
     # --- Bulk-edit panel --------------------------------------------------
     # ag-Grid keeps the selection on the client; we resolve it on demand
@@ -3499,7 +3546,7 @@ def _build_data_explorer():
         # The state listener handles cache flush + diagram refresh.
         if run_lf_after:
             try:
-                result = await asyncio.to_thread(_state.run_loadflow)
+                result = await asyncio.to_thread(_state.run_loadflow_no_notify)
             except Exception as exc:
                 ui.notify(f"Load flow failed: {exc}", type="negative")
                 return
@@ -3510,6 +3557,9 @@ def _build_data_explorer():
                     f"AC load flow: {result.status if result else 'UNKNOWN'}",
                     type="warning",
                 )
+            # Notify loadflow listeners back on the event loop.
+            for listener in list(_state._loadflow_listeners):
+                listener(result)
 
     async def on_bulk_disconnect() -> None:
         component = select.value
@@ -3841,7 +3891,7 @@ def _build_extensions_explorer():
         "columnDefs": [], "rowData": [],
         "defaultColDef": _DEFAULT_COL_DEF,
         "rowSelection": "multiple",
-    }).classes("w-full").style("height: 500px")
+    }, auto_size_columns=False).classes("w-full").style("height: 500px")
 
     status_lbl = ui.label("").classes("text-caption q-mb-sm")
     with ui.row().classes("items-center q-pa-sm"):
@@ -4019,7 +4069,7 @@ def _build_extensions_explorer():
         refresh()
 
     ext_select.on("update:model-value", _on_extension_changed)
-    filter_input.on("update:model-value", _on_filter_changed)
+    filter_input.on_value_change(_on_filter_changed)
 
     def _on_cell_value_changed(e) -> None:
         """ag-Grid cell edit handler — caches pending edits + removals."""
@@ -4201,7 +4251,7 @@ def _build_reactive_curves():
                                    for c in df.columns],
                     "rowData": df.reset_index().fillna("").to_dict("records"),
                     "defaultColDef": _DEFAULT_COL_DEF,
-                }).classes("w-full").style("height: 240px")
+                }, auto_size_columns=False).classes("w-full").style("height: 240px")
 
     def _set_plot(vm, gen_id):
         plot_data = build_generator_plot_data(
@@ -4634,7 +4684,7 @@ def _build_operational_limits():
         _refresh_element_choices()
         _render_selected_element()
 
-    id_filter_input.on("update:model-value", _on_id_filter_changed)
+    id_filter_input.on_value_change(_on_id_filter_changed)
 
     def _on_element_changed(_e=None) -> None:
         state["element_id"] = element_select.value
@@ -5234,7 +5284,12 @@ def main_page() -> None:
             .classes("bg-grey-2 q-pa-md") \
             .style("width: 280px"):
         ui.label("IIDM Viewer").classes("text-h6")
-        file_lbl = ui.label("No file loaded.").classes("text-caption")
+        with ui.row().classes("items-center w-full no-wrap"):
+            file_lbl = ui.label("No file loaded.").classes("text-caption")
+            unload_btn = ui.button(icon="close") \
+                .props("flat dense round size=sm") \
+                .tooltip("Unload network")
+            unload_btn.visible = False
         vl_lbl = ui.label("VL: —").classes("text-caption q-mb-sm")
 
         async def handle_upload(e):
@@ -5281,8 +5336,9 @@ def main_page() -> None:
                 ui.notify(f"Load failed: {exc}", type="negative")
                 return
             file_lbl.set_text(os.path.basename(name))
+            upload_widget.reset()
 
-        ui.upload(
+        upload_widget = ui.upload(
             on_upload=handle_upload,
             auto_upload=True,
             label="Load network…",
@@ -5319,6 +5375,14 @@ def main_page() -> None:
         ).props("flat dense").classes("full-width q-mb-sm")
         reduction_btn.set_enabled(False)
 
+        def _on_unload_network() -> None:
+            _state.install_network(None)
+            file_lbl.set_text("No file loaded.")
+            unload_btn.visible = False
+            upload_widget.reset()
+
+        unload_btn.on_click(_on_unload_network)
+
         # Voltage Level picker (mirrors Streamlit's vl_selector).
         # Hidden until a network is loaded. The "Filter" input narrows
         # the dropdown to a substring match on the display name; the
@@ -5353,15 +5417,33 @@ def main_page() -> None:
                     else ""
                 )
                 options[row["id"]] = f"{row['display']}{kv}"
-            current = vl_select.value if vl_select.value in options else None
+            previous = vl_select.value
+            filter_text = vl_filter_input.value or ""
+            if filter_text:
+                # Active filter: always jump to the first match so the
+                # user sees the diagram update as they type.
+                current = next(iter(options)) if options else None
+            else:
+                # No filter: preserve the previous selection when it is
+                # still present, otherwise fall back to the first entry.
+                current = previous if previous in options else None
+                if current is None and options:
+                    current = next(iter(options))
             vl_select.options = options
-            # Preserve the previous selection if still present, else fall
-            # through and let the state-driven sync (_on_state_vl) set it.
             vl_select.value = current
             vl_select.update()
+            # Push into the app state so the SLD / NAD / data grid follow.
+            if current and current != previous:
+                _state.set_selected_vl(str(current))
 
         def _on_vl_filter_changed(_e=None) -> None:
             _rebuild_vl_options()
+
+        def _on_vl_filter_enter() -> None:
+            """Enter in the filter confirms the current dropdown value."""
+            vl_id = vl_select.value
+            if vl_id:
+                _state.set_selected_vl(str(vl_id))
 
         def _on_vl_select_changed(_e=None) -> None:
             # Skip while we're programmatically syncing the widget from
@@ -5372,7 +5454,8 @@ def main_page() -> None:
             if vl_id:
                 _state.set_selected_vl(str(vl_id))
 
-        vl_filter_input.on("update:model-value", _on_vl_filter_changed)
+        vl_filter_input.on_value_change(_on_vl_filter_changed)
+        vl_filter_input.on("keydown.enter", lambda _e: _on_vl_filter_enter())
         vl_select.on("update:model-value", _on_vl_select_changed)
 
         # AC load-flow trigger — disabled until a network is loaded;
@@ -5406,7 +5489,12 @@ def main_page() -> None:
                 return
             lf_status_lbl.set_text("Running…")
             try:
-                result = await asyncio.to_thread(_state.run_loadflow)
+                # run_loadflow fires its listeners synchronously, which
+                # would run _on_loadflow_completed on the worker thread
+                # and crash NiceGUI ("slot stack is empty").  Run the
+                # heavy pypowsybl work on the thread but call the
+                # listener explicitly afterwards, back on the event loop.
+                result = await asyncio.to_thread(_state.run_loadflow_no_notify)
             except Exception as exc:
                 lf_status_lbl.set_text(f"Failed: {exc}")
                 ui.notify(f"Load flow failed: {exc}", type="negative")
@@ -5419,6 +5507,8 @@ def main_page() -> None:
                 ui.notify(f"AC load flow: {status}", type="positive")
             else:
                 ui.notify(f"AC load flow: {status}", type="warning")
+            # Now safe to refresh UI — we're back on the event loop.
+            _on_loadflow_completed(result)
 
         run_lf_btn.on_click(on_run_lf)
         view_logs_btn.on_click(
@@ -5481,17 +5571,38 @@ def main_page() -> None:
                 depth_input.on("update:model-value", _on_depth_changed)
             ui.html(
                 f'<iframe id="iidm-nad-iframe" src="{_NAD_URL}/index.html" '
-                'style="width:100%;height:700px;border:none;display:block"></iframe>',
+                'style="width:100%;height:calc(100vh - 160px);min-height:500px;'
+                'border:none;display:block;margin:0 auto"></iframe>',
                 sanitize=False,
-            ).classes("w-full")
+            ).style("display:flex;justify-content:center").classes("w-full")
         with ui.tab_panel(sld_tab).classes("q-pa-none w-full"):
+            with ui.row().classes("items-center q-pa-sm w-full"):
+                sld_vl_label = ui.label("").classes("text-caption")
+                sld_expand_btn = ui.button("Expand to substation") \
+                    .props("flat dense").classes("q-ml-md")
+                sld_expand_btn.visible = False
             ui.html(
                 f'<iframe id="iidm-sld-iframe" src="{_SLD_URL}/index.html" '
-                'style="width:100%;height:700px;border:none;display:block"></iframe>',
+                'style="width:100%;height:calc(100vh - 180px);min-height:500px;'
+                'border:none;display:block;margin:0 auto"></iframe>',
                 sanitize=False,
-            ).classes("w-full")
+            ).style("display:flex;justify-content:center").classes("w-full")
+        def _on_topology_changed():
+            """Rebuild VL picker + flush diagram caches after a create/delete."""
+            try:
+                from iidm_viewer.network_loader import list_voltage_levels_for_selector
+                vl_picker_state["df"] = list_voltage_levels_for_selector(_state.network)
+            except Exception:
+                pass
+            _rebuild_vl_options()
+            _nad_cache.clear()
+            _sld_cache.clear()
+            if _state.selected_vl:
+                _push_sld(_state.selected_vl)
+                _push_nad(_state.selected_vl, _nad_depth)
+
         with ui.tab_panel(data_tab).classes("w-full"):
-            refresh_data_grid = _build_data_explorer()
+            refresh_data_grid = _build_data_explorer(on_topology_changed=_on_topology_changed)
         with ui.tab_panel(extensions_tab).classes("w-full"):
             refresh_extensions_tab = _build_extensions_explorer()
         with ui.tab_panel(reactive_curves_tab).classes("w-full"):
@@ -5512,17 +5623,24 @@ def main_page() -> None:
         view_logs_btn.set_enabled(False)
         save_btn.set_enabled(network is not None)
         reduction_btn.set_enabled(network is not None)
+        unload_btn.visible = network is not None
         lf_status_lbl.set_text("")
         # Swap-network → wipe whatever was rendered for the previous
         # network. ``_on_state_vl`` will refill if a default VL is
         # picked; an empty network has no default VL so the diagrams
         # stay blank rather than showing the previous topology.
         _clear_diagrams()
+        # Clear the filter text so the new network starts unfiltered.
+        vl_filter_input.value = ""
         if network is None:
             vl_picker_state["df"] = None
             vl_filter_input.visible = False
             vl_select.visible = False
             _rebuild_vl_options()
+            refresh_data_grid()
+            refresh_reactive_curves()
+            refresh_operational_limits()
+            refresh_security_analysis()
             return
         try:
             from iidm_viewer.network_loader import (
@@ -5541,8 +5659,41 @@ def main_page() -> None:
         refresh_operational_limits()
         refresh_security_analysis()
 
+    def _update_sld_header(vl_id):
+        """Refresh the VL label + Expand/Collapse button above the SLD."""
+        global _sld_show_substation
+        if not vl_id:
+            sld_vl_label.set_text("")
+            sld_expand_btn.visible = False
+            return
+        sid, multi_vl = _get_substation_for_vl(vl_id)
+        if _sld_show_substation and sid:
+            sld_vl_label.set_text(f"Substation: {sid}")
+        else:
+            sld_vl_label.set_text(f"Voltage level: {vl_id}")
+        if sid and multi_vl:
+            sld_expand_btn.visible = True
+            if _sld_show_substation:
+                sld_expand_btn.text = "Collapse to voltage level"
+            else:
+                sld_expand_btn.text = "Expand to substation"
+        else:
+            sld_expand_btn.visible = False
+            _sld_show_substation = False
+
+    def _on_sld_expand_toggle():
+        global _sld_show_substation
+        _sld_show_substation = not _sld_show_substation
+        vl_id = _state.selected_vl
+        if vl_id:
+            _update_sld_header(vl_id)
+            _push_sld(vl_id)
+
+    sld_expand_btn.on_click(_on_sld_expand_toggle)
+
     def _on_state_vl(vl_id):
         vl_lbl.set_text(f"VL: {vl_id}" if vl_id else "VL: —")
+        _update_sld_header(vl_id)
         # Keep the dropdown in sync with externally-set VLs (map / NAD
         # click, default-VL pick). Skip the listener so we don't loop.
         if vl_id and vl_id in (vl_select.options or {}):
