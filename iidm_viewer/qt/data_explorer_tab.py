@@ -275,6 +275,8 @@ class DataExplorerTab(QWidget):
         self._combo = QComboBox()
         for label in COMPONENT_TYPES:
             self._combo.addItem(label)
+        generators_idx = list(COMPONENT_TYPES).index("Generators")
+        self._combo.setCurrentIndex(generators_idx)
         self._combo.currentTextChanged.connect(self._on_component_changed)
 
         self._filter = QLineEdit()

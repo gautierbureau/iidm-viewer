@@ -106,8 +106,8 @@ class AppState:
         )
         return network
 
-    def install_network(self, network: NetworkProxy) -> None:
-        """Apply a pre-loaded network and broadcast listeners.
+    def install_network(self, network) -> None:
+        """Apply a pre-loaded network (or ``None`` to unload) and broadcast.
 
         Split from :meth:`load_network_from_path` so the heavy load can
         happen on a worker thread (``asyncio.to_thread``) while listener
@@ -115,7 +115,7 @@ class AppState:
         NiceGUI, where UI mutations need the page slot stack to be
         populated by the event loop.
         """
-        default_vl = network_loader.pick_default_vl(network)
+        default_vl = network_loader.pick_default_vl(network) if network else None
         self._network = network
         self._selected_vl = None
         self._last_report_json = None
@@ -161,10 +161,24 @@ class AppState:
 
         Returns ``None`` when no network is loaded.
         """
+        result = self.run_loadflow_no_notify(generic_params, provider_params)
+        if result is not None:
+            for listener in list(self._loadflow_listeners):
+                listener(result)
+        return result
+
+    def run_loadflow_no_notify(
+        self,
+        generic_params: Optional[dict] = None,
+        provider_params: Optional[dict] = None,
+    ) -> Optional[LoadFlowResult]:
+        """Run AC load flow without broadcasting to listeners.
+
+        Use this when the caller needs to fire listeners on a specific
+        thread (e.g. NiceGUI's event loop rather than a worker thread).
+        """
         if self._network is None:
             return None
-        # Fall back to the AppState-cached parameters set by the
-        # LF parameters dialog when no explicit override is passed.
         if generic_params is None:
             generic_params = self.lf_generic_params or None
         if provider_params is None:
@@ -172,6 +186,4 @@ class AppState:
         result = run_ac(self._network, generic_params, provider_params)
         self._last_report_json = getattr(result, "report_json", None)
         script_recorder.record_run_loadflow(generic_params, provider_params)
-        for listener in list(self._loadflow_listeners):
-            listener(result)
         return result

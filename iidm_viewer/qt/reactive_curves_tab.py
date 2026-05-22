@@ -16,10 +16,12 @@ via :func:`iidm_viewer.reactive_curves.build_reactive_curves_view_model`.
 """
 from __future__ import annotations
 
+import os
+import tempfile
 from typing import Optional
 
 import pandas as pd
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -61,6 +63,7 @@ class ReactiveCurvesTab(QWidget):
         self._selected_vl: Optional[str] = None
         self._view_model: Optional[ReactiveCurvesViewModel] = None
         self._gen_id: Optional[str] = None
+        self._plot_tmp: Optional[str] = None  # temp file for Plotly HTML
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -270,6 +273,7 @@ class ReactiveCurvesTab(QWidget):
                 lbl.setText(f"{prefix}: —")
             self._sensitivity_lbl.setVisible(False)
             self._plot_view.setHtml("")
+            self._cleanup_plot_tmp()
             self._plot_caption.setText("")
             return
         gen_row = vm.gens_df.loc[gen_id]
@@ -315,6 +319,7 @@ class ReactiveCurvesTab(QWidget):
         )
         if plot_data is None:
             self._plot_view.setHtml("")
+            self._cleanup_plot_tmp()
             self._plot_caption.setText("")
             return
         import plotly.graph_objects as go
@@ -358,11 +363,11 @@ class ReactiveCurvesTab(QWidget):
         )
         # ``include_plotlyjs="inline"`` embeds the full plotly.js library
         # so the QWebEngineView renders offline (no internet, no CDN).
-        # Larger HTML payload, but the rebuild only happens on gen
-        # switches — interactive pan / zoom is handled inside the
-        # browser without round-tripping to Python.
+        # The resulting HTML is ~4–5 MB, which exceeds QWebEngineView's
+        # ~2 MB limit for setHtml(). Write to a temp file and load via
+        # setUrl() instead — the browser reads from disk with no size cap.
         html = fig.to_html(include_plotlyjs="inline", full_html=True)
-        self._plot_view.setHtml(html)
+        self._load_plot_html(html)
         if plot_data.has_curve and plot_data.curve_points is not None:
             self._plot_caption.setText(
                 f"{len(plot_data.curve_points)} curve points for {gen_id}"
@@ -371,6 +376,31 @@ class ReactiveCurvesTab(QWidget):
             self._plot_caption.setText(
                 f"Min-max reactive limits for {gen_id}"
             )
+
+    def _load_plot_html(self, html: str) -> None:
+        """Write *html* to a temp file and point the QWebEngineView at it.
+
+        ``QWebEngineView.setHtml()`` silently truncates content beyond
+        ~2 MB (the IPC limit after percent-encoding).  Plotly's inline JS
+        alone is ~4.5 MB, so the chart would never render.  Writing to a
+        temp file and loading via ``setUrl()`` bypasses the limit entirely.
+        """
+        self._cleanup_plot_tmp()
+        fd, path = tempfile.mkstemp(suffix=".html", prefix="iidm_rcc_")
+        try:
+            os.write(fd, html.encode("utf-8"))
+        finally:
+            os.close(fd)
+        self._plot_tmp = path
+        self._plot_view.setUrl(QUrl.fromLocalFile(path))
+
+    def _cleanup_plot_tmp(self) -> None:
+        if self._plot_tmp and os.path.isfile(self._plot_tmp):
+            try:
+                os.unlink(self._plot_tmp)
+            except OSError:
+                pass
+            self._plot_tmp = None
 
     def _render_summary(self, vm: Optional[ReactiveCurvesViewModel]) -> None:
         if vm is None:
