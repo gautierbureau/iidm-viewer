@@ -5793,6 +5793,443 @@ def _build_pmax_visualization():
     return refresh
 
 
+def _build_voltage_analysis():
+    """Materialise the "Voltage Analysis" tab.
+
+    Composes the shared :mod:`iidm_viewer.voltage_analysis_core` core
+    (compute + summary / detail / shunt / SVC display builders) with
+    NiceGUI widgets:
+
+    * a bus-voltage summary aggrid + a per-nominal drill-down whose
+      ``V (pu)`` cells turn red when outside the user-set lo/hi band,
+    * three shunt-group cards (capacitive, inductive, unknown), each
+      with active / available / capacity totals + a detail aggrid,
+    * an SVC card with active injection + controllable range totals.
+
+    The Leaflet geographical voltage map (Streamlit-only —
+    :mod:`iidm_viewer.voltage_map`) is skipped by design.
+
+    Returns a closure the page-wide listeners call on network /
+    load-flow changes.
+    """
+    import pandas as pd
+
+    from iidm_viewer.voltage_analysis_core import (
+        BUS_DETAIL_COLUMNS,
+        SHUNT_DISPLAY_COLUMNS,
+        SVC_DISPLAY_COLUMNS,
+        build_bus_detail,
+        build_bus_summary,
+        build_shunt_display,
+        build_svc_display,
+        bus_pu_classify,
+        compute_voltage_analysis,
+        has_loadflow,
+        list_nominal_voltages,
+        shunt_totals,
+        split_shunts_by_b,
+        svc_totals,
+    )
+
+    state: dict = {
+        "buses": pd.DataFrame(),
+        "shunts": pd.DataFrame(),
+        "svcs": pd.DataFrame(),
+    }
+
+    placeholder = ui.label(
+        "Load a network to see voltage analysis.",
+    ).classes("text-caption q-pa-md")
+
+    # ------------------------------------------------------------------
+    # Bus voltages section
+    # ------------------------------------------------------------------
+    bus_card = ui.card().classes("w-full q-pa-sm")
+    with bus_card:
+        ui.label("Bus voltages by nominal level").classes("text-h6")
+        lf_warning = ui.label(
+            "Voltage magnitudes are not available — run a load flow first.",
+        ).classes("text-caption q-pa-xs")
+        lf_warning.style("color: #b35a00; background: #fff7e6; "
+                          "border: 1px solid #ffd591; border-radius: 4px;")
+        lf_warning.visible = False
+        summary_grid = ui.aggrid({
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }).classes("w-full").style("height: 220px")
+
+        ui.label("Bus detail").classes("text-subtitle1 q-mt-sm")
+        detail_controls = ui.row().classes("items-center w-full no-wrap q-gutter-sm")
+        with detail_controls:
+            ui.label("Nominal voltage (kV):")
+            nom_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-32")
+            ui.label("Low (pu):")
+            lo_input = ui.number(value=0.95, step=0.01, format="%.3f") \
+                .props("dense outlined").classes("w-24")
+            ui.label("High (pu):")
+            hi_input = ui.number(value=1.05, step=0.01, format="%.3f") \
+                .props("dense outlined").classes("w-24")
+        detail_caption = ui.label("").classes("text-caption q-mt-xs")
+        detail_grid = ui.aggrid({
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }).classes("w-full").style("height: 340px")
+    bus_card.visible = False
+
+    # ------------------------------------------------------------------
+    # Reactive compensation section
+    # ------------------------------------------------------------------
+    reactive_card = ui.card().classes("w-full q-pa-sm")
+    with reactive_card:
+        ui.label("Reactive compensation").classes("text-h6")
+        reactive_caption = ui.label(
+            "Current Q — Q from the network file when available, otherwise "
+            "estimated as −b × V²_nom. Sign convention: Q < 0 for "
+            "capacitors, Q > 0 for reactors.",
+        ).classes("text-caption q-pa-xs")
+        reactive_caption.style(
+            "color: #1b5e8b; background: #eef5fb; "
+            "border: 1px solid #b6d7ee; border-radius: 4px;",
+        )
+
+        reactive_empty_lbl = ui.label(
+            "No reactive compensation equipment found in this network.",
+        ).classes("text-caption q-pa-sm")
+        reactive_empty_lbl.visible = False
+
+        # Shunt sub-section.
+        shunt_label = ui.label("Shunt compensators") \
+            .classes("text-subtitle1 q-mt-sm")
+        shunt_lf_note = ui.label(
+            "No load flow — injections estimated as b × nominal_v².",
+        ).classes("text-caption text-grey-7")
+        shunt_lf_note.visible = False
+
+        def _new_shunt_group(title: str):
+            """Bundle of widgets for one shunt group (cap / ind / unknown)."""
+            card = ui.card().classes("w-full q-pa-sm q-mt-sm")
+            with card:
+                ui.label(title).classes("text-subtitle2")
+                info_lbl = ui.label("").classes("text-caption text-grey-7")
+                info_lbl.visible = False
+                with ui.row().classes("items-stretch q-gutter-sm no-wrap"):
+                    active_lbl = ui.label("—").classes("col text-center q-pa-xs") \
+                        .style("border: 1px solid #ddd; border-radius: 4px;")
+                    available_lbl = ui.label("—").classes("col text-center q-pa-xs") \
+                        .style("border: 1px solid #ddd; border-radius: 4px;")
+                    capacity_lbl = ui.label("—").classes("col text-center q-pa-xs") \
+                        .style("border: 1px solid #ddd; border-radius: 4px;")
+                grid = ui.aggrid({
+                    "columnDefs": [], "rowData": [],
+                    "defaultColDef": _DEFAULT_COL_DEF,
+                }).classes("w-full").style("height: 220px")
+            return {
+                "card": card,
+                "info": info_lbl,
+                "active": active_lbl,
+                "available": available_lbl,
+                "capacity": capacity_lbl,
+                "grid": grid,
+            }
+
+        cap_widgets = _new_shunt_group(
+            "Capacitive (b > 0, Q < 0) — injects reactive power, raises voltage",
+        )
+        ind_widgets = _new_shunt_group(
+            "Inductive (b < 0, Q > 0) — absorbs reactive power, lowers voltage",
+        )
+        unk_widgets = _new_shunt_group(
+            "Unclassified (b per section unknown — fully disconnected)",
+        )
+
+        # SVC sub-section.
+        svc_label = ui.label("Static VAR compensators") \
+            .classes("text-subtitle1 q-mt-sm")
+        svc_card = ui.card().classes("w-full q-pa-sm q-mt-sm")
+        with svc_card:
+            with ui.row().classes("items-stretch q-gutter-sm no-wrap"):
+                svc_active_lbl = ui.label("—").classes("col text-center q-pa-xs") \
+                    .style("border: 1px solid #ddd; border-radius: 4px;")
+                svc_range_lbl = ui.label("—").classes("col text-center q-pa-xs") \
+                    .style("border: 1px solid #ddd; border-radius: 4px;")
+            svc_grid = ui.aggrid({
+                "columnDefs": [], "rowData": [],
+                "defaultColDef": _DEFAULT_COL_DEF,
+            }).classes("w-full").style("height: 220px")
+    reactive_card.visible = False
+
+    # ------------------------------------------------------------------
+    # Grid helpers
+    # ------------------------------------------------------------------
+    def _set_grid_from_df(grid, df: pd.DataFrame, columns=None) -> None:
+        cols = list(columns) if columns is not None else list(df.columns)
+        if df.empty:
+            grid.options.update({
+                "columnDefs": [{"field": c, "headerName": c} for c in cols],
+                "rowData": [],
+                "defaultColDef": _DEFAULT_COL_DEF,
+            })
+        else:
+            grid.options.update({
+                "columnDefs": [
+                    {"field": c, "headerName": c} for c in df.columns
+                ],
+                "rowData": df.fillna("").astype(str).to_dict("records"),
+                "defaultColDef": _DEFAULT_COL_DEF,
+            })
+        grid.update()
+
+    def _set_detail_grid(df: pd.DataFrame, lo: float, hi: float) -> None:
+        """Bus detail grid with V (pu) cell colouring driven by the
+        shared :func:`bus_pu_classify`."""
+        col_defs = []
+        for col in BUS_DETAIL_COLUMNS:
+            entry = {"field": col, "headerName": col}
+            if col == "V (pu)":
+                entry["cellStyle"] = (
+                    "function(params){"
+                    "var v=params.value;"
+                    "if(v==null||v===''){return null;}"
+                    "var n=Number(v);"
+                    "if(isNaN(n)){return null;}"
+                    f"if(n<{lo}||n>{hi}){{"
+                    "return {'backgroundColor':'#ff4b4b','color':'white'};}"
+                    "return null;}"
+                )
+            col_defs.append(entry)
+        detail_grid.options.update({
+            "columnDefs": col_defs,
+            "rowData": df.fillna("").astype(str).to_dict("records"),
+            "defaultColDef": _DEFAULT_COL_DEF,
+        })
+        detail_grid.update()
+
+    # ------------------------------------------------------------------
+    # Render: bus voltages
+    # ------------------------------------------------------------------
+    def _render_detail() -> None:
+        if state["buses"].empty or not has_loadflow(state["buses"]):
+            _set_grid_from_df(
+                detail_grid,
+                pd.DataFrame(columns=BUS_DETAIL_COLUMNS),
+                columns=BUS_DETAIL_COLUMNS,
+            )
+            detail_caption.set_text("")
+            return
+        try:
+            nominal = float(nom_select.value) if nom_select.value is not None else None
+        except (TypeError, ValueError):
+            nominal = None
+        if nominal is None:
+            _set_grid_from_df(
+                detail_grid,
+                pd.DataFrame(columns=BUS_DETAIL_COLUMNS),
+                columns=BUS_DETAIL_COLUMNS,
+            )
+            detail_caption.set_text("")
+            return
+        try:
+            lo = float(lo_input.value)
+            hi = float(hi_input.value)
+        except (TypeError, ValueError):
+            lo, hi = 0.95, 1.05
+        df = build_bus_detail(state["buses"], nominal)
+        _set_detail_grid(df, lo, hi)
+        if df.empty:
+            outside = 0
+        else:
+            outside = int(
+                df["V (pu)"]
+                .apply(lambda v: bus_pu_classify(v, lo, hi) == "warning")
+                .sum()
+            )
+        detail_caption.set_text(
+            f"{len(df)} buses at {nominal} kV — "
+            f"{outside} outside [{lo:.3f}, {hi:.3f}] pu"
+        )
+
+    nom_select.on(
+        "update:model-value", lambda _e=None: _render_detail(),
+    )
+    lo_input.on(
+        "update:model-value", lambda _e=None: _render_detail(),
+    )
+    hi_input.on(
+        "update:model-value", lambda _e=None: _render_detail(),
+    )
+
+    def _render_bus_section() -> None:
+        buses = state["buses"]
+        lf = has_loadflow(buses)
+        lf_warning.visible = not lf
+        _set_grid_from_df(summary_grid, build_bus_summary(buses))
+        detail_controls.visible = lf
+        detail_caption.visible = lf
+        detail_grid.visible = lf
+        if not lf:
+            return
+        nom_options = [str(v) for v in list_nominal_voltages(buses)]
+        previous = nom_select.value
+        nom_select.options = nom_options
+        if previous in nom_options:
+            nom_select.value = previous
+        elif nom_options:
+            nom_select.value = nom_options[0]
+        else:
+            nom_select.value = None
+        nom_select.update()
+        _render_detail()
+
+    # ------------------------------------------------------------------
+    # Render: reactive compensation
+    # ------------------------------------------------------------------
+    def _render_shunt_group(widgets, group, has_lf: bool, empty_msg: str) -> None:
+        if group.empty:
+            widgets["info"].set_text(empty_msg)
+            widgets["info"].visible = True
+            widgets["active"].set_text("—")
+            widgets["available"].set_text("—")
+            widgets["capacity"].set_text("—")
+            _set_grid_from_df(
+                widgets["grid"],
+                pd.DataFrame(columns=SHUNT_DISPLAY_COLUMNS),
+                columns=SHUNT_DISPLAY_COLUMNS,
+            )
+            return
+        widgets["info"].visible = False
+        active, available, capacity = shunt_totals(group)
+        label_active = "Active" if has_lf else "Estimated"
+        widgets["active"].set_text(f"{label_active} (MVAr): {active:.2f}")
+        widgets["available"].set_text(
+            f"Available not activated (MVAr): {available:.2f}",
+        )
+        widgets["capacity"].set_text(
+            f"Total capacity (MVAr): {capacity:.2f}",
+        )
+        _set_grid_from_df(widgets["grid"], build_shunt_display(group))
+
+    def _render_reactive_section() -> None:
+        shunts = state["shunts"]
+        svcs = state["svcs"]
+        has_shunts = not shunts.empty
+        has_svcs = not svcs.empty
+        if not has_shunts and not has_svcs:
+            reactive_empty_lbl.visible = True
+            reactive_caption.visible = False
+            shunt_label.visible = False
+            shunt_lf_note.visible = False
+            cap_widgets["card"].visible = False
+            ind_widgets["card"].visible = False
+            unk_widgets["card"].visible = False
+            svc_label.visible = False
+            svc_card.visible = False
+            return
+        reactive_empty_lbl.visible = False
+        reactive_caption.visible = True
+
+        # Shunts
+        shunt_label.visible = True
+        if has_shunts:
+            has_lf = bool(shunts["q"].notna().any())
+            shunt_lf_note.visible = not has_lf
+            cap, ind, unk = split_shunts_by_b(shunts)
+            cap_widgets["card"].visible = True
+            _render_shunt_group(
+                cap_widgets, cap, has_lf,
+                "No capacitive shunt compensators in this network.",
+            )
+            ind_widgets["card"].visible = True
+            _render_shunt_group(
+                ind_widgets, ind, has_lf,
+                "No inductive shunt compensators in this network.",
+            )
+            unk_widgets["card"].visible = not unk.empty
+            if not unk.empty:
+                _render_shunt_group(unk_widgets, unk, has_lf, "")
+        else:
+            shunt_lf_note.visible = False
+            cap_widgets["card"].visible = True
+            _render_shunt_group(
+                cap_widgets, pd.DataFrame(), False,
+                "No shunt compensators in this network.",
+            )
+            ind_widgets["card"].visible = False
+            unk_widgets["card"].visible = False
+
+        # SVCs
+        svc_label.visible = True
+        svc_card.visible = True
+        if has_svcs:
+            has_lf = bool(svcs["current_q_mvar"].notna().any())
+            active, total_range = svc_totals(svcs)
+            if has_lf:
+                svc_active_lbl.set_text(
+                    f"Active injection (MVAr): {active:.2f}",
+                )
+            else:
+                svc_active_lbl.set_text(
+                    "Active injection (MVAr): — (run a load flow first)",
+                )
+            svc_range_lbl.set_text(
+                f"Total controllable range (MVAr): {total_range:.2f}",
+            )
+            _set_grid_from_df(svc_grid, build_svc_display(svcs))
+        else:
+            svc_active_lbl.set_text(
+                "No static VAR compensators in this network.",
+            )
+            svc_range_lbl.set_text("")
+            _set_grid_from_df(
+                svc_grid,
+                pd.DataFrame(columns=SVC_DISPLAY_COLUMNS),
+                columns=SVC_DISPLAY_COLUMNS,
+            )
+
+    # ------------------------------------------------------------------
+    # Refresh closure
+    # ------------------------------------------------------------------
+    async def refresh() -> None:
+        if _state.network is None:
+            state["buses"] = pd.DataFrame()
+            state["shunts"] = pd.DataFrame()
+            state["svcs"] = pd.DataFrame()
+            placeholder.set_text("Load a network to see voltage analysis.")
+            placeholder.visible = True
+            bus_card.visible = False
+            reactive_card.visible = False
+            return
+        try:
+            data = await asyncio.to_thread(
+                compute_voltage_analysis, _state.network,
+            )
+        except Exception as exc:
+            placeholder.set_text(f"Voltage analysis failed: {exc}")
+            placeholder.visible = True
+            bus_card.visible = False
+            reactive_card.visible = False
+            state["buses"] = pd.DataFrame()
+            state["shunts"] = pd.DataFrame()
+            state["svcs"] = pd.DataFrame()
+            return
+        state["buses"] = data.buses
+        state["shunts"] = data.shunts
+        state["svcs"] = data.svcs
+        if data.buses.empty:
+            placeholder.set_text("No bus data available in this network.")
+            placeholder.visible = True
+            bus_card.visible = False
+            reactive_card.visible = False
+            return
+        placeholder.visible = False
+        bus_card.visible = True
+        reactive_card.visible = True
+        _render_bus_section()
+        _render_reactive_section()
+
+    return refresh
+
+
 def _cast_value_for_col(series, raw):
     """Best-effort cast for a user-typed cell value, matching the
     source DataFrame's column dtype."""
@@ -6112,6 +6549,7 @@ def main_page() -> None:
         security_analysis_tab = ui.tab("Security Analysis")
         short_circuit_tab = ui.tab("Short Circuit Analysis")
         pmax_tab = ui.tab("Pmax Visualization")
+        voltage_analysis_tab = ui.tab("Voltage Analysis")
     panels = ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")
     with panels:
         with ui.tab_panel(map_tab).classes("q-pa-none w-full"):
@@ -6196,6 +6634,8 @@ def main_page() -> None:
             refresh_short_circuit_analysis = _build_short_circuit_analysis()
         with ui.tab_panel(pmax_tab).classes("w-full"):
             refresh_pmax = _build_pmax_visualization()
+        with ui.tab_panel(voltage_analysis_tab).classes("w-full"):
+            refresh_voltage_analysis = _build_voltage_analysis()
 
     # ------------------------------------------------------------------
     # Cross-tab navigation: substation click on map -> SLD tab on that VL.
@@ -6228,6 +6668,7 @@ def main_page() -> None:
             refresh_security_analysis()
             refresh_short_circuit_analysis()
             asyncio.create_task(refresh_pmax())
+            asyncio.create_task(refresh_voltage_analysis())
             return
         try:
             from iidm_viewer.network_loader import (
@@ -6247,6 +6688,7 @@ def main_page() -> None:
         refresh_security_analysis()
         refresh_short_circuit_analysis()
         asyncio.create_task(refresh_pmax())
+        asyncio.create_task(refresh_voltage_analysis())
 
     def _update_sld_header(vl_id):
         """Refresh the VL label + Expand/Collapse button above the SLD."""
@@ -6322,6 +6764,9 @@ def main_page() -> None:
         # Pmax: needs both bus v_mag and line p1 — both come from the
         # LF — so a refresh after a run is the only way to populate it.
         asyncio.create_task(refresh_pmax())
+        # Voltage Analysis: bus v_mag + shunt/SVC q come from the LF —
+        # refresh so summary, drill-down + current-Q metrics update.
+        asyncio.create_task(refresh_voltage_analysis())
 
     # Listeners are registered fresh on every page connect; if a
     # previous registration is still around (browser refresh), the

@@ -1220,3 +1220,36 @@ def test_pmax_visualization_builder_uses_shared_core():
     assert "build_pangle_chart" in src
     assert "build_display_dataframe" in src
     assert "filter_by_vl" in src
+
+
+def test_voltage_analysis_tab_registered_in_main_page():
+    """``Voltage Analysis`` must be a top-level tab + its refresh
+    closure must be wired into the network-changed + LF-completed
+    listeners (no VL-changed wiring — the section is network-wide)."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert 'ui.tab("Voltage Analysis")' in src
+    assert "refresh_voltage_analysis = _build_voltage_analysis()" in src
+    # Called from the on_state_network branch (both load + clear) and
+    # the on_loadflow_completed listener → at least 3 sites.
+    assert src.count("refresh_voltage_analysis()") >= 3
+
+
+def test_voltage_analysis_builder_uses_shared_core():
+    """The NiceGUI builder must compose the shared compute + display
+    helpers so PySide6 + Streamlit stay in sync."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_voltage_analysis)
+    assert "compute_voltage_analysis" in src
+    assert "build_bus_summary" in src
+    assert "build_bus_detail" in src
+    assert "build_shunt_display" in src
+    assert "build_svc_display" in src
+    assert "split_shunts_by_b" in src
+    assert "shunt_totals" in src
+    assert "svc_totals" in src
+    assert "bus_pu_classify" in src
