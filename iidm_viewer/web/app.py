@@ -5546,6 +5546,253 @@ def _build_short_circuit_analysis():
     return refresh
 
 
+def _build_pmax_visualization():
+    """Materialise the "Pmax Visualization" tab.
+
+    Composes the shared :mod:`iidm_viewer.pmax_visualization` core
+    (compute + chart + filter + classifier) with NiceGUI widgets:
+
+    * a "Only lines connected to VL X" checkbox when an upstream VL
+      is selected,
+    * a summary aggrid colour-coded via the shared classifiers
+      (``ratio_color`` / ``margin_color``),
+    * a line picker + a four-metric row,
+    * a ``ui.plotly`` chart with the P-δ characteristic.
+
+    Returns a closure the page-wide listeners call on network /
+    selected-VL / load-flow changes.
+    """
+    import pandas as pd
+    import plotly.graph_objects as go
+
+    from iidm_viewer.pmax_visualization import (
+        DISPLAY_COLUMNS,
+        build_display_dataframe,
+        build_pangle_chart,
+        compute_pmax_data,
+        filter_by_vl,
+        margin_color,
+        ratio_color,
+    )
+
+    state: dict = {
+        "unfiltered": pd.DataFrame(),
+        "df": pd.DataFrame(),
+    }
+
+    ui.label(
+        "For each line: Pmax = V₁ × V₂ / X  (V in kV, X in Ω, "
+        "result in MW). The ratio P/Pmax = sin(δ) shows proximity "
+        "to the steady-state stability limit — the operating point "
+        "reaches the limit when δ = 90°."
+    ).classes("text-caption q-pa-sm")
+
+    placeholder = ui.label(
+        "Load a network and run a load flow to see Pmax visualization."
+    ).classes("text-caption q-pa-md")
+
+    only_vl_row = ui.row().classes("items-center q-pa-sm w-full")
+    with only_vl_row:
+        only_vl_checkbox = ui.checkbox(
+            "Only lines connected to selected VL", value=False,
+        )
+    only_vl_row.visible = False
+
+    summary_card = ui.card().classes("w-full q-pa-sm")
+    with summary_card:
+        ui.label("Lines sorted by proximity to stability limit") \
+            .classes("text-h6")
+        summary_grid = ui.aggrid({
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }).classes("w-full").style("height: 280px")
+    summary_card.visible = False
+
+    detail_card = ui.card().classes("w-full q-pa-sm")
+    with detail_card:
+        ui.label("Power-angle characteristic").classes("text-h6")
+        with ui.row().classes("items-center w-full"):
+            ui.label("Line:")
+            line_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-64")
+        metrics_row = ui.row().classes("items-stretch q-pa-sm w-full no-wrap")
+        with metrics_row:
+            pmax_lbl = ui.label("Pmax: —").classes("col")
+            pactual_lbl = ui.label("P: —").classes("col")
+            ratio_lbl = ui.label("P/Pmax: —").classes("col")
+            delta_lbl = ui.label("δ: —").classes("col")
+        plot = ui.plotly(go.Figure()).classes("w-full").style("height: 460px")
+    detail_card.visible = False
+
+    def _set_summary_grid(df: pd.DataFrame) -> None:
+        if df.empty:
+            summary_grid.options.update({
+                "columnDefs": [], "rowData": [],
+                "defaultColDef": _DEFAULT_COL_DEF,
+            })
+            summary_grid.update()
+            return
+        # Per-cell colour for P/Pmax + Margin via ag-grid cellStyle JS.
+        col_defs = []
+        for col in df.columns:
+            entry = {"field": col, "headerName": col}
+            if col == "P/Pmax":
+                entry["cellStyle"] = (
+                    "function(params){"
+                    "var v=params.value;"
+                    "if(v==null||v===''){return null;}"
+                    "var n=Number(v);"
+                    "if(isNaN(n)){return null;}"
+                    "if(n>=0.8){return {'backgroundColor':'#ff4b4b','color':'white'};}"
+                    "if(n>=0.6){return {'backgroundColor':'#ffa500'};}"
+                    "return null;}"
+                )
+            elif col == "Margin (%)":
+                entry["cellStyle"] = (
+                    "function(params){"
+                    "var v=params.value;"
+                    "if(v==null||v===''){return null;}"
+                    "var n=Number(v);"
+                    "if(isNaN(n)){return null;}"
+                    "if(n<=20){return {'backgroundColor':'#ff4b4b','color':'white'};}"
+                    "if(n<=40){return {'backgroundColor':'#ffa500'};}"
+                    "return null;}"
+                )
+            col_defs.append(entry)
+        summary_grid.options.update({
+            "columnDefs": col_defs,
+            "rowData": df.fillna("").astype(str).to_dict("records"),
+            "defaultColDef": _DEFAULT_COL_DEF,
+        })
+        summary_grid.update()
+
+    def _render_detail(line_id) -> None:
+        if not line_id or state["df"].empty or line_id not in state["df"].index:
+            pmax_lbl.set_text("Pmax: —")
+            pactual_lbl.set_text("P: —")
+            ratio_lbl.set_text("P/Pmax: —")
+            delta_lbl.set_text("δ: —")
+            plot.update_figure(go.Figure())
+            return
+        row = state["df"].loc[line_id]
+        pmax_lbl.set_text(f"Pmax: {row['pmax_mw']:.1f} MW")
+        pactual_lbl.set_text(f"P: {row['p_actual_mw']:.1f} MW")
+        ratio_val = row["p_pmax_ratio"]
+        margin_val = row["margin_pct"]
+        if pd.notna(ratio_val):
+            text = f"P/Pmax: {ratio_val:.1%}"
+            if pd.notna(margin_val):
+                text += f"  (margin {margin_val:.1f} %)"
+            ratio_lbl.set_text(text)
+        else:
+            ratio_lbl.set_text("P/Pmax: N/A")
+        delta = row["delta_deg"]
+        delta_lbl.set_text(
+            f"δ: {delta:.1f}°" if pd.notna(delta) else "δ: N/A",
+        )
+        plot.update_figure(build_pangle_chart(line_id, row))
+
+    def _refresh_line_select() -> None:
+        line_ids = [str(x) for x in state["df"].index.tolist()]
+        line_select.options = line_ids
+        if line_select.value not in line_ids:
+            line_select.value = line_ids[0] if line_ids else None
+        line_select.update()
+        _render_detail(line_select.value)
+
+    line_select.on(
+        "update:model-value",
+        lambda _e=None: _render_detail(line_select.value),
+    )
+
+    def _apply_vl_filter() -> None:
+        """Read the current `_state.selected_vl` + the checkbox value
+        and recompute the display frame."""
+        if state["unfiltered"].empty:
+            state["df"] = pd.DataFrame()
+            summary_card.visible = False
+            detail_card.visible = False
+            placeholder.visible = True
+            return
+        vl_id = _state.selected_vl
+        if only_vl_checkbox.value and vl_id:
+            state["df"] = filter_by_vl(state["unfiltered"], vl_id)
+        else:
+            state["df"] = state["unfiltered"]
+        if state["df"].empty:
+            placeholder.set_text("No lines match the current filter.")
+            placeholder.visible = True
+            summary_card.visible = False
+            detail_card.visible = False
+            return
+        placeholder.visible = False
+        summary_card.visible = True
+        detail_card.visible = True
+        _set_summary_grid(build_display_dataframe(state["df"]))
+        _refresh_line_select()
+
+    only_vl_checkbox.on(
+        "update:model-value", lambda _e=None: _apply_vl_filter(),
+    )
+
+    def _update_vl_visibility() -> None:
+        """Show / hide the 'Only lines connected to VL X' checkbox based
+        on the current ``_state.selected_vl`` and the unfiltered frame."""
+        vl_id = _state.selected_vl
+        if (
+            vl_id
+            and not state["unfiltered"].empty
+            and not filter_by_vl(state["unfiltered"], vl_id).empty
+        ):
+            only_vl_checkbox.text = f"Only lines connected to VL {vl_id}"
+            only_vl_row.visible = True
+            only_vl_checkbox.update()
+        else:
+            only_vl_row.visible = False
+            only_vl_checkbox.value = False
+            only_vl_checkbox.update()
+
+    async def refresh() -> None:
+        if _state.network is None:
+            state["unfiltered"] = pd.DataFrame()
+            state["df"] = pd.DataFrame()
+            placeholder.set_text(
+                "Load a network and run a load flow to see "
+                "Pmax visualization.",
+            )
+            placeholder.visible = True
+            only_vl_row.visible = False
+            summary_card.visible = False
+            detail_card.visible = False
+            return
+        try:
+            df = await asyncio.to_thread(
+                compute_pmax_data, _state.network,
+            )
+        except Exception as exc:
+            placeholder.set_text(f"Pmax visualization failed: {exc}")
+            placeholder.visible = True
+            summary_card.visible = False
+            detail_card.visible = False
+            state["unfiltered"] = pd.DataFrame()
+            state["df"] = pd.DataFrame()
+            return
+        state["unfiltered"] = df
+        if df.empty:
+            placeholder.set_text(
+                "No data available. Make sure a load flow has been "
+                "run and the network contains transmission lines.",
+            )
+            placeholder.visible = True
+            summary_card.visible = False
+            detail_card.visible = False
+            return
+        _update_vl_visibility()
+        _apply_vl_filter()
+
+    return refresh
+
+
 def _cast_value_for_col(series, raw):
     """Best-effort cast for a user-typed cell value, matching the
     source DataFrame's column dtype."""
@@ -5864,6 +6111,7 @@ def main_page() -> None:
         operational_limits_tab = ui.tab("Operational Limits")
         security_analysis_tab = ui.tab("Security Analysis")
         short_circuit_tab = ui.tab("Short Circuit Analysis")
+        pmax_tab = ui.tab("Pmax Visualization")
     panels = ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")
     with panels:
         with ui.tab_panel(map_tab).classes("q-pa-none w-full"):
@@ -5946,6 +6194,8 @@ def main_page() -> None:
             refresh_security_analysis = _build_security_analysis()
         with ui.tab_panel(short_circuit_tab).classes("w-full"):
             refresh_short_circuit_analysis = _build_short_circuit_analysis()
+        with ui.tab_panel(pmax_tab).classes("w-full"):
+            refresh_pmax = _build_pmax_visualization()
 
     # ------------------------------------------------------------------
     # Cross-tab navigation: substation click on map -> SLD tab on that VL.
@@ -5977,6 +6227,7 @@ def main_page() -> None:
             refresh_operational_limits()
             refresh_security_analysis()
             refresh_short_circuit_analysis()
+            asyncio.create_task(refresh_pmax())
             return
         try:
             from iidm_viewer.network_loader import (
@@ -5995,6 +6246,7 @@ def main_page() -> None:
         refresh_operational_limits()
         refresh_security_analysis()
         refresh_short_circuit_analysis()
+        asyncio.create_task(refresh_pmax())
 
     def _update_sld_header(vl_id):
         """Refresh the VL label + Expand/Collapse button above the SLD."""
@@ -6046,6 +6298,8 @@ def main_page() -> None:
         # Refresh the reactive-curves tab so its "Only generators in
         # VL <id>" checkbox label and any active narrow stay in sync.
         refresh_reactive_curves()
+        # Pmax: same "Only lines connected to VL X" affordance.
+        asyncio.create_task(refresh_pmax())
 
     def _on_loadflow_completed(result):
         """LF rewrites line P/Q/I + bus V/angle, baked into the SVGs and
@@ -6065,6 +6319,9 @@ def main_page() -> None:
         # Post-LF the branch I and P/Q flows change → loading_pct +
         # losses + chart need to be re-rendered.
         refresh_operational_limits()
+        # Pmax: needs both bus v_mag and line p1 — both come from the
+        # LF — so a refresh after a run is the only way to populate it.
+        asyncio.create_task(refresh_pmax())
 
     # Listeners are registered fresh on every page connect; if a
     # previous registration is still around (browser refresh), the

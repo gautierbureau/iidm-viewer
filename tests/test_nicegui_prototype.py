@@ -1192,3 +1192,31 @@ def test_short_circuit_analysis_builder_uses_shared_core():
     assert "count_failures" in src
     assert "count_with_violations" in src
     assert "make_sc_params" in src
+
+
+def test_pmax_visualization_tab_registered_in_main_page():
+    """``Pmax Visualization`` must be a top-level tab + its refresh
+    closure must be wired into the network-changed + VL-changed +
+    LF-completed listeners."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert 'ui.tab("Pmax Visualization")' in src
+    assert "refresh_pmax = _build_pmax_visualization()" in src
+    # Tab must follow VL changes (the "Only lines connected to VL X"
+    # toggle relies on the listener firing).
+    assert src.count("refresh_pmax()") >= 3
+
+
+def test_pmax_visualization_builder_uses_shared_core():
+    """The NiceGUI builder must compose the shared compute + chart +
+    filter helpers so PySide6 + Streamlit stay in sync."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_pmax_visualization)
+    assert "compute_pmax_data" in src
+    assert "build_pangle_chart" in src
+    assert "build_display_dataframe" in src
+    assert "filter_by_vl" in src
