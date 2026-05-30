@@ -40,6 +40,7 @@ from iidm_viewer.qt.extensions_explorer_tab import ExtensionsExplorerTab
 from iidm_viewer.qt.map_tab import MapTab
 from iidm_viewer.qt.nad_tab import NadTab
 from iidm_viewer.qt.operational_limits_tab import OperationalLimitsTab
+from iidm_viewer.qt.pmax_visualization_tab import PmaxVisualizationTab
 from iidm_viewer.qt.reactive_curves_tab import ReactiveCurvesTab
 from iidm_viewer.qt.security_analysis_tab import SecurityAnalysisTab
 from iidm_viewer.qt.short_circuit_analysis_tab import ShortCircuitAnalysisTab
@@ -276,6 +277,7 @@ class MainWindow(QMainWindow):
         self.operational_limits_tab = OperationalLimitsTab()
         self.security_analysis_tab = SecurityAnalysisTab()
         self.short_circuit_tab = ShortCircuitAnalysisTab()
+        self.pmax_visualization_tab = PmaxVisualizationTab()
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.map_tab, "Network Map")
@@ -287,6 +289,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.operational_limits_tab, "Operational Limits")
         self.tabs.addTab(self.security_analysis_tab, "Security Analysis")
         self.tabs.addTab(self.short_circuit_tab, "Short Circuit Analysis")
+        self.tabs.addTab(self.pmax_visualization_tab, "Pmax Visualization")
 
         # The Data Explorer reports cell + bulk edits to the AppState's
         # ChangeLog so the panel below shows a unified history that
@@ -615,6 +618,10 @@ class MainWindow(QMainWindow):
         # Operational Limits: post-LF branch I + p1/p2 change → loading
         # table + losses metric + chart need a redraw.
         self.operational_limits_tab.refresh()
+        # Pmax Visualization: needs both bus v_mag and line p1 — both
+        # come from the LF — so a refresh after a run is the only way
+        # to populate it.
+        self.pmax_visualization_tab.refresh()
 
     # ------------------------------------------------------------------
     # State → UI plumbing
@@ -645,6 +652,7 @@ class MainWindow(QMainWindow):
         self.operational_limits_tab.set_network(network)
         self.security_analysis_tab.set_network(network)
         self.short_circuit_tab.set_network(network)
+        self.pmax_visualization_tab.set_network(network)
         self.tabs.setCurrentWidget(self.map_tab)
 
     def _on_sidebar_vl_selected(self, vl_id: str) -> None:
@@ -661,6 +669,8 @@ class MainWindow(QMainWindow):
         # Mirror to the reactive-curves tab so its "Only generators in
         # VL X" checkbox label tracks the active selection.
         self.reactive_curves_tab.set_selected_vl(vl_id or None)
+        # Same for the Pmax tab's "Only lines connected to VL X" toggle.
+        self.pmax_visualization_tab.set_selected_vl(vl_id or None)
         if vl_id:
             # Both diagram tabs follow the selection; they cache by VL
             # so re-centering on tab focus is essentially free.

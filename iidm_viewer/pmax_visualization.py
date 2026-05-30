@@ -1,31 +1,98 @@
-"""Pmax transmissible visualization.
+"""Framework-agnostic core for the Pmax Visualization tab.
 
-For each transmission line: Pmax = V1 × V2 / X (MW, with V in kV, X in Ω).
-The operating ratio P/Pmax = sin(δ) reveals how close the network is to the
-steady-state stability limit (δ → 90°  ⟹  P → Pmax).
+For each transmission line: ``Pmax = V1 × V2 / X`` (MW, with V in kV,
+X in Ω). The operating ratio ``P/Pmax = sin(δ)`` reveals how close
+the network is to the steady-state stability limit (δ → 90°  ⟹  P → Pmax).
+
+This module is the framework-agnostic core each UI host (Streamlit
+``pmax_visualization_tab``, PySide6, NiceGUI) composes into its own
+widget tree. No streamlit / Qt / NiceGUI imports here — the
+Streamlit rendering + per-session caching live in
+:mod:`iidm_viewer.pmax_visualization_tab`.
+
+Public API:
+
+* :func:`compute_pmax_data` — worker-routed fetch + pure math.
+  Returns a DataFrame indexed by line id, sorted by ascending margin.
+* :func:`build_pangle_chart` — pure Plotly figure builder.
+* :func:`build_display_dataframe` — rename + round helper used by
+  every host's summary table.
+* :func:`filter_by_vl` — pure VL-touch filter for the "Only lines
+  connected to VL X" toggle.
+* :func:`ratio_color` / :func:`margin_color` — host-agnostic colour
+  classifiers (returning ``"safe"`` / ``"caution"`` / ``"warning"``)
+  so each host renders the same red / orange / green semantics.
 """
+from __future__ import annotations
+
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import streamlit as st
 
-from iidm_viewer.caches import get_buses_all, get_lines_all
-from iidm_viewer.filters import build_vl_lookup, enrich_with_joins
+from iidm_viewer.data_view import build_vl_lookup, enrich_with_joins
+from iidm_viewer.powsybl_worker import NetworkProxy, run
 
 
-def _compute_pmax_data(network) -> pd.DataFrame:
-    """Return a DataFrame with Pmax analysis for every line that has valid LF data.
+# ---------------------------------------------------------------------------
+# Display schema (shared across hosts)
+# ---------------------------------------------------------------------------
+RAW_COLUMNS: list[str] = [
+    "name",
+    "voltage_level1_id",
+    "voltage_level2_id",
+    "pmax_mw",
+    "p_actual_mw",
+    "p_pmax_ratio",
+    "delta_deg",
+    "margin_pct",
+]
+DISPLAY_COLUMNS: list[str] = [
+    "Name",
+    "VL 1",
+    "VL 2",
+    "Pmax (MW)",
+    "P (MW)",
+    "P/Pmax",
+    "δ (°)",
+    "Margin (%)",
+]
 
-    Requires a completed load flow (v_mag > 0 on both terminal buses).
-    Columns: name, voltage_level1_id, voltage_level2_id, x_ohm, v1_kv, v2_kv,
-             pmax_mw, p_actual_mw, p_pmax_ratio, delta_deg, margin_pct.
+
+# ---------------------------------------------------------------------------
+# Fetch + compute
+# ---------------------------------------------------------------------------
+def _fetch_inputs(network: NetworkProxy) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """One worker hop returning ``(lines, buses)`` with only the columns
+    Pmax needs."""
+    raw = object.__getattribute__(network, "_obj")
+
+    def _gather():
+        lines = raw.get_lines(attributes=[
+            "name", "x", "bus1_id", "bus2_id", "p1",
+            "voltage_level1_id", "voltage_level2_id",
+        ])
+        buses = raw.get_buses(attributes=["v_mag"])
+        return lines, buses
+
+    return run(_gather)
+
+
+def compute_pmax_data(network: NetworkProxy) -> pd.DataFrame:
+    """Return a DataFrame with Pmax analysis for every line that has
+    valid LF data.
+
+    Requires a completed load flow (``v_mag > 0`` on both terminal
+    buses). Columns: ``name``, ``voltage_level1_id``, ``voltage_level2_id``,
+    ``x_ohm``, ``v1_kv``, ``v2_kv``, ``pmax_mw``, ``p_actual_mw``,
+    ``p_pmax_ratio``, ``delta_deg``, ``margin_pct``.
+
+    Indexed by ``line_id``, sorted by ascending ``margin_pct`` so the
+    "most at risk" lines bubble to the top.
     """
-    lines = get_lines_all(network)
-    if lines.empty:
-        return pd.DataFrame()
-
-    buses = get_buses_all(network)
-    if buses.empty:
+    lines, buses = _fetch_inputs(network)
+    if lines.empty or buses.empty:
         return pd.DataFrame()
 
     vl_lookup = build_vl_lookup(network)
@@ -84,7 +151,76 @@ def _compute_pmax_data(network) -> pd.DataFrame:
     return df.sort_values("margin_pct", ascending=True)
 
 
-def _build_pangle_chart(line_id: str, row: pd.Series) -> go.Figure:
+# ---------------------------------------------------------------------------
+# Pure DataFrame helpers
+# ---------------------------------------------------------------------------
+def filter_by_vl(df: pd.DataFrame, vl_id: Optional[str]) -> pd.DataFrame:
+    """Return the rows whose endpoints include *vl_id*.
+
+    Empty *vl_id* or an empty frame returns *df* unchanged. The
+    callers gate the "Only lines connected to VL X" toggle on a
+    non-empty result first.
+    """
+    if not vl_id or df.empty:
+        return df
+    mask = (
+        (df["voltage_level1_id"] == vl_id)
+        | (df["voltage_level2_id"] == vl_id)
+    )
+    return df[mask]
+
+
+def build_display_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename + round *df* into the per-host summary table.
+
+    The output preserves the index (line id) and uses
+    :data:`DISPLAY_COLUMNS` for headers — same order across hosts.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=DISPLAY_COLUMNS)
+    show = df[RAW_COLUMNS].copy()
+    show.columns = DISPLAY_COLUMNS
+    show["Pmax (MW)"] = show["Pmax (MW)"].round(1)
+    show["P (MW)"] = show["P (MW)"].round(1)
+    show["P/Pmax"] = show["P/Pmax"].round(3)
+    show["δ (°)"] = show["δ (°)"].round(1)
+    show["Margin (%)"] = show["Margin (%)"].round(1)
+    return show
+
+
+# ---------------------------------------------------------------------------
+# Colour classifiers (host-agnostic semantics)
+# ---------------------------------------------------------------------------
+def ratio_color(value) -> str:
+    """Return one of ``"safe"`` / ``"caution"`` / ``"warning"`` /
+    ``"unknown"`` for a P/Pmax ratio. Each host maps these to its own
+    theme."""
+    if value is None or pd.isna(value):
+        return "unknown"
+    if value >= 0.8:
+        return "warning"
+    if value >= 0.6:
+        return "caution"
+    return "safe"
+
+
+def margin_color(value) -> str:
+    """Return one of ``"safe"`` / ``"caution"`` / ``"warning"`` /
+    ``"unknown"`` for a margin %, same semantics as
+    :func:`ratio_color` (margin ≤ 20 % is warning, ≤ 40 % is caution)."""
+    if value is None or pd.isna(value):
+        return "unknown"
+    if value <= 20:
+        return "warning"
+    if value <= 40:
+        return "caution"
+    return "safe"
+
+
+# ---------------------------------------------------------------------------
+# Plotly chart builder (pure)
+# ---------------------------------------------------------------------------
+def build_pangle_chart(line_id: str, row: pd.Series) -> go.Figure:
     """Return a Plotly figure showing the P-δ characteristic for one line."""
     pmax = row["pmax_mw"]
     p_actual = row["p_actual_mw"]
@@ -134,9 +270,12 @@ def _build_pangle_chart(line_id: str, row: pd.Series) -> go.Figure:
 
     # Operating point
     if pd.notna(delta_deg) and pd.notna(p_actual) and p_actual > 0:
-        op_color = "red" if pd.notna(ratio) and ratio >= 0.8 else (
-            "orange" if pd.notna(ratio) and ratio >= 0.6 else "green"
-        )
+        kind = ratio_color(ratio)
+        op_color = {
+            "warning": "red",
+            "caution": "orange",
+            "safe": "green",
+        }.get(kind, "grey")
         fig.add_trace(go.Scatter(
             x=[delta_deg],
             y=[p_actual],
@@ -163,104 +302,10 @@ def _build_pangle_chart(line_id: str, row: pd.Series) -> go.Figure:
     return fig
 
 
-def render_pmax_visualization(network, selected_vl):
-    st.caption(
-        "For each line: **Pmax = V₁ × V₂ / X**  (V in kV, X in Ω, result in MW). "
-        "The ratio **P/Pmax = sin(δ)** shows proximity to the steady-state "
-        "stability limit — the operating point reaches the limit when δ = 90°."
-    )
-
-    pmax_df = _compute_pmax_data(network)
-
-    if pmax_df.empty:
-        st.info(
-            "No data available. Make sure a load flow has been run and the "
-            "network contains transmission lines."
-        )
-        return
-
-    # Optional VL filter
-    if selected_vl:
-        vl_mask = (
-            (pmax_df["voltage_level1_id"] == selected_vl)
-            | (pmax_df["voltage_level2_id"] == selected_vl)
-        )
-        vl_subset = pmax_df[vl_mask]
-        if not vl_subset.empty:
-            only_vl = st.checkbox(
-                f"Only lines connected to VL {selected_vl}",
-                value=False,
-                key="pmax_only_vl",
-            )
-            if only_vl:
-                pmax_df = vl_subset
-
-    # --- Summary table ---
-    st.subheader("Lines sorted by proximity to stability limit")
-
-    show = pmax_df[[
-        "name", "voltage_level1_id", "voltage_level2_id",
-        "pmax_mw", "p_actual_mw", "p_pmax_ratio", "delta_deg", "margin_pct",
-    ]].copy()
-    show.columns = [
-        "Name", "VL 1", "VL 2",
-        "Pmax (MW)", "P (MW)", "P/Pmax", "δ (°)", "Margin (%)",
-    ]
-    show["Pmax (MW)"] = show["Pmax (MW)"].round(1)
-    show["P (MW)"] = show["P (MW)"].round(1)
-    show["P/Pmax"] = show["P/Pmax"].round(3)
-    show["δ (°)"] = show["δ (°)"].round(1)
-    show["Margin (%)"] = show["Margin (%)"].round(1)
-
-    def _color_ratio(val):
-        if pd.isna(val):
-            return ""
-        if val >= 0.8:
-            return "background-color: #ff4b4b; color: white"
-        if val >= 0.6:
-            return "background-color: #ffa500"
-        return ""
-
-    def _color_margin(val):
-        if pd.isna(val):
-            return ""
-        if val <= 20:
-            return "background-color: #ff4b4b; color: white"
-        if val <= 40:
-            return "background-color: #ffa500"
-        return ""
-
-    styled = show.style.map(_color_ratio, subset=["P/Pmax"]).map(
-        _color_margin, subset=["Margin (%)"]
-    )
-    st.dataframe(styled, use_container_width=True)
-
-    # --- Per-line detail ---
-    st.subheader("Power-angle characteristic")
-
-    line_ids = pmax_df.index.tolist()
-    selected_line = st.selectbox(
-        "Select line", options=line_ids, key="pmax_line_select"
-    )
-
-    if selected_line and selected_line in pmax_df.index:
-        row = pmax_df.loc[selected_line]
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Pmax", f"{row['pmax_mw']:.1f} MW")
-        c2.metric("P actual", f"{row['p_actual_mw']:.1f} MW")
-        ratio_val = row["p_pmax_ratio"]
-        margin_val = row["margin_pct"]
-        c3.metric(
-            "P/Pmax",
-            f"{ratio_val:.1%}" if pd.notna(ratio_val) else "N/A",
-            delta=f"{margin_val:.1f}% margin" if pd.notna(margin_val) else None,
-            delta_color="normal" if pd.notna(ratio_val) and ratio_val < 0.8 else "inverse",
-        )
-        c4.metric(
-            "δ operating",
-            f"{row['delta_deg']:.1f}°" if pd.notna(row["delta_deg"]) else "N/A",
-        )
-
-        fig = _build_pangle_chart(selected_line, row)
-        st.plotly_chart(fig, use_container_width=True)
+# ---------------------------------------------------------------------------
+# Back-compat aliases (existing tests + Streamlit module import these
+# leading-underscore names — keep them so the rename is silent for
+# external callers).
+# ---------------------------------------------------------------------------
+_compute_pmax_data = compute_pmax_data
+_build_pangle_chart = build_pangle_chart

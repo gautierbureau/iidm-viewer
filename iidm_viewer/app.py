@@ -27,7 +27,7 @@ from iidm_viewer.extensions_explorer import render_extensions_explorer
 from iidm_viewer.reactive_curves_tab import render_reactive_curves
 from iidm_viewer.operational_limits_tab import render_operational_limits
 from iidm_viewer.network_map import render_network_map
-from iidm_viewer.pmax_visualization import render_pmax_visualization
+from iidm_viewer.pmax_visualization_tab import render_pmax_visualization
 from iidm_viewer.voltage_analysis import render_voltage_analysis
 from iidm_viewer.injection_map import render_injection_map
 from iidm_viewer.security_analysis_tab import render_security_analysis
