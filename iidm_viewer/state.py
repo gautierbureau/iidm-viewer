@@ -665,143 +665,16 @@ from iidm_viewer.security_analysis import (  # noqa: F401, E402
 
 
 # --- Short Circuit Analysis ---
-
-def build_bus_faults(
-    network,
-    nominal_v_set: set | None = None,
-    fault_type: str = "THREE_PHASE",
-) -> list[dict]:
-    """Build a bus-fault definition for every bus, optionally filtered by nominal voltage.
-
-    Both the bus table and the VL table are fetched in a single worker call.
-
-    Returns list of {"id": "SC_<bus_id>", "element_id": bus_id, "fault_type": fault_type}.
-    """
-    raw = object.__getattribute__(network, "_obj")
-
-    def _gather():
-        buses = raw.get_buses(attributes=["voltage_level_id"])
-        vl_df = raw.get_voltage_levels(attributes=["nominal_v"]) if nominal_v_set else None
-        return buses, vl_df
-
-    buses, vl_df = run(_gather)
-
-    if buses.empty:
-        return []
-
-    if nominal_v_set and vl_df is not None and not vl_df.empty:
-        def _matches(row):
-            vl_id = row.get("voltage_level_id")
-            if vl_id and vl_id in vl_df.index:
-                return vl_df.at[vl_id, "nominal_v"] in nominal_v_set
-            return False
-        buses = buses[buses.apply(_matches, axis=1)]
-
-    return [
-        {"id": f"SC_{bid}", "element_id": bid, "fault_type": fault_type}
-        for bid in buses.index
-    ]
-
-
-def run_short_circuit_analysis(network, faults: list[dict], sc_params: dict | None = None) -> dict:
-    """Run short circuit analysis on the worker thread.
-
-    *faults* is a list of {"id": str, "element_id": bus_id, "fault_type": str} dicts
-    produced by :func:`build_bus_faults` (or any compatible builder).
-
-    *sc_params* is a plain dict of scalar options read from the main thread:
-        {
-            "study_type": "SUB_TRANSIENT" | "TRANSIENT",
-            "with_feeder_result": bool,
-            "with_limit_violations": bool,
-            "min_voltage_drop_proportional_threshold": float,
-        }
-
-    Returns a serialized dict safe for ``st.session_state``:
-        {
-            "fault_results": {fault_id: {
-                "status": str,
-                "short_circuit_power_mva": float | None,
-                "current_kA": float | None,
-                "feeder_results": DataFrame,
-                "limit_violations": DataFrame,
-            }},
-            "faults": list[dict],
-        }
-    """
-    raw = object.__getattribute__(network, "_obj")
-    sc_params = sc_params or {}
-
-    def _run_sc():
-        import pypowsybl.shortcircuit as sc
-
-        analysis = sc.create_analysis()
-        for f in faults:
-            analysis.set_bus_fault(f["id"], f["element_id"], 0.0, 0.0)
-
-        params = sc.Parameters(
-            study_type=sc.ShortCircuitStudyType.__members__.get(
-                sc_params.get("study_type", "SUB_TRANSIENT"),
-                sc.ShortCircuitStudyType.SUB_TRANSIENT,
-            ),
-            with_feeder_result=sc_params.get("with_feeder_result", True),
-            with_limit_violations=sc_params.get("with_limit_violations", True),
-            min_voltage_drop_proportional_threshold=float(
-                sc_params.get("min_voltage_drop_proportional_threshold", 0.0)
-            ),
-        )
-
-        result = analysis.run(raw, parameters=params)
-
-        # Serialize all results before they leave the worker thread
-        fr_df = result.fault_results          # DataFrame indexed by fault_id
-        feeder_df_all = result.feeder_results  # flat DataFrame, may be multi-indexed
-        viol_df_all = result.limit_violations  # flat DataFrame, may be multi-indexed
-
-        def _filter_by_fault(df: pd.DataFrame, fid: str) -> pd.DataFrame:
-            if df.empty:
-                return pd.DataFrame()
-            try:
-                if isinstance(df.index, pd.MultiIndex):
-                    lvl_vals = df.index.get_level_values(0)
-                    return df[lvl_vals == fid].reset_index(drop=True)
-                return df[df.index == fid].reset_index(drop=True)
-            except Exception:
-                return pd.DataFrame()
-
-        fault_results: dict = {}
-        for f in faults:
-            fid = f["id"]
-            if fid in fr_df.index:
-                row = fr_df.loc[fid]
-                status_val = row.get("status", "UNKNOWN")
-                status_str = status_val.name if hasattr(status_val, "name") else str(status_val)
-                pwr_raw = row.get("short_circuit_power", None)
-                pwr = float(pwr_raw) if pwr_raw is not None and pd.notna(pwr_raw) else None
-                cur_raw = row.get("current", None)
-                cur_a = float(cur_raw) if cur_raw is not None and pd.notna(cur_raw) else None
-                cur_ka = cur_a / 1000.0 if cur_a is not None else None
-            else:
-                status_str = "UNKNOWN"
-                pwr = None
-                cur_ka = None
-
-            fault_results[fid] = {
-                "status": status_str,
-                "short_circuit_power_mva": pwr,
-                "current_kA": cur_ka,
-                "feeder_results": _filter_by_fault(feeder_df_all, fid),
-                "limit_violations": _filter_by_fault(viol_df_all, fid),
-            }
-
-        return {
-            "fault_results": fault_results,
-            "faults": faults,
-        }
-
-    sc_result = run(_run_sc)
-    script_recorder.record_run_short_circuit_analysis(faults, sc_params)
-    return sc_result
+#
+# Builder + runner live in the framework-agnostic
+# ``iidm_viewer.short_circuit_analysis`` module so the PySide6 and
+# NiceGUI prototypes share them. The runner already calls
+# ``script_recorder.record_run_short_circuit_analysis`` on the shared
+# side, so no Streamlit-side wrapper is needed.
+from iidm_viewer.short_circuit_analysis import (  # noqa: F401, E402
+    build_bus_faults,
+    run_short_circuit_analysis,
+)
 
 
 def compute_target_v_q_sensitivities(network, gen_ids):

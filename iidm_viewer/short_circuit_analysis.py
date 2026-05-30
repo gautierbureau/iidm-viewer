@@ -1,150 +1,309 @@
-import streamlit as st
+"""Framework-agnostic core for the Short Circuit Analysis tab.
+
+This module owns the pypowsybl integration each UI host (Streamlit
+``short_circuit_analysis_tab``, PySide6, NiceGUI) composes into its
+own widget tree. No streamlit / Qt / NiceGUI imports here — the
+Streamlit rendering + per-session caching live in
+:mod:`iidm_viewer.short_circuit_analysis_tab`.
+
+Public API:
+
+* Vocabulary constants (``FAULT_TYPES``, ``STUDY_TYPES``,
+  ``DEFAULT_HV_FLOOR_KV``) shared across hosts.
+* :func:`get_nominal_voltages` — worker-routed pypowsybl fetch. No
+  caching here; hosts wrap with their own.
+* :func:`build_bus_faults` — bus-fault list builder.
+* :func:`default_sc_params` / :func:`make_sc_params` — parameter dict
+  helpers so every host produces the same shape.
+* :func:`run_short_circuit_analysis` — the AC short-circuit runner
+  with a serialised result dict the prototypes consume.
+* :func:`build_summary_dataframe` — pure DataFrame builder that
+  flattens the result dict into the per-fault summary every host
+  renders.
+* :func:`count_failures` / :func:`count_with_violations` — the two
+  metrics the result view header shows.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
 import pandas as pd
 
-from iidm_viewer.caches import get_vl_nominal_v
-from iidm_viewer.state import build_bus_faults, run_short_circuit_analysis
+from iidm_viewer import script_recorder
+from iidm_viewer.powsybl_worker import NetworkProxy, run
 
 
-_FAULT_TYPES = ["THREE_PHASE", "SINGLE_PHASE_TO_GROUND"]
-_STUDY_TYPES = ["SUB_TRANSIENT", "TRANSIENT"]
+# ---------------------------------------------------------------------------
+# Vocabulary constants
+# ---------------------------------------------------------------------------
+FAULT_TYPES: list[str] = ["THREE_PHASE", "SINGLE_PHASE_TO_GROUND"]
+STUDY_TYPES: list[str] = ["SUB_TRANSIENT", "TRANSIENT"]
+# The Streamlit tab pre-selects every nominal voltage at or above this
+# floor — anything below is rarely interesting for a fault study.
+DEFAULT_HV_FLOOR_KV: float = 380.0
 
 
-def _get_nominal_voltages(network) -> list[float]:
-    try:
-        df = get_vl_nominal_v(network)
-        return sorted(df["nominal_v"].dropna().unique().tolist())
-    except Exception:
+def format_fault_type(value: str) -> str:
+    """Human label for a fault-type code (shared across UI hosts)."""
+    if value == "THREE_PHASE":
+        return "3-phase (THREE_PHASE)"
+    if value == "SINGLE_PHASE_TO_GROUND":
+        return "Single-phase to ground"
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Worker-routed pypowsybl fetchers
+# ---------------------------------------------------------------------------
+def get_nominal_voltages(network: NetworkProxy) -> list[float]:
+    """Return the sorted set of nominal voltages present in the network.
+
+    Worker-routed; no caching here. Hosts that need it (Streamlit) wrap
+    with their own session-state cache.
+    """
+    raw = object.__getattribute__(network, "_obj")
+
+    def _fetch() -> list[float]:
+        try:
+            df = raw.get_voltage_levels(attributes=["nominal_v"])
+            return sorted(df["nominal_v"].dropna().unique().tolist())
+        except Exception:
+            return []
+
+    return run(_fetch)
+
+
+def default_hv_preselect(voltages: list[float]) -> list[float]:
+    """Return the voltages from *voltages* at or above the HV floor."""
+    return [v for v in voltages if v >= DEFAULT_HV_FLOOR_KV]
+
+
+# ---------------------------------------------------------------------------
+# Fault list builder
+# ---------------------------------------------------------------------------
+def build_bus_faults(
+    network: NetworkProxy,
+    nominal_v_set: Optional[set] = None,
+    fault_type: str = "THREE_PHASE",
+) -> list[dict]:
+    """Build a bus-fault definition for every bus, optionally filtered by
+    nominal voltage.
+
+    Both the bus table and the VL table are fetched in a single worker
+    call. Returns ``[{"id": "SC_<bus_id>", "element_id": bus_id,
+    "fault_type": fault_type}]``.
+    """
+    raw = object.__getattribute__(network, "_obj")
+
+    def _gather():
+        buses = raw.get_buses(attributes=["voltage_level_id"])
+        vl_df = (
+            raw.get_voltage_levels(attributes=["nominal_v"])
+            if nominal_v_set else None
+        )
+        return buses, vl_df
+
+    buses, vl_df = run(_gather)
+
+    if buses.empty:
         return []
 
+    if nominal_v_set and vl_df is not None and not vl_df.empty:
+        def _matches(row):
+            vl_id = row.get("voltage_level_id")
+            if vl_id and vl_id in vl_df.index:
+                return vl_df.at[vl_id, "nominal_v"] in nominal_v_set
+            return False
+        buses = buses[buses.apply(_matches, axis=1)]
 
-def _render_config_tab(network):
-    st.subheader("Fault configuration")
+    return [
+        {"id": f"SC_{bid}", "element_id": bid, "fault_type": fault_type}
+        for bid in buses.index
+    ]
 
-    fault_type = st.selectbox(
-        "Fault type",
-        options=_FAULT_TYPES,
-        key="sc_fault_type",
-        format_func=lambda v: "3-phase (THREE_PHASE)" if v == "THREE_PHASE" else "Single-phase to ground",
-    )
 
-    nom_voltages = _get_nominal_voltages(network)
+# ---------------------------------------------------------------------------
+# Parameter helpers
+# ---------------------------------------------------------------------------
+def default_sc_params() -> dict:
+    """Return the parameter dict every host falls back to."""
+    return {
+        "study_type": "SUB_TRANSIENT",
+        "with_feeder_result": True,
+        "with_limit_violations": True,
+        "min_voltage_drop_proportional_threshold": 0.0,
+    }
 
-    if nom_voltages:
-        default_v = [v for v in nom_voltages if v >= 380.0]
-        selected_voltages = st.multiselect(
-            "Filter by nominal voltage (kV) — leave empty to include all",
-            options=nom_voltages,
-            default=default_v,
-            key="sc_nominal_v_filter",
-            format_func=lambda v: f"{v:.0f} kV",
+
+def make_sc_params(
+    study_type: str = "SUB_TRANSIENT",
+    with_feeder_result: bool = True,
+    with_limit_violations: bool = True,
+    min_voltage_drop_percent: float = 0.0,
+) -> dict:
+    """Build a parameter dict from UI-friendly values.
+
+    ``min_voltage_drop_percent`` is the human-facing 0–100 % value
+    coming off a number input; the runner expects a 0–1 ratio.
+    """
+    return {
+        "study_type": study_type,
+        "with_feeder_result": bool(with_feeder_result),
+        "with_limit_violations": bool(with_limit_violations),
+        "min_voltage_drop_proportional_threshold": float(
+            min_voltage_drop_percent
+        ) / 100.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+def run_short_circuit_analysis(
+    network: NetworkProxy,
+    faults: list[dict],
+    sc_params: Optional[dict] = None,
+) -> dict:
+    """Run short circuit analysis on the worker thread.
+
+    *faults* is a list of ``{"id": str, "element_id": bus_id,
+    "fault_type": str}`` dicts produced by :func:`build_bus_faults`
+    (or any compatible builder).
+
+    *sc_params* is a plain dict of scalar options read from the main
+    thread::
+
+        {
+            "study_type": "SUB_TRANSIENT" | "TRANSIENT",
+            "with_feeder_result": bool,
+            "with_limit_violations": bool,
+            "min_voltage_drop_proportional_threshold": float,
+        }
+
+    Returns a serialised dict safe for cross-thread / session-state
+    storage::
+
+        {
+            "fault_results": {fault_id: {
+                "status": str,
+                "short_circuit_power_mva": float | None,
+                "current_kA": float | None,
+                "feeder_results": DataFrame,
+                "limit_violations": DataFrame,
+            }},
+            "faults": list[dict],
+        }
+    """
+    raw = object.__getattribute__(network, "_obj")
+    sc_params = sc_params or {}
+
+    def _run_sc():
+        import pypowsybl.shortcircuit as sc
+
+        analysis = sc.create_analysis()
+        for f in faults:
+            analysis.set_bus_fault(f["id"], f["element_id"], 0.0, 0.0)
+
+        params = sc.Parameters(
+            study_type=sc.ShortCircuitStudyType.__members__.get(
+                sc_params.get("study_type", "SUB_TRANSIENT"),
+                sc.ShortCircuitStudyType.SUB_TRANSIENT,
+            ),
+            with_feeder_result=sc_params.get("with_feeder_result", True),
+            with_limit_violations=sc_params.get("with_limit_violations", True),
+            min_voltage_drop_proportional_threshold=float(
+                sc_params.get("min_voltage_drop_proportional_threshold", 0.0)
+            ),
         )
-    else:
-        selected_voltages = []
-        st.info("No voltage levels found in the network.")
 
-    nominal_v_set = set(selected_voltages) if selected_voltages else None
+        result = analysis.run(raw, parameters=params)
 
-    faults = build_bus_faults(network, nominal_v_set, fault_type)
+        # Serialise all results before they leave the worker thread.
+        fr_df = result.fault_results          # DataFrame indexed by fault_id
+        feeder_df_all = result.feeder_results  # may be multi-indexed
+        viol_df_all = result.limit_violations  # may be multi-indexed
 
-    if faults:
-        st.caption(f"{len(faults)} bus faults to be simulated")
-        with st.expander("Preview faults", expanded=False):
-            st.dataframe(
-                pd.DataFrame(faults),
-                use_container_width=True,
-                hide_index=True,
-            )
-    else:
-        st.info(
-            "No buses match the current filter. "
-            "Adjust the nominal voltage selection."
-        )
+        def _filter_by_fault(df: pd.DataFrame, fid: str) -> pd.DataFrame:
+            if df.empty:
+                return pd.DataFrame()
+            try:
+                if isinstance(df.index, pd.MultiIndex):
+                    lvl_vals = df.index.get_level_values(0)
+                    return df[lvl_vals == fid].reset_index(drop=True)
+                return df[df.index == fid].reset_index(drop=True)
+            except Exception:
+                return pd.DataFrame()
 
-    st.subheader("Analysis parameters")
-    col1, col2 = st.columns(2)
-    with col1:
-        study_type = st.selectbox(
-            "Study type",
-            options=_STUDY_TYPES,
-            key="sc_study_type",
-            help="SUB_TRANSIENT uses subtransient reactances (default); TRANSIENT uses transient reactances.",
-        )
-        with_feeder_result = st.checkbox(
-            "Compute feeder contributions",
-            value=True,
-            key="sc_with_feeder_result",
-            help="Break down fault current by contributing feeder.",
-        )
-    with col2:
-        with_limit_violations = st.checkbox(
-            "Check limit violations",
-            value=True,
-            key="sc_with_limit_violations",
-            help="Detect currents exceeding operational limits.",
-        )
-        min_voltage_drop = st.number_input(
-            "Min voltage drop threshold (%)",
-            min_value=0.0,
-            max_value=100.0,
-            value=0.0,
-            step=1.0,
-            key="sc_min_voltage_drop",
-            help="Only report buses with a voltage drop above this threshold.",
-        )
+        fault_results: dict = {}
+        for f in faults:
+            fid = f["id"]
+            if fid in fr_df.index:
+                row = fr_df.loc[fid]
+                status_val = row.get("status", "UNKNOWN")
+                status_str = (
+                    status_val.name
+                    if hasattr(status_val, "name")
+                    else str(status_val)
+                )
+                pwr_raw = row.get("short_circuit_power", None)
+                pwr = (
+                    float(pwr_raw)
+                    if pwr_raw is not None and pd.notna(pwr_raw)
+                    else None
+                )
+                cur_raw = row.get("current", None)
+                cur_a = (
+                    float(cur_raw)
+                    if cur_raw is not None and pd.notna(cur_raw)
+                    else None
+                )
+                cur_ka = cur_a / 1000.0 if cur_a is not None else None
+            else:
+                status_str = "UNKNOWN"
+                pwr = None
+                cur_ka = None
 
-    if faults:
-        if st.button("Run Short Circuit Analysis", key="sc_run_btn", type="primary"):
-            sc_params = {
-                "study_type": study_type,
-                "with_feeder_result": with_feeder_result,
-                "with_limit_violations": with_limit_violations,
-                "min_voltage_drop_proportional_threshold": min_voltage_drop / 100.0,
+            fault_results[fid] = {
+                "status": status_str,
+                "short_circuit_power_mva": pwr,
+                "current_kA": cur_ka,
+                "feeder_results": _filter_by_fault(feeder_df_all, fid),
+                "limit_violations": _filter_by_fault(viol_df_all, fid),
             }
-            with st.spinner(
-                f"Running short circuit analysis ({len(faults)} faults)…"
-            ):
-                try:
-                    results = run_short_circuit_analysis(network, faults, sc_params)
-                    st.session_state["_sc_results"] = results
-                    st.success(
-                        f"Short circuit analysis complete — "
-                        f"{len(faults)} faults evaluated."
-                    )
-                except Exception as exc:
-                    st.error(f"Short circuit analysis failed: {exc}")
+
+        return {
+            "fault_results": fault_results,
+            "faults": faults,
+        }
+
+    sc_result = run(_run_sc)
+    script_recorder.record_run_short_circuit_analysis(faults, sc_params)
+    return sc_result
 
 
-def _style_status(val: str) -> str:
-    if val == "CONVERGED":
-        return "color: green"
-    return "background-color: #ff4b4b; color: white"
+# ---------------------------------------------------------------------------
+# Pure summary helpers (used by every host's results view)
+# ---------------------------------------------------------------------------
+SUMMARY_COLUMNS: list[str] = [
+    "Fault",
+    "Bus",
+    "Status",
+    "Fault power (MVA)",
+    "Fault current (kA)",
+    "Violations",
+]
 
 
-def _style_violations(val: int) -> str:
-    if val == 0:
-        return ""
-    if val >= 3:
-        return "background-color: #ff4b4b; color: white"
-    return "background-color: #ffa500; color: white"
+def build_summary_dataframe(results: dict) -> pd.DataFrame:
+    """Flatten *results* into the per-fault summary every host renders.
 
-
-def _render_results_tab():
-    results = st.session_state.get("_sc_results")
-    if results is None:
-        st.info(
-            "No results yet. Configure and run a short circuit analysis "
-            "in the Configuration tab."
-        )
-        return
-
-    faults: list[dict] = results.get("faults", [])
-    fault_results: dict = results.get("fault_results", {})
-
-    if not fault_results:
-        st.info("No fault results available.")
-        return
-
-    # Build summary table
+    Columns: ``Fault``, ``Bus``, ``Status``, ``Fault power (MVA)``,
+    ``Fault current (kA)``, ``Violations``. Empty results yield an
+    empty DataFrame with the canonical columns so downstream filters /
+    table widgets can rely on the schema.
+    """
+    faults: list[dict] = results.get("faults", []) if results else []
+    fault_results: dict = results.get("fault_results", {}) if results else {}
     rows = []
     for f in faults:
         fid = f["id"]
@@ -152,102 +311,34 @@ def _render_results_tab():
         viol_df: pd.DataFrame = fr.get("limit_violations", pd.DataFrame())
         pwr = fr.get("short_circuit_power_mva")
         cur = fr.get("current_kA")
-        rows.append(
-            {
-                "Fault": fid,
-                "Bus": f["element_id"],
-                "Status": fr.get("status", "UNKNOWN"),
-                "Fault power (MVA)": round(pwr, 1) if pwr is not None else None,
-                "Fault current (kA)": round(cur, 3) if cur is not None else None,
-                "Violations": 0 if viol_df.empty else len(viol_df),
-            }
-        )
-
-    summary_df = pd.DataFrame(rows)
-
-    n_failed = int((summary_df["Status"] != "CONVERGED").sum())
-    n_with_viol = int((summary_df["Violations"] > 0).sum())
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Faults simulated", len(faults))
-    c2.metric("Failed / not converged", n_failed)
-    c3.metric("With limit violations", n_with_viol)
-
-    # Power filter slider (only when data is available)
-    pwr_col = summary_df["Fault power (MVA)"].dropna()
-    if not pwr_col.empty:
-        max_pwr = float(pwr_col.max())
-        pwr_threshold = st.slider(
-            "Show faults with fault power ≥ (MVA)",
-            min_value=0.0,
-            max_value=max(max_pwr, 1.0),
-            value=0.0,
-            key="sc_pwr_threshold",
-        )
-        mask = summary_df["Fault power (MVA)"].isna() | (
-            summary_df["Fault power (MVA)"] >= pwr_threshold
-        )
-        filtered = summary_df[mask]
-    else:
-        filtered = summary_df
-
-    styled = (
-        filtered.style
-        .map(_style_status, subset=["Status"])
-        .map(_style_violations, subset=["Violations"])
-    )
-    st.dataframe(styled, use_container_width=True, hide_index=True)
-
-    # Drill-down
-    st.subheader("Fault detail")
-
-    fault_options = [f["id"] for f in faults]
-    id_filter = st.text_input(
-        "Filter by fault ID (substring, case-insensitive)",
-        key="sc_fault_filter",
-    )
-    if id_filter:
-        fault_options = [f for f in fault_options if id_filter.lower() in f.lower()]
-
-    if not fault_options:
-        st.info("No faults match the filter.")
-        return
-
-    selected_fault = st.selectbox(
-        "Select fault",
-        options=fault_options,
-        key="sc_selected_fault",
-    )
-
-    fr = fault_results.get(selected_fault, {})
-    status = fr.get("status", "UNKNOWN")
-    pwr = fr.get("short_circuit_power_mva")
-    cur = fr.get("current_kA")
-    feeder_df: pd.DataFrame = fr.get("feeder_results", pd.DataFrame())
-    viol_df: pd.DataFrame = fr.get("limit_violations", pd.DataFrame())
-
-    status_color = "green" if status == "CONVERGED" else "red"
-    st.markdown(f"**Status:** :{status_color}[{status}]")
-
-    m1, m2 = st.columns(2)
-    m1.metric("Fault power", f"{pwr:.1f} MVA" if pwr is not None else "N/A")
-    m2.metric("Fault current", f"{cur:.3f} kA" if cur is not None else "N/A")
-
-    if not feeder_df.empty:
-        st.caption(f"Feeder contributions ({len(feeder_df)} feeders)")
-        st.dataframe(feeder_df, use_container_width=True, hide_index=True)
-
-    if not viol_df.empty:
-        st.caption(f"{len(viol_df)} limit violation(s)")
-        st.dataframe(viol_df, use_container_width=True, hide_index=True)
-    elif status == "CONVERGED":
-        st.success("No limit violations for this fault.")
+        rows.append({
+            "Fault": fid,
+            "Bus": f["element_id"],
+            "Status": fr.get("status", "UNKNOWN"),
+            "Fault power (MVA)": round(pwr, 1) if pwr is not None else None,
+            "Fault current (kA)": round(cur, 3) if cur is not None else None,
+            "Violations": 0 if viol_df.empty else len(viol_df),
+        })
+    return pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
 
 
-def render_short_circuit_analysis(network):
-    tab_config, tab_results = st.tabs(["Configuration", "Results"])
+def count_failures(summary_df: pd.DataFrame) -> int:
+    """Number of faults whose status is anything but ``CONVERGED``."""
+    if summary_df.empty:
+        return 0
+    return int((summary_df["Status"] != "CONVERGED").sum())
 
-    with tab_config:
-        _render_config_tab(network)
 
-    with tab_results:
-        _render_results_tab()
+def count_with_violations(summary_df: pd.DataFrame) -> int:
+    """Number of faults that produced at least one limit violation."""
+    if summary_df.empty:
+        return 0
+    return int((summary_df["Violations"] > 0).sum())
+
+
+def max_fault_power_mva(summary_df: pd.DataFrame) -> float:
+    """Max ``Fault power (MVA)`` in *summary_df*, ``0.0`` if empty / all-NaN."""
+    if summary_df.empty:
+        return 0.0
+    col = summary_df["Fault power (MVA)"].dropna()
+    return float(col.max()) if not col.empty else 0.0

@@ -9,7 +9,7 @@ from iidm_viewer.state import (
     load_network,
     run_short_circuit_analysis,
 )
-from iidm_viewer.short_circuit_analysis import (
+from iidm_viewer.short_circuit_analysis_tab import (
     _render_config_tab,
     _render_results_tab,
 )
@@ -96,7 +96,7 @@ def test_build_bus_faults_none_filter_equals_no_filter(xiidm_upload):
 
 def test_build_bus_faults_empty_buses_returns_empty():
     net = types.SimpleNamespace(_obj=MagicMock())
-    with patch("iidm_viewer.state.run", return_value=(pd.DataFrame(), None)):
+    with patch("iidm_viewer.short_circuit_analysis.run", return_value=(pd.DataFrame(), None)):
         result = build_bus_faults(net)
     assert result == []
 
@@ -111,7 +111,7 @@ def test_build_bus_faults_voltage_filter_no_match():
         index=pd.Index(["VL1", "VL2"], name="id"),
     )
     net = types.SimpleNamespace(_obj=MagicMock())
-    with patch("iidm_viewer.state.run", return_value=(buses, vl_df)):
+    with patch("iidm_viewer.short_circuit_analysis.run", return_value=(buses, vl_df)):
         result = build_bus_faults(net, nominal_v_set={400.0})
     assert result == []
 
@@ -126,7 +126,7 @@ def test_build_bus_faults_voltage_filter_match():
         index=pd.Index(["VL_HV", "VL_MV"], name="id"),
     )
     net = types.SimpleNamespace(_obj=MagicMock())
-    with patch("iidm_viewer.state.run", return_value=(buses, vl_df)):
+    with patch("iidm_viewer.short_circuit_analysis.run", return_value=(buses, vl_df)):
         result = build_bus_faults(net, nominal_v_set={400.0})
     assert len(result) == 1
     assert result[0]["element_id"] == "B1"
@@ -141,7 +141,7 @@ def test_build_bus_faults_no_filter_includes_all_buses():
     )
     net = types.SimpleNamespace(_obj=MagicMock())
     # nominal_v_set=None → vl_df is not fetched
-    with patch("iidm_viewer.state.run", return_value=(buses, None)):
+    with patch("iidm_viewer.short_circuit_analysis.run", return_value=(buses, None)):
         result = build_bus_faults(net)
     assert len(result) == 3
 
@@ -256,7 +256,7 @@ def _fault_results_fixture(with_violations=False):
 
 
 def test_render_results_tab_no_results_shows_info():
-    with patch("iidm_viewer.short_circuit_analysis.st") as mock_st:
+    with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
         mock_st.session_state = {}
         _render_results_tab()
     mock_st.info.assert_called_once()
@@ -264,14 +264,14 @@ def test_render_results_tab_no_results_shows_info():
 
 def test_render_results_tab_empty_fault_results_shows_info():
     results = {"faults": [], "fault_results": {}}
-    with patch("iidm_viewer.short_circuit_analysis.st") as mock_st:
+    with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sc_results": results}
         _render_results_tab()
     mock_st.info.assert_called()
 
 
 def test_render_results_tab_renders_summary_dataframe():
-    with patch("iidm_viewer.short_circuit_analysis.st") as mock_st:
+    with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sc_results": _fault_results_fixture()}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0.0
@@ -282,7 +282,7 @@ def test_render_results_tab_renders_summary_dataframe():
 
 
 def test_render_results_tab_shows_fault_metrics():
-    with patch("iidm_viewer.short_circuit_analysis.st") as mock_st:
+    with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sc_results": _fault_results_fixture()}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0.0
@@ -299,7 +299,7 @@ def test_render_results_tab_shows_fault_metrics():
 
 
 def test_render_results_tab_with_violations_renders_violation_dataframe():
-    with patch("iidm_viewer.short_circuit_analysis.st") as mock_st:
+    with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sc_results": _fault_results_fixture(with_violations=True)}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0.0
@@ -311,7 +311,7 @@ def test_render_results_tab_with_violations_renders_violation_dataframe():
 
 
 def test_render_results_tab_no_violations_calls_success():
-    with patch("iidm_viewer.short_circuit_analysis.st") as mock_st:
+    with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sc_results": _fault_results_fixture()}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0.0
@@ -322,7 +322,7 @@ def test_render_results_tab_no_violations_calls_success():
 
 
 def test_render_results_tab_id_filter_no_match_shows_info():
-    with patch("iidm_viewer.short_circuit_analysis.st") as mock_st:
+    with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
         mock_st.session_state = {"_sc_results": _fault_results_fixture()}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0.0
@@ -333,9 +333,9 @@ def test_render_results_tab_id_filter_no_match_shows_info():
 
 def test_render_config_tab_no_faults_shows_info():
     net = MagicMock()
-    with patch("iidm_viewer.short_circuit_analysis.st") as mock_st, \
-         patch("iidm_viewer.short_circuit_analysis._get_nominal_voltages", return_value=[132.0]), \
-         patch("iidm_viewer.short_circuit_analysis.build_bus_faults", return_value=[]):
+    with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.short_circuit_analysis_tab._get_nominal_voltages", return_value=[132.0]), \
+         patch("iidm_viewer.short_circuit_analysis_tab.build_bus_faults", return_value=[]):
         mock_st.selectbox.return_value = "THREE_PHASE"
         mock_st.multiselect.return_value = []
         mock_st.columns.side_effect = _mock_columns
@@ -351,9 +351,9 @@ def test_render_config_tab_with_faults_shows_caption():
     cm = MagicMock()
     cm.__enter__ = MagicMock(return_value=None)
     cm.__exit__ = MagicMock(return_value=False)
-    with patch("iidm_viewer.short_circuit_analysis.st") as mock_st, \
-         patch("iidm_viewer.short_circuit_analysis._get_nominal_voltages", return_value=[132.0]), \
-         patch("iidm_viewer.short_circuit_analysis.build_bus_faults", return_value=faults):
+    with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.short_circuit_analysis_tab._get_nominal_voltages", return_value=[132.0]), \
+         patch("iidm_viewer.short_circuit_analysis_tab.build_bus_faults", return_value=faults):
         mock_st.selectbox.return_value = "THREE_PHASE"
         mock_st.multiselect.return_value = [132.0]
         mock_st.columns.side_effect = _mock_columns
@@ -372,10 +372,10 @@ def test_render_config_tab_run_button_triggers_analysis():
     cm = MagicMock()
     cm.__enter__ = MagicMock(return_value=None)
     cm.__exit__ = MagicMock(return_value=False)
-    with patch("iidm_viewer.short_circuit_analysis.st") as mock_st, \
-         patch("iidm_viewer.short_circuit_analysis._get_nominal_voltages", return_value=[132.0]), \
-         patch("iidm_viewer.short_circuit_analysis.build_bus_faults", return_value=faults), \
-         patch("iidm_viewer.short_circuit_analysis.run_short_circuit_analysis", return_value=sc_results):
+    with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st, \
+         patch("iidm_viewer.short_circuit_analysis_tab._get_nominal_voltages", return_value=[132.0]), \
+         patch("iidm_viewer.short_circuit_analysis_tab.build_bus_faults", return_value=faults), \
+         patch("iidm_viewer.short_circuit_analysis_tab.run_short_circuit_analysis", return_value=sc_results):
         mock_st.session_state = {}
         mock_st.selectbox.return_value = "THREE_PHASE"
         mock_st.multiselect.return_value = [132.0]
