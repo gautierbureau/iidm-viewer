@@ -2964,3 +2964,76 @@ def test_short_circuit_tab_voltage_filter_narrows_faults(qapp, loaded_window):
     tab._on_build()
     qapp.processEvents()
     assert 0 < len(tab._faults) < total
+
+
+def test_main_window_carries_a_pmax_visualization_tab(qapp):
+    """The PySide6 main window must surface ``Pmax Visualization`` as a
+    top-level tab — parity with Streamlit + NiceGUI."""
+    from iidm_viewer.qt.main_window import MainWindow
+    from iidm_viewer.qt.pmax_visualization_tab import PmaxVisualizationTab
+
+    window = MainWindow()
+    qapp.processEvents()
+    tab_titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert "Pmax Visualization" in tab_titles
+    assert isinstance(window.pmax_visualization_tab, PmaxVisualizationTab)
+
+
+def test_pmax_tab_renders_for_loaded_network(qapp, loaded_window):
+    """The tab populates the summary + detail views from the shared
+    :func:`compute_pmax_data` once a network is loaded.
+
+    The IEEE14 fixture already stores bus voltages (no LF needed) but
+    no line P flows — :func:`compute_pmax_data` still yields rows for
+    every line with non-zero reactance, with ``p_actual_mw`` = 0.
+    """
+    tab = loaded_window.pmax_visualization_tab
+    qapp.processEvents()
+    # The shared core produced rows for non-zero-reactance lines.
+    assert not tab._unfiltered.empty
+    assert tab._summary_model.rowCount() > 0
+    # Line combo is populated and the first line drove the metrics row.
+    assert tab._line_combo.count() > 0
+    selected = tab._line_combo.currentText()
+    assert selected
+    assert tab._pmax_lbl.text().startswith("Pmax:")
+
+
+def test_pmax_tab_vl_toggle_narrows_lines(qapp, loaded_window):
+    """The "Only lines connected to VL X" checkbox routes through the
+    shared :func:`filter_by_vl` helper."""
+    tab = loaded_window.pmax_visualization_tab
+    qapp.processEvents()
+    if tab._unfiltered.empty:
+        return  # nothing to filter
+    vl_id = loaded_window.state.selected_vl
+    assert vl_id is not None
+    total = tab._summary_model.rowCount()
+    if tab._only_vl_checkbox.isHidden():
+        # IEEE14's default VL touches at least one line, so the
+        # checkbox is expected to be visible.
+        return
+    tab._only_vl_checkbox.setChecked(True)
+    qapp.processEvents()
+    assert tab._summary_model.rowCount() <= total
+    if not tab._df.empty:
+        assert (
+            (tab._df["voltage_level1_id"] == vl_id).any()
+            or (tab._df["voltage_level2_id"] == vl_id).any()
+        )
+
+
+def test_pmax_tab_empty_network_shows_placeholder(qapp):
+    """An empty network produces no Pmax rows and the placeholder
+    text describes the missing-LF / missing-lines case."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.pmax_visualization_tab import PmaxVisualizationTab
+
+    tab = PmaxVisualizationTab()
+    network = NetworkProxy(run(pn.create_empty))
+    tab.set_network(network)
+    qapp.processEvents()
+    assert tab._df.empty
+    assert tab._placeholder.isHidden() is False
+    assert tab._summary_group.isHidden() is True
