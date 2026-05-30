@@ -31,7 +31,7 @@ from iidm_viewer.pmax_visualization import render_pmax_visualization
 from iidm_viewer.voltage_analysis import render_voltage_analysis
 from iidm_viewer.injection_map import render_injection_map
 from iidm_viewer.security_analysis_tab import render_security_analysis
-from iidm_viewer.short_circuit_analysis import render_short_circuit_analysis
+from iidm_viewer.short_circuit_analysis_tab import render_short_circuit_analysis
 from iidm_viewer.session_script import show_session_script_dialog
 
 
