@@ -45,6 +45,7 @@ from iidm_viewer.qt.reactive_curves_tab import ReactiveCurvesTab
 from iidm_viewer.qt.security_analysis_tab import SecurityAnalysisTab
 from iidm_viewer.qt.short_circuit_analysis_tab import ShortCircuitAnalysisTab
 from iidm_viewer.qt.sld_tab import SldTab
+from iidm_viewer.qt.voltage_analysis_tab import VoltageAnalysisTab
 from iidm_viewer.qt.state import AppState
 
 
@@ -278,6 +279,7 @@ class MainWindow(QMainWindow):
         self.security_analysis_tab = SecurityAnalysisTab()
         self.short_circuit_tab = ShortCircuitAnalysisTab()
         self.pmax_visualization_tab = PmaxVisualizationTab()
+        self.voltage_analysis_tab = VoltageAnalysisTab()
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.map_tab, "Network Map")
@@ -290,6 +292,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.security_analysis_tab, "Security Analysis")
         self.tabs.addTab(self.short_circuit_tab, "Short Circuit Analysis")
         self.tabs.addTab(self.pmax_visualization_tab, "Pmax Visualization")
+        self.tabs.addTab(self.voltage_analysis_tab, "Voltage Analysis")
 
         # The Data Explorer reports cell + bulk edits to the AppState's
         # ChangeLog so the panel below shows a unified history that
@@ -622,6 +625,10 @@ class MainWindow(QMainWindow):
         # come from the LF — so a refresh after a run is the only way
         # to populate it.
         self.pmax_visualization_tab.refresh()
+        # Voltage Analysis: bus v_mag + shunt/SVC q come from the LF —
+        # refresh so the summary, the per-pu drill-down, and the
+        # current-Q metrics reflect the post-LF state.
+        self.voltage_analysis_tab.refresh()
 
     # ------------------------------------------------------------------
     # State → UI plumbing
@@ -653,6 +660,7 @@ class MainWindow(QMainWindow):
         self.security_analysis_tab.set_network(network)
         self.short_circuit_tab.set_network(network)
         self.pmax_visualization_tab.set_network(network)
+        self.voltage_analysis_tab.set_network(network)
         self.tabs.setCurrentWidget(self.map_tab)
 
     def _on_sidebar_vl_selected(self, vl_id: str) -> None:

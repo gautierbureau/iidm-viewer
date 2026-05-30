@@ -3037,3 +3037,82 @@ def test_pmax_tab_empty_network_shows_placeholder(qapp):
     assert tab._df.empty
     assert tab._placeholder.isHidden() is False
     assert tab._summary_group.isHidden() is True
+
+
+# ── Voltage Analysis tab ──────────────────────────────────────────────────
+
+def test_main_window_carries_a_voltage_analysis_tab(qapp):
+    """The PySide6 main window must surface ``Voltage Analysis`` as a
+    top-level tab — parity with Streamlit + NiceGUI."""
+    from iidm_viewer.qt.main_window import MainWindow
+    from iidm_viewer.qt.voltage_analysis_tab import VoltageAnalysisTab
+
+    window = MainWindow()
+    qapp.processEvents()
+    tab_titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert "Voltage Analysis" in tab_titles
+    assert isinstance(window.voltage_analysis_tab, VoltageAnalysisTab)
+
+
+def test_voltage_analysis_tab_renders_for_loaded_network(qapp, loaded_window):
+    """The tab populates the bus summary + (when an LF has run) the
+    detail drill-down from the shared :func:`compute_voltage_analysis`."""
+    tab = loaded_window.voltage_analysis_tab
+    qapp.processEvents()
+    # IEEE14 fixture ships with solved bus voltages — no LF needed.
+    assert not tab._buses.empty
+    assert tab._summary_model.rowCount() > 0
+    if tab._lf_warning.isHidden():
+        # Has an LF → the detail picker is populated.
+        assert tab._nom_combo.count() > 0
+        assert tab._detail_model.rowCount() > 0
+
+
+def test_voltage_analysis_threshold_change_repaints_detail(qapp, loaded_window):
+    """Changing the lo/hi spin boxes routes through
+    :func:`bus_pu_classify` and updates the detail caption (out-of-band
+    count)."""
+    tab = loaded_window.voltage_analysis_tab
+    qapp.processEvents()
+    if tab._lf_warning.isHidden() is False:
+        return  # no LF — detail is hidden, nothing to validate
+    # Force a narrow band so every IEEE14 bus is out of band.
+    tab._lo_spin.setValue(1.5)
+    tab._hi_spin.setValue(1.6)
+    qapp.processEvents()
+    caption = tab._detail_caption.text()
+    assert "outside" in caption
+
+
+def test_voltage_analysis_tab_empty_network_shows_placeholder(qapp):
+    """An empty network produces no buses and the placeholder text
+    describes the missing-data case."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.voltage_analysis_tab import VoltageAnalysisTab
+
+    tab = VoltageAnalysisTab()
+    network = NetworkProxy(run(pn.create_empty))
+    tab.set_network(network)
+    qapp.processEvents()
+    assert tab._buses.empty
+    assert tab._placeholder.isHidden() is False
+    assert tab._bus_group.isHidden() is True
+
+
+def test_voltage_analysis_svc_section_populates_for_four_substations(qapp):
+    """The four-substations fixture ships with one SVC; the tab must
+    surface it in the SVC table after :func:`compute_voltage_analysis`."""
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.voltage_analysis_tab import VoltageAnalysisTab
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    tab = VoltageAnalysisTab()
+    network = NetworkProxy(run(_make))
+    tab.set_network(network)
+    qapp.processEvents()
+    assert not tab._svcs.empty
+    assert tab._svc_model.rowCount() >= 1
