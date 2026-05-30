@@ -2830,3 +2830,137 @@ def test_security_analysis_tab_empty_network_shows_placeholder(qapp):
     assert tab._contingencies == []
     assert tab._run_btn.isEnabled() is False
     assert tab._results is None
+
+
+def test_main_window_carries_a_short_circuit_analysis_tab(qapp):
+    """The PySide6 main window must surface ``Short Circuit Analysis``
+    as a top-level tab — parity with Streamlit + NiceGUI."""
+    from iidm_viewer.qt.main_window import MainWindow
+    from iidm_viewer.qt.short_circuit_analysis_tab import ShortCircuitAnalysisTab
+
+    window = MainWindow()
+    qapp.processEvents()
+    tab_titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert "Short Circuit Analysis" in tab_titles
+    assert isinstance(window.short_circuit_tab, ShortCircuitAnalysisTab)
+
+
+def test_short_circuit_tab_builds_faults_and_renders_results(qapp, loaded_window):
+    """The tab builds the fault list via the shared builder and renders
+    a mocked runner's result into the summary + drill-down models.
+
+    ``run_short_circuit_analysis`` is mocked with a canned result so
+    this test doesn't re-run heavy pypowsybl-shortcircuit C calls in a
+    QtWebEngine-heavy process. The real runner is integration-tested
+    in ``tests/test_short_circuit_analysis.py``.
+    """
+    from unittest.mock import patch
+
+    import pandas as pd
+
+    tab = loaded_window.short_circuit_tab
+    qapp.processEvents()
+    assert tab._config_group.isHidden() is False
+
+    # Build the fault list against the real IEEE14 network.
+    tab._on_build()
+    qapp.processEvents()
+    assert tab._faults and tab._faults[0]["id"].startswith("SC_")
+    assert tab._run_btn.isEnabled() is True
+
+    fid = tab._faults[0]["id"]
+    bus = tab._faults[0]["element_id"]
+    fake_result = {
+        "faults": tab._faults[:2],
+        "fault_results": {
+            fid: {
+                "status": "CONVERGED",
+                "short_circuit_power_mva": 1500.0,
+                "current_kA": 2.165,
+                "feeder_results": pd.DataFrame({
+                    "feeder": ["L1-2-1"], "current": [1.234],
+                }),
+                "limit_violations": pd.DataFrame({
+                    "subject_id": [bus],
+                    "limit_name": ["permanent"],
+                    "value": [15000.0],
+                }),
+            },
+            tab._faults[1]["id"]: {
+                "status": "FAILED",
+                "short_circuit_power_mva": None,
+                "current_kA": None,
+                "feeder_results": pd.DataFrame(),
+                "limit_violations": pd.DataFrame(),
+            },
+        },
+    }
+    with patch(
+        "iidm_viewer.qt.short_circuit_analysis_tab.run_short_circuit_analysis",
+        return_value=fake_result,
+    ) as mock_run:
+        tab._on_run()
+        qapp.processEvents()
+    mock_run.assert_called_once()
+    # Parameter dict carries the user's selections (defaults here).
+    sc_params = mock_run.call_args.args[2]
+    assert sc_params["study_type"] == "SUB_TRANSIENT"
+    assert sc_params["with_feeder_result"] is True
+    # Results card became visible + the summary model has 2 rows.
+    assert tab._results is fake_result
+    assert tab._results_group.isHidden() is False
+    assert tab._summary_model.rowCount() == 2
+    assert "Faults simulated: 2" in tab._metric_simulated.text()
+    assert "Failed: 1" in tab._metric_failed.text()
+    assert "With violations: 1" in tab._metric_violations.text()
+    # Drill-down combo populated; selecting it shows feeder + violations.
+    assert tab._fault_combo.count() == 2
+    tab._on_fault_selected(fid)
+    qapp.processEvents()
+    assert "CONVERGED" in tab._detail_status_lbl.text()
+    assert tab._feeder_model.rowCount() == 1
+    assert tab._violations_model.rowCount() == 1
+
+
+def test_short_circuit_tab_empty_network_disables_run(qapp):
+    """An empty network has no buses → build yields no faults and the
+    Run button stays disabled."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.short_circuit_analysis_tab import ShortCircuitAnalysisTab
+
+    tab = ShortCircuitAnalysisTab()
+    network = NetworkProxy(run(pn.create_empty))
+    tab.set_network(network)
+    qapp.processEvents()
+    assert tab._placeholder.isHidden() is True  # config form still visible
+    tab._on_build()
+    qapp.processEvents()
+    assert tab._faults == []
+    assert tab._run_btn.isEnabled() is False
+    assert tab._results is None
+
+
+def test_short_circuit_tab_voltage_filter_narrows_faults(qapp, loaded_window):
+    """Selecting a single voltage slice must narrow the fault list
+    versus the all-voltages build."""
+    tab = loaded_window.short_circuit_tab
+    qapp.processEvents()
+
+    # Unselected build = no filter → every bus.
+    for i in range(tab._nominal_v_list.count()):
+        tab._nominal_v_list.item(i).setSelected(False)
+    tab._on_build()
+    qapp.processEvents()
+    total = len(tab._faults)
+    assert total > 0
+
+    # Select only the first voltage entry → strict subset.
+    assert tab._nominal_v_list.count() > 1, (
+        "Need at least 2 voltage slices for a meaningful filter test"
+    )
+    tab._nominal_v_list.item(0).setSelected(True)
+    qapp.processEvents()
+    tab._on_build()
+    qapp.processEvents()
+    assert 0 < len(tab._faults) < total

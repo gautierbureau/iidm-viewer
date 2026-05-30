@@ -5214,6 +5214,338 @@ def _build_security_analysis():
     return refresh
 
 
+def _build_short_circuit_analysis():
+    """Materialise the "Short Circuit Analysis" tab.
+
+    Ports the Streamlit Short Circuit Analysis tab: bus-fault list
+    (filtered by nominal voltage), analysis parameters form, an AC
+    run, and a results view (per-fault summary + drill-down with
+    feeder contributions and limit violations).
+
+    All pypowsybl work goes through the shared
+    :mod:`iidm_viewer.short_circuit_analysis` core so the Streamlit,
+    PySide6 and NiceGUI hosts stay in lockstep.
+
+    Returns a closure the page-wide listeners call on network change.
+    """
+    import pandas as pd
+
+    from iidm_viewer.short_circuit_analysis import (
+        FAULT_TYPES,
+        STUDY_TYPES,
+        build_bus_faults,
+        build_summary_dataframe,
+        count_failures,
+        count_with_violations,
+        default_hv_preselect,
+        format_fault_type,
+        get_nominal_voltages,
+        make_sc_params,
+        max_fault_power_mva,
+        run_short_circuit_analysis,
+    )
+
+    state: dict = {
+        "faults": [],
+        "results": None,
+        "summary_df": pd.DataFrame(),
+        "fault_options": [],
+    }
+
+    placeholder = ui.label(
+        "Load a network to run a short circuit analysis."
+    ).classes("text-caption q-pa-md")
+
+    config_card = ui.card().classes("w-full q-pa-sm")
+    with config_card:
+        ui.label("Fault configuration").classes("text-h6")
+        with ui.row().classes("items-center w-full"):
+            ui.label("Fault type:")
+            fault_type_select = ui.select(
+                options={ft: format_fault_type(ft) for ft in FAULT_TYPES},
+                value=FAULT_TYPES[0],
+            ).props("dense outlined").classes("w-64")
+        with ui.row().classes("items-center w-full"):
+            ui.label("Nominal voltage filter (kV, leave empty for all):")
+            nominal_v_select = ui.select(
+                options=[], value=[], multiple=True,
+            ).props("dense outlined").classes("w-72")
+        with ui.row().classes("items-center w-full"):
+            build_btn = ui.button("Build fault list")
+            fault_count_lbl = ui.label("").classes("text-caption q-ml-md")
+
+    params_card = ui.card().classes("w-full q-pa-sm")
+    with params_card:
+        ui.label("Analysis parameters").classes("text-h6")
+        with ui.row().classes("items-center w-full"):
+            study_select = ui.select(
+                options=list(STUDY_TYPES), value=STUDY_TYPES[0],
+            ).props("dense outlined").classes("w-48") \
+             .tooltip(
+                "SUB_TRANSIENT uses subtransient reactances (default); "
+                "TRANSIENT uses transient reactances."
+            )
+            feeder_chk = ui.checkbox(
+                "Compute feeder contributions", value=True,
+            ).tooltip("Break down fault current by contributing feeder.")
+            violations_chk = ui.checkbox(
+                "Check limit violations", value=True,
+            ).tooltip("Detect currents exceeding operational limits.")
+        with ui.row().classes("items-center w-full"):
+            min_drop_input = ui.number(
+                "Min voltage drop (%)", value=0.0,
+                min=0.0, max=100.0, step=1.0,
+            ).props("dense outlined").classes("w-40") \
+             .tooltip(
+                "Only report buses with a voltage drop above this threshold."
+            )
+
+    run_row = ui.row().classes("items-center w-full q-pa-sm")
+    with run_row:
+        run_btn = ui.button("Run short circuit analysis")
+        run_status = ui.label("").classes("text-caption q-ml-md")
+
+    results_card = ui.card().classes("w-full q-pa-sm")
+    with results_card:
+        ui.label("Results").classes("text-h6")
+        with ui.row().classes("items-center w-full"):
+            metric_simulated = ui.label("Faults simulated: 0") \
+                .classes("text-subtitle2 q-mr-md")
+            metric_failed = ui.label("Failed: 0") \
+                .classes("text-subtitle2 q-mr-md")
+            metric_violations = ui.label("With violations: 0") \
+                .classes("text-subtitle2")
+        slider_row = ui.row().classes("items-center w-full")
+        with slider_row:
+            ui.label("Show faults with fault power ≥")
+            pwr_slider = ui.slider(
+                min=0, max=1, value=0, step=1,
+            ).props("label-always").classes("flex-grow")
+            ui.label("MVA")
+        slider_row.visible = False
+        summary_grid = ui.aggrid({
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }).classes("w-full").style("height: 240px")
+
+        ui.label("Fault detail").classes("text-subtitle1 q-mt-md")
+        with ui.row().classes("items-center w-full"):
+            fault_filter_input = ui.input(
+                placeholder="Filter by fault ID (substring, case-insensitive)",
+            ).props("dense outlined clearable").classes("w-96")
+            fault_select = ui.select(options=[], value=None) \
+                .props("dense outlined").classes("w-64")
+        detail_status_lbl = ui.label("").classes("text-subtitle2")
+        with ui.row().classes("items-center w-full"):
+            detail_power_lbl = ui.label("Fault power: —") \
+                .classes("q-mr-md")
+            detail_current_lbl = ui.label("Fault current: —")
+        ui.label("Feeder contributions:").classes("text-caption q-mt-sm")
+        feeder_grid = ui.aggrid({
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }).classes("w-full").style("height: 180px")
+        ui.label("Limit violations:").classes("text-caption q-mt-sm")
+        violations_grid = ui.aggrid({
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }).classes("w-full").style("height: 220px")
+    results_card.visible = False
+
+    def _set_grid_from_df(grid, df: pd.DataFrame) -> None:
+        if df is None or df.empty:
+            grid.options.update({
+                "columnDefs": [], "rowData": [],
+                "defaultColDef": _DEFAULT_COL_DEF,
+            })
+        else:
+            grid.options.update({
+                "columnDefs": [
+                    {"field": str(c), "headerName": str(c)} for c in df.columns
+                ],
+                "rowData": df.fillna("").astype(str).to_dict("records"),
+                "defaultColDef": _DEFAULT_COL_DEF,
+            })
+        grid.update()
+
+    def _apply_pwr_filter() -> None:
+        df = state["summary_df"]
+        if df.empty:
+            _set_grid_from_df(summary_grid, df)
+            return
+        threshold = float(pwr_slider.value or 0)
+        if threshold <= 0:
+            _set_grid_from_df(summary_grid, df)
+            return
+        mask = df["Fault power (MVA)"].isna() | (
+            df["Fault power (MVA)"] >= threshold
+        )
+        _set_grid_from_df(summary_grid, df[mask].reset_index(drop=True))
+
+    pwr_slider.on(
+        "update:model-value", lambda _e=None: _apply_pwr_filter(),
+    )
+
+    def _render_fault_detail(fid):
+        if not fid or state["results"] is None:
+            detail_status_lbl.set_text("")
+            detail_power_lbl.set_text("Fault power: —")
+            detail_current_lbl.set_text("Fault current: —")
+            _set_grid_from_df(feeder_grid, pd.DataFrame())
+            _set_grid_from_df(violations_grid, pd.DataFrame())
+            return
+        fr = state["results"].get("fault_results", {}).get(fid, {})
+        status = fr.get("status", "UNKNOWN")
+        detail_status_lbl.set_text(f"Status: {status}")
+        pwr = fr.get("short_circuit_power_mva")
+        cur = fr.get("current_kA")
+        detail_power_lbl.set_text(
+            f"Fault power: {pwr:.1f} MVA" if pwr is not None
+            else "Fault power: —"
+        )
+        detail_current_lbl.set_text(
+            f"Fault current: {cur:.3f} kA" if cur is not None
+            else "Fault current: —"
+        )
+        _set_grid_from_df(feeder_grid, fr.get("feeder_results", pd.DataFrame()))
+        _set_grid_from_df(violations_grid, fr.get("limit_violations", pd.DataFrame()))
+
+    def _refresh_fault_options() -> None:
+        sub = (fault_filter_input.value or "").strip().lower()
+        if sub:
+            opts = [fid for fid in state["fault_options"] if sub in fid.lower()]
+        else:
+            opts = list(state["fault_options"])
+        fault_select.options = opts
+        if opts:
+            new_value = (
+                fault_select.value if fault_select.value in opts else opts[0]
+            )
+            fault_select.value = new_value
+        else:
+            fault_select.value = None
+        fault_select.update()
+        _render_fault_detail(fault_select.value)
+
+    fault_filter_input.on(
+        "update:model-value", lambda _e=None: _refresh_fault_options(),
+    )
+    fault_select.on(
+        "update:model-value", lambda _e=None: _render_fault_detail(fault_select.value),
+    )
+
+    def _render_results() -> None:
+        results = state["results"]
+        if results is None:
+            results_card.visible = False
+            state["summary_df"] = pd.DataFrame()
+            state["fault_options"] = []
+            return
+        results_card.visible = True
+        summary_df = build_summary_dataframe(results)
+        state["summary_df"] = summary_df
+        faults = results.get("faults", [])
+        metric_simulated.set_text(f"Faults simulated: {len(faults)}")
+        metric_failed.set_text(f"Failed: {count_failures(summary_df)}")
+        metric_violations.set_text(
+            f"With violations: {count_with_violations(summary_df)}"
+        )
+        max_pwr = int(round(max_fault_power_mva(summary_df)))
+        slider_row.visible = max_pwr > 0
+        pwr_slider.max = max(max_pwr, 1)
+        pwr_slider.value = 0
+        pwr_slider.update()
+        _apply_pwr_filter()
+        state["fault_options"] = [f["id"] for f in faults]
+        _refresh_fault_options()
+
+    async def _on_build() -> None:
+        if _state.network is None:
+            return
+        fault_type = fault_type_select.value or FAULT_TYPES[0]
+        chosen = nominal_v_select.value or []
+        nominal_v_set = {float(v) for v in chosen} if chosen else None
+        fault_count_lbl.set_text("Building fault list…")
+        try:
+            faults = await asyncio.to_thread(
+                build_bus_faults, _state.network, nominal_v_set, fault_type,
+            )
+        except Exception as exc:
+            fault_count_lbl.set_text(f"Build failed: {exc}")
+            return
+        state["faults"] = faults
+        n = len(faults)
+        fault_count_lbl.set_text(
+            f"{n} bus fault{'' if n == 1 else 's'} ready."
+        )
+        run_btn.set_enabled(n > 0)
+
+    build_btn.on_click(_on_build)
+
+    async def _on_run() -> None:
+        if _state.network is None or not state["faults"]:
+            run_status.set_text("Build a fault list first.")
+            return
+        sc_params = make_sc_params(
+            study_type=study_select.value or STUDY_TYPES[0],
+            with_feeder_result=feeder_chk.value,
+            with_limit_violations=violations_chk.value,
+            min_voltage_drop_percent=float(min_drop_input.value or 0),
+        )
+        n = len(state["faults"])
+        run_status.set_text(
+            f"Running short circuit analysis on {n} fault"
+            f"{'' if n == 1 else 's'}…"
+        )
+        try:
+            results = await asyncio.to_thread(
+                run_short_circuit_analysis,
+                _state.network, state["faults"], sc_params,
+            )
+        except Exception as exc:
+            run_status.set_text(f"Short circuit analysis failed: {exc}")
+            return
+        state["results"] = results
+        run_status.set_text(
+            f"Done — {n} fault{'' if n == 1 else 's'} analysed."
+        )
+        _render_results()
+
+    run_btn.on_click(_on_run)
+
+    def refresh() -> None:
+        if _state.network is None:
+            placeholder.visible = True
+            config_card.visible = False
+            params_card.visible = False
+            run_row.visible = False
+            results_card.visible = False
+            state["results"] = None
+            state["faults"] = []
+            return
+        placeholder.visible = False
+        config_card.visible = True
+        params_card.visible = True
+        run_row.visible = True
+        try:
+            voltages = get_nominal_voltages(_state.network)
+        except Exception:
+            voltages = []
+        preselect = default_hv_preselect(voltages)
+        nominal_v_select.options = [str(v) for v in voltages]
+        nominal_v_select.value = [str(v) for v in preselect]
+        nominal_v_select.update()
+        fault_count_lbl.set_text("")
+        run_status.set_text("")
+        run_btn.set_enabled(False)
+        state["faults"] = []
+        state["results"] = None
+        _render_results()
+
+    refresh()
+    return refresh
+
+
 def _cast_value_for_col(series, raw):
     """Best-effort cast for a user-typed cell value, matching the
     source DataFrame's column dtype."""
@@ -5531,6 +5863,7 @@ def main_page() -> None:
         reactive_curves_tab = ui.tab("Reactive Capability Curves")
         operational_limits_tab = ui.tab("Operational Limits")
         security_analysis_tab = ui.tab("Security Analysis")
+        short_circuit_tab = ui.tab("Short Circuit Analysis")
     panels = ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")
     with panels:
         with ui.tab_panel(map_tab).classes("q-pa-none w-full"):
@@ -5611,6 +5944,8 @@ def main_page() -> None:
             refresh_operational_limits = _build_operational_limits()
         with ui.tab_panel(security_analysis_tab).classes("w-full"):
             refresh_security_analysis = _build_security_analysis()
+        with ui.tab_panel(short_circuit_tab).classes("w-full"):
+            refresh_short_circuit_analysis = _build_short_circuit_analysis()
 
     # ------------------------------------------------------------------
     # Cross-tab navigation: substation click on map -> SLD tab on that VL.
@@ -5641,6 +5976,7 @@ def main_page() -> None:
             refresh_reactive_curves()
             refresh_operational_limits()
             refresh_security_analysis()
+            refresh_short_circuit_analysis()
             return
         try:
             from iidm_viewer.network_loader import (
@@ -5658,6 +5994,7 @@ def main_page() -> None:
         refresh_reactive_curves()
         refresh_operational_limits()
         refresh_security_analysis()
+        refresh_short_circuit_analysis()
 
     def _update_sld_header(vl_id):
         """Refresh the VL label + Expand/Collapse button above the SLD."""
