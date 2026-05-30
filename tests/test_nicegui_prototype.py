@@ -1165,3 +1165,30 @@ def test_security_analysis_builder_uses_shared_core():
     assert "build_n2_contingencies" in src
     assert "run_security_analysis" in src
     assert "summarize_security_results" in src
+
+
+def test_short_circuit_analysis_tab_registered_in_main_page():
+    """``Short Circuit Analysis`` must be a top-level tab + its refresh
+    closure must be wired into the network-changed listener."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert 'ui.tab("Short Circuit Analysis")' in src
+    assert "refresh_short_circuit_analysis = _build_short_circuit_analysis()" in src
+    assert "refresh_short_circuit_analysis()" in src
+
+
+def test_short_circuit_analysis_builder_uses_shared_core():
+    """The NiceGUI builder must compose the shared bus-fault builder +
+    runner + summary helpers so PySide6 + Streamlit stay in sync."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_short_circuit_analysis)
+    assert "build_bus_faults" in src
+    assert "run_short_circuit_analysis" in src
+    assert "build_summary_dataframe" in src
+    assert "count_failures" in src
+    assert "count_with_violations" in src
+    assert "make_sc_params" in src
