@@ -134,13 +134,14 @@ def test_nad_depth_change_invalidates_for_new_key(qapp, loaded_window):
 
 def test_data_explorer_renders_voltage_levels_on_load(qapp, loaded_window):
     """After a network is loaded, the Data Explorer tab shows the
-    default component (Voltage Levels) populated with IEEE14's 14 rows.
+    default component populated with rows from the loaded network.
     """
     model = loaded_window.data_tab._model
-    # Combo defaults to the first entry, "Substations". We seed the
-    # explorer via set_network -> _refresh(<current text>) so the model
-    # is populated for whichever component is selected at load time.
-    assert loaded_window.data_tab._combo.currentText() == "Substations"
+    # Combo defaults to "Generators" (the most-edited component, picked
+    # in ``DataExplorerTab.__init__``). ``set_network`` seeds the
+    # explorer via ``_refresh(<current text>)`` so the model is populated
+    # for whichever component is selected at load time.
+    assert loaded_window.data_tab._combo.currentText() == "Generators"
     df = model.dataframe()
     assert df.shape[0] > 0
     assert df.shape[1] > 0
