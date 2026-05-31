@@ -11,6 +11,10 @@ from iidm_viewer.injection_map import (
     _grid_inj_series,
     _radius_for,
     _suggest_full_scale,
+    build_injection_map_html,
+    injection_color_scale,
+    injection_map_caption,
+    metric_unit,
 )
 from iidm_viewer.state import load_network
 
@@ -191,6 +195,106 @@ def test_extract_ieee14_has_flags_are_bool(xiidm_upload):
 
 def test_threshold_is_63kv():
     assert TRANSPORT_NOMINAL_V_THRESHOLD == 63.0
+
+
+# ── metric_unit + injection_color_scale ──────────────────────────────────────
+
+def test_metric_unit_active_and_reactive():
+    assert metric_unit("P") == "MW"
+    assert metric_unit("Q") == "MVAr"
+
+
+def test_injection_color_scale_centered_at_zero():
+    scale = injection_color_scale(500.0)
+    assert scale.center == 0.0
+    assert scale.range == 500.0
+    # Green = positive (exporter), red = negative (importer).
+    assert scale.high_rgb == (24, 150, 58)
+    assert scale.low_rgb == (199, 27, 27)
+
+
+# ── build_injection_map_html (the host-agnostic Leaflet entry point) ─────────
+
+def _ieee14_records(xiidm_upload):
+    network = load_network(xiidm_upload)
+    data = _extract_injection_data(network)
+    assert data is not None
+    return data["records"]
+
+
+def test_build_injection_map_html_returns_full_document(xiidm_upload):
+    html, transport = build_injection_map_html(
+        _ieee14_records(xiidm_upload),
+        metric="P", mode="icons", full_scale=500.0,
+    )
+    assert "<!DOCTYPE html>" in html
+    assert "leaflet" in html.lower()
+    assert transport  # non-empty
+
+
+def test_build_injection_map_html_empty_when_no_records():
+    html, transport = build_injection_map_html(
+        [], metric="P", mode="icons", full_scale=500.0,
+    )
+    assert html == ""
+    assert transport == []
+
+
+def test_build_injection_map_html_filters_below_transport_threshold():
+    """A substation with no VL ≥ 63 kV must drop out of the map."""
+    records = [{
+        "substation_id": "S_LV",
+        "substation_name": "S_LV",
+        "max_nominal_v": 20.0,
+        "nominal_v_set": [20.0],
+        "gen_p_mw": 5.0, "load_p_mw": -2.0, "inj_p_mw": 3.0,
+        "gen_q_mvar": 0.0, "load_q_mvar": 0.0, "inj_q_mvar": 0.0,
+        "gen_count": 1, "load_count": 1,
+        "lat": 45.0, "lon": 2.0,
+    }]
+    html, transport = build_injection_map_html(
+        records, metric="P", mode="icons", full_scale=500.0,
+    )
+    assert html == ""
+    assert transport == []
+
+
+def test_build_injection_map_html_supports_q_metric(xiidm_upload):
+    html, transport = build_injection_map_html(
+        _ieee14_records(xiidm_upload),
+        metric="Q", mode="gradient", full_scale=200.0,
+    )
+    assert "MVAr" in html
+    assert transport
+
+
+# ── injection_map_caption ─────────────────────────────────────────────────────
+
+def test_injection_map_caption_active_metric():
+    records = [
+        {"substation_id": "S1", "inj_p_mw": 120.0, "inj_q_mvar": 0.0,
+         "max_nominal_v": 400.0},
+        {"substation_id": "S2", "inj_p_mw": -80.0, "inj_q_mvar": 0.0,
+         "max_nominal_v": 400.0},
+        {"substation_id": "S3", "inj_p_mw": -20.0, "inj_q_mvar": 0.0,
+         "max_nominal_v": 400.0},
+    ]
+    caption = injection_map_caption(records, "P")
+    assert "3 substations" in caption
+    assert "1 exporters" in caption
+    assert "2 importers" in caption
+    assert "MW" in caption
+    # net = +120 - 100 = +20 MW
+    assert "+20" in caption
+
+
+def test_injection_map_caption_reactive_metric_unit_changes():
+    records = [
+        {"substation_id": "S1", "inj_p_mw": 0.0, "inj_q_mvar": 50.0,
+         "max_nominal_v": 400.0},
+    ]
+    caption = injection_map_caption(records, "Q")
+    assert "MVAr" in caption
 
 
 # ── AppTest smoke: app still renders with the Injection Map tab wired ────────

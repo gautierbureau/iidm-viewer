@@ -29,12 +29,11 @@ from __future__ import annotations
 import math
 
 import pandas as pd
-import streamlit as st
 
 from iidm_viewer.leaflet_scalar_map import (
     DivergingColorScale,
-    get_substation_positions,
-    render_scalar_map,
+    _extract_substation_positions,
+    build_scalar_map_html,
 )
 from iidm_viewer.powsybl_worker import run
 
@@ -91,7 +90,10 @@ def _extract_injection_data(network) -> dict | None:
           "has_lf_q": bool,   # any terminal.q populated
         }
     """
-    positions = get_substation_positions(network)
+    # Use the un-cached extractor so non-Streamlit hosts don't trip the
+    # streamlit-session-state cache lookup. Streamlit's own per-session
+    # cache around the result lives in :func:`_get_cached_injection_data`.
+    positions = _extract_substation_positions(network)
     if not positions:
         return None
 
@@ -201,6 +203,8 @@ def _extract_injection_data(network) -> dict | None:
 
 
 def _get_cached_injection_data(network):
+    import streamlit as st
+
     cache = st.session_state.get("_injection_map_cache")
     if cache is not None:
         return cache
@@ -211,6 +215,22 @@ def _get_cached_injection_data(network):
 
 def _filter_transport(records):
     return [r for r in records if r["max_nominal_v"] >= TRANSPORT_NOMINAL_V_THRESHOLD]
+
+
+# Layouts / view modes / metric labels exposed to non-Streamlit hosts.
+_METRIC_OPTIONS = {
+    "Active power (P)": "P",
+    "Reactive power (Q)": "Q",
+}
+_VIEW_OPTIONS = {
+    "Icons per substation": "icons",
+    "Continuous gradient": "gradient",
+}
+
+
+def metric_unit(metric: str) -> str:
+    """Unit for the metric: ``"MW"`` for ``"P"``, ``"MVAr"`` for ``"Q"``."""
+    return "MW" if metric == "P" else "MVAr"
 
 
 def _radius_for(value: float | None, full_scale: float,
@@ -278,8 +298,89 @@ def _inj_legend_stops(full_scale: float, unit: str) -> list[tuple[float, str]]:
     return stops
 
 
+def injection_color_scale(full_scale: float) -> DivergingColorScale:
+    """Return the diverging color scale centred on 0 MW/MVAr with the
+    user-set full-scale range (green = positive = exporter, red = negative
+    = importer)."""
+    return DivergingColorScale(
+        center=0.0,
+        range=float(full_scale),
+        mid_rgb=_INJ_COLOR_SCALE_MID,
+        low_rgb=_INJ_COLOR_SCALE_LOW,
+        high_rgb=_INJ_COLOR_SCALE_HIGH,
+    )
+
+
+def build_injection_map_html(
+    records: list[dict],
+    *,
+    metric: str,
+    mode: str,
+    full_scale: float,
+    height: int = 620,
+) -> tuple[str, list[dict]]:
+    """Filter records to transport-grade → render the Leaflet HTML.
+
+    Returns ``(html, records)`` where ``html`` is the standalone
+    Leaflet document and ``records`` is the post-transport-filter list
+    (the caller uses it for the per-host caption). ``html`` is the
+    empty string when nothing passes the filter.
+    """
+    transport = _filter_transport(records)
+    if not transport:
+        return "", transport
+    unit = metric_unit(metric)
+    html = build_scalar_map_html(
+        _to_render_records(transport, metric, unit, float(full_scale)),
+        mode=mode,
+        color_scale=injection_color_scale(full_scale),
+        legend_title=f"Net injection ({unit})",
+        legend_subtitle=(
+            f"green = exports, red = imports, "
+            f"full scale ±{full_scale:.0f} {unit}"
+        ),
+        legend_stops=_inj_legend_stops(float(full_scale), unit),
+        gradient_radius_m=25000,
+        height=height,
+    )
+    return html, transport
+
+
+def injection_map_caption(records: list[dict], metric: str) -> str:
+    """Below-map caption — '{N} substations — {X} exporters …'.
+
+    Shared between hosts so the text stays in sync.
+    """
+    unit = metric_unit(metric)
+    exporters = [
+        r for r in records
+        if (r["inj_p_mw"] if metric == "P" else r["inj_q_mvar"]) > 0
+    ]
+    importers = [
+        r for r in records
+        if (r["inj_p_mw"] if metric == "P" else r["inj_q_mvar"]) < 0
+    ]
+    total_export = sum(
+        (r["inj_p_mw"] if metric == "P" else r["inj_q_mvar"])
+        for r in exporters
+    )
+    total_import = -sum(
+        (r["inj_p_mw"] if metric == "P" else r["inj_q_mvar"])
+        for r in importers
+    )
+    return (
+        f"{len(records)} substations — {len(exporters)} exporters "
+        f"({total_export:+.0f} {unit}), {len(importers)} importers "
+        f"({-total_import:+.0f} {unit}), "
+        f"net {total_export - total_import:+.0f} {unit}"
+    )
+
+
 def render_injection_map(network):
     """Render the Injection Map tab."""
+    import streamlit as st
+    import streamlit.components.v1 as st_components
+
     st.caption(
         "Net active or reactive power per substation. "
         "**Green** = net exporter (generation > load), "
@@ -347,35 +448,12 @@ def render_injection_map(network):
             f"{('p0' if metric == 'P' else 'q0')})."
         )
 
-    color_scale = DivergingColorScale(
-        center=0.0,
-        range=float(full_scale),
-        mid_rgb=_INJ_COLOR_SCALE_MID,
-        low_rgb=_INJ_COLOR_SCALE_LOW,
-        high_rgb=_INJ_COLOR_SCALE_HIGH,
+    html, _ = build_injection_map_html(
+        records, metric=metric, mode=mode, full_scale=float(full_scale),
     )
+    st_components.html(html, height=640)
 
-    render_scalar_map(
-        _to_render_records(records, metric, unit, float(full_scale)),
-        mode=mode,
-        color_scale=color_scale,
-        legend_title=f"Net injection ({unit})",
-        legend_subtitle=f"green = exports, red = imports, full scale ±{full_scale:.0f} {unit}",
-        legend_stops=_inj_legend_stops(float(full_scale), unit),
-        gradient_radius_m=25000,
-    )
-
-    exporters = [r for r in records if (r["inj_p_mw"] if metric == "P" else r["inj_q_mvar"]) > 0]
-    importers = [r for r in records if (r["inj_p_mw"] if metric == "P" else r["inj_q_mvar"]) < 0]
-    total_export = sum((r["inj_p_mw"] if metric == "P" else r["inj_q_mvar"]) for r in exporters)
-    total_import = -sum((r["inj_p_mw"] if metric == "P" else r["inj_q_mvar"]) for r in importers)
-
-    st.caption(
-        f"{len(records)} substations — {len(exporters)} exporters "
-        f"({total_export:+.0f} {unit}), {len(importers)} importers "
-        f"({-total_import:+.0f} {unit}), "
-        f"net {total_export - total_import:+.0f} {unit}"
-    )
+    st.caption(injection_map_caption(records, metric))
 
 
 def _suggest_full_scale(records, metric: str) -> float:

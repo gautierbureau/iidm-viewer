@@ -37,6 +37,7 @@ from iidm_viewer.network_loader import (
 )
 from iidm_viewer.qt.data_explorer_tab import DataExplorerTab
 from iidm_viewer.qt.extensions_explorer_tab import ExtensionsExplorerTab
+from iidm_viewer.qt.injection_map_tab import InjectionMapTab
 from iidm_viewer.qt.map_tab import MapTab
 from iidm_viewer.qt.nad_tab import NadTab
 from iidm_viewer.qt.operational_limits_tab import OperationalLimitsTab
@@ -282,6 +283,7 @@ class MainWindow(QMainWindow):
         self.short_circuit_tab = ShortCircuitAnalysisTab()
         self.pmax_visualization_tab = PmaxVisualizationTab()
         self.voltage_analysis_tab = VoltageAnalysisTab()
+        self.injection_map_tab = InjectionMapTab()
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.overview_tab, "Overview")
@@ -296,6 +298,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.short_circuit_tab, "Short Circuit Analysis")
         self.tabs.addTab(self.pmax_visualization_tab, "Pmax Visualization")
         self.tabs.addTab(self.voltage_analysis_tab, "Voltage Analysis")
+        self.tabs.addTab(self.injection_map_tab, "Injection Map")
 
         # The Data Explorer reports cell + bulk edits to the AppState's
         # ChangeLog so the panel below shows a unified history that
@@ -632,6 +635,9 @@ class MainWindow(QMainWindow):
         # refresh so the summary, the per-pu drill-down, and the
         # current-Q metrics reflect the post-LF state.
         self.voltage_analysis_tab.refresh()
+        # Injection Map: terminal p/q populate post-LF — refresh so the
+        # markers track realised values instead of scheduled setpoints.
+        self.injection_map_tab.refresh()
         # Overview: branch p1/p2 (losses) + generator/load p come from
         # the LF — refresh so the country-totals table fills in actuals
         # and the losses metrics populate.
@@ -669,6 +675,7 @@ class MainWindow(QMainWindow):
         self.short_circuit_tab.set_network(network)
         self.pmax_visualization_tab.set_network(network)
         self.voltage_analysis_tab.set_network(network)
+        self.injection_map_tab.set_network(network)
         self.tabs.setCurrentWidget(self.map_tab)
 
     def _on_sidebar_vl_selected(self, vl_id: str) -> None:
