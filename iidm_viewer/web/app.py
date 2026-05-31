@@ -6647,6 +6647,211 @@ def _build_voltage_analysis():
     return refresh
 
 
+def _build_injection_map():
+    """Materialise the "Injection Map" tab.
+
+    Composes the shared :mod:`iidm_viewer.injection_map` helpers with
+    NiceGUI widgets: a metric (P / Q) radio, a view-mode (icons /
+    gradient) radio, a full-scale ± unit number, a ``srcdoc`` iframe
+    that hosts the standalone Leaflet HTML returned by
+    :func:`~iidm_viewer.injection_map.build_injection_map_html`, plus
+    a caption below the map.
+
+    The data fetch (``_extract_injection_data``) hops to a worker
+    thread via ``asyncio.to_thread`` and runs once per network.
+    Control changes drive an in-memory HTML re-build — no pypowsybl
+    re-query.
+    """
+    import html as html_lib
+
+    from iidm_viewer.injection_map import (
+        TRANSPORT_NOMINAL_V_THRESHOLD,
+        _METRIC_OPTIONS,
+        _VIEW_OPTIONS,
+        _extract_injection_data,
+        _filter_transport,
+        _suggest_full_scale,
+        build_injection_map_html,
+        injection_map_caption,
+        metric_unit,
+    )
+
+    state: dict = {
+        # Worker-fetched bundle: ``{"records": [...], "has_lf_p": bool,
+        # "has_lf_q": bool}`` or ``None`` for "no substationPosition".
+        "data": None,
+        # Per-metric full-scale memory so flipping P↔Q restores the
+        # value the user last set for the new metric.
+        "scale_by_metric": {},
+    }
+
+    ui.label(
+        "Net active or reactive power per substation. "
+        "Green = net exporter (generation > load), red = net importer "
+        "(load > generation). Marker size scales with the absolute net "
+        "injection.",
+    ).classes("text-caption q-pa-sm")
+
+    status_lbl = ui.label("").classes("text-caption q-pa-md")
+    status_lbl.visible = False
+
+    controls_row = ui.row().classes("items-center q-gutter-md no-wrap w-full")
+    with controls_row:
+        ui.label("Metric:")
+        metric_select = ui.select(
+            options=dict(_METRIC_OPTIONS),
+            value=next(iter(_METRIC_OPTIONS.values())),
+        ).props("dense outlined").classes("w-48")
+        ui.label("View:")
+        view_select = ui.select(
+            options=dict(_VIEW_OPTIONS),
+            value=next(iter(_VIEW_OPTIONS.values())),
+        ).props("dense outlined").classes("w-48")
+        scale_label = ui.label("Full-scale ± MW:")
+        scale_input = ui.number(
+            value=500.0, min=1.0, max=100000.0, step=50.0, format="%.0f",
+        ).props("dense outlined").classes("w-36")
+    controls_row.visible = False
+
+    lf_note_lbl = ui.label("").classes("text-caption text-grey-7 q-pa-xs")
+    lf_note_lbl.visible = False
+
+    map_iframe_holder = ui.html("", sanitize=False).classes("w-full")
+    caption_lbl = ui.label("").classes("text-caption q-mt-xs")
+
+    def _current_metric() -> str:
+        return metric_select.value or "P"
+
+    def _current_mode() -> str:
+        return view_select.value or "icons"
+
+    def _set_unavailable(message: str) -> None:
+        status_lbl.set_text(message)
+        status_lbl.visible = True
+        controls_row.visible = False
+        lf_note_lbl.visible = False
+        map_iframe_holder.set_content("")
+        caption_lbl.set_text("")
+
+    def _update_lf_note() -> None:
+        data = state["data"]
+        if data is None:
+            lf_note_lbl.visible = False
+            return
+        metric = _current_metric()
+        has_lf = (
+            data.get("has_lf_p") if metric == "P" else data.get("has_lf_q")
+        )
+        if has_lf:
+            lf_note_lbl.visible = False
+            return
+        fallback = "p0" if metric == "P" else "q0"
+        lf_note_lbl.set_text(
+            f"No terminal {metric} values populated (no load flow). "
+            f"Showing scheduled setpoints (target_{metric.lower()} / "
+            f"{fallback})."
+        )
+        lf_note_lbl.visible = True
+
+    def _seed_default_scale(records) -> None:
+        metric = _current_metric()
+        scales = state["scale_by_metric"]
+        if metric in scales:
+            target = scales[metric]
+        else:
+            target = float(_suggest_full_scale(records, metric))
+            scales[metric] = target
+        scale_label.set_text(f"Full-scale ± {metric_unit(metric)}:")
+        scale_input.value = target
+        scale_input.update()
+
+    def _render_map() -> None:
+        data = state["data"]
+        if data is None:
+            return
+        metric = _current_metric()
+        try:
+            full_scale = float(scale_input.value)
+        except (TypeError, ValueError):
+            full_scale = 500.0
+        state["scale_by_metric"][metric] = full_scale
+        records = data.get("records") or []
+        html_doc, transport = build_injection_map_html(
+            records,
+            metric=metric,
+            mode=_current_mode(),
+            full_scale=full_scale,
+        )
+        _update_lf_note()
+        if not html_doc:
+            map_iframe_holder.set_content("")
+            caption_lbl.set_text(
+                f"No substations with a voltage level at or above "
+                f"{TRANSPORT_NOMINAL_V_THRESHOLD:g} kV match the filter."
+            )
+            return
+        # ``srcdoc`` keeps the Leaflet document self-contained and
+        # sandboxed against the rest of the page — same trick as the
+        # geographical voltage map.
+        escaped = html_lib.escape(html_doc, quote=True)
+        map_iframe_holder.set_content(
+            f'<iframe srcdoc="{escaped}" '
+            'style="width:100%;height:640px;border:none;display:block" '
+            'sandbox="allow-scripts"></iframe>'
+        )
+        caption_lbl.set_text(injection_map_caption(transport, metric))
+
+    def _on_metric_changed(_e=None) -> None:
+        data = state["data"]
+        if data is None:
+            return
+        records = _filter_transport(data.get("records") or [])
+        _seed_default_scale(records)
+        _render_map()
+
+    metric_select.on("update:model-value", _on_metric_changed)
+    view_select.on("update:model-value", lambda _e=None: _render_map())
+    scale_input.on("update:model-value", lambda _e=None: _render_map())
+
+    async def refresh() -> None:
+        if _state.network is None:
+            state["data"] = None
+            state["scale_by_metric"] = {}
+            _set_unavailable("Load a network to see the injection map.")
+            return
+        try:
+            data = await asyncio.to_thread(
+                _extract_injection_data, _state.network,
+            )
+        except Exception as exc:
+            state["data"] = None
+            _set_unavailable(f"Injection map failed: {exc}")
+            return
+        # Network swap → forget the previous network's per-metric scales.
+        state["scale_by_metric"] = {}
+        state["data"] = data
+        if data is None:
+            _set_unavailable(
+                "No geographical data available. The network needs a "
+                "'substationPosition' extension with latitude/longitude "
+                "coordinates."
+            )
+            return
+        records = _filter_transport(data.get("records") or [])
+        if not records:
+            _set_unavailable(
+                f"No substations with a voltage level at or above "
+                f"{TRANSPORT_NOMINAL_V_THRESHOLD:g} kV in this network."
+            )
+            return
+        status_lbl.visible = False
+        controls_row.visible = True
+        _seed_default_scale(records)
+        _render_map()
+
+    return refresh
+
+
 def _cast_value_for_col(series, raw):
     """Best-effort cast for a user-typed cell value, matching the
     source DataFrame's column dtype."""
@@ -6968,6 +7173,7 @@ def main_page() -> None:
         short_circuit_tab = ui.tab("Short Circuit Analysis")
         pmax_tab = ui.tab("Pmax Visualization")
         voltage_analysis_tab = ui.tab("Voltage Analysis")
+        injection_map_tab = ui.tab("Injection Map")
     panels = ui.tab_panels(tabs, value=map_tab).classes("w-full").props("keep-alive")
     with panels:
         with ui.tab_panel(map_tab).classes("q-pa-none w-full"):
@@ -7054,6 +7260,8 @@ def main_page() -> None:
             refresh_pmax = _build_pmax_visualization()
         with ui.tab_panel(voltage_analysis_tab).classes("w-full"):
             refresh_voltage_analysis = _build_voltage_analysis()
+        with ui.tab_panel(injection_map_tab).classes("w-full"):
+            refresh_injection_map = _build_injection_map()
         with ui.tab_panel(overview_tab).classes("w-full"):
             refresh_overview = _build_overview()
 
@@ -7089,6 +7297,7 @@ def main_page() -> None:
             refresh_short_circuit_analysis()
             asyncio.create_task(refresh_pmax())
             asyncio.create_task(refresh_voltage_analysis())
+            asyncio.create_task(refresh_injection_map())
             asyncio.create_task(refresh_overview())
             return
         try:
@@ -7110,6 +7319,7 @@ def main_page() -> None:
         refresh_short_circuit_analysis()
         asyncio.create_task(refresh_pmax())
         asyncio.create_task(refresh_voltage_analysis())
+        asyncio.create_task(refresh_injection_map())
         asyncio.create_task(refresh_overview())
 
     def _update_sld_header(vl_id):
@@ -7189,6 +7399,7 @@ def main_page() -> None:
         # Voltage Analysis: bus v_mag + shunt/SVC q come from the LF —
         # refresh so summary, drill-down + current-Q metrics update.
         asyncio.create_task(refresh_voltage_analysis())
+        asyncio.create_task(refresh_injection_map())
         asyncio.create_task(refresh_overview())
 
     # Listeners are registered fresh on every page connect; if a

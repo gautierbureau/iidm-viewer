@@ -1255,6 +1255,39 @@ def test_voltage_analysis_builder_uses_shared_core():
     assert "bus_pu_classify" in src
 
 
+def test_injection_map_tab_registered_in_main_page():
+    """``Injection Map`` must be a top-level tab + its refresh closure
+    must be wired into the network-changed + LF-completed listeners.
+    No VL-changed wiring — the section is network-wide."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert 'ui.tab("Injection Map")' in src
+    assert "refresh_injection_map = _build_injection_map()" in src
+    # Called from the on_state_network branch (both load + clear) and
+    # the on_loadflow_completed listener → at least 3 sites.
+    assert src.count("refresh_injection_map()") >= 3
+
+
+def test_injection_map_builder_uses_shared_helpers():
+    """The NiceGUI builder must compose the shared Leaflet HTML +
+    caption helpers from :mod:`iidm_viewer.injection_map` so PySide6 +
+    Streamlit stay in sync."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_injection_map)
+    assert "build_injection_map_html" in src
+    assert "injection_map_caption" in src
+    assert "_extract_injection_data" in src
+    assert "_suggest_full_scale" in src
+    assert "_METRIC_OPTIONS" in src
+    assert "_VIEW_OPTIONS" in src
+    # The HTML lands in a sandboxed iframe via srcdoc.
+    assert "srcdoc" in src
+
+
 def test_overview_tab_registered_in_main_page():
     """``Overview`` must be a top-level tab + its refresh closure must
     be wired into the network-changed + LF-completed listeners. No
