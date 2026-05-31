@@ -5802,16 +5802,18 @@ def _build_voltage_analysis():
 
     * a bus-voltage summary aggrid + a per-nominal drill-down whose
       ``V (pu)`` cells turn red when outside the user-set lo/hi band,
+    * a geographical voltage map (Leaflet markers per VL, fanned or
+      per-substation worst) hosted in a ``srcdoc`` iframe and driven
+      by :func:`iidm_viewer.voltage_map.build_voltage_map_html`,
     * three shunt-group cards (capacitive, inductive, unknown), each
       with active / available / capacity totals + a detail aggrid,
     * an SVC card with active injection + controllable range totals.
 
-    The Leaflet geographical voltage map (Streamlit-only —
-    :mod:`iidm_viewer.voltage_map`) is skipped by design.
-
     Returns a closure the page-wide listeners call on network /
     load-flow changes.
     """
+    import html as html_lib
+
     import pandas as pd
 
     from iidm_viewer.voltage_analysis_core import (
@@ -5830,11 +5832,24 @@ def _build_voltage_analysis():
         split_shunts_by_b,
         svc_totals,
     )
+    from iidm_viewer.voltage_map import (
+        _LAYOUT_OPTIONS,
+        _VIEW_OPTIONS,
+        TRANSPORT_NOMINAL_V_THRESHOLD,
+        _extract_voltage_map_data,
+        build_voltage_map_html,
+        nominal_voltage_options,
+        voltage_map_caption,
+    )
 
     state: dict = {
         "buses": pd.DataFrame(),
         "shunts": pd.DataFrame(),
         "svcs": pd.DataFrame(),
+        # ``None`` until the worker fetch returns; an empty
+        # ``{"records": [], "has_lf": False}`` is also legal — the
+        # render code distinguishes the two via record count.
+        "map_data": None,
     }
 
     placeholder = ui.label(
@@ -5876,6 +5891,39 @@ def _build_voltage_analysis():
             "defaultColDef": _DEFAULT_COL_DEF,
         }).classes("w-full").style("height: 340px")
     bus_card.visible = False
+
+    # ------------------------------------------------------------------
+    # Geographical voltage map section
+    # ------------------------------------------------------------------
+    map_card = ui.card().classes("w-full q-pa-sm")
+    with map_card:
+        ui.label("Geographical voltage map").classes("text-h6")
+        map_status_lbl = ui.label("").classes("text-caption text-grey-7")
+        map_status_lbl.visible = False
+        map_controls_row = ui.row() \
+            .classes("items-center q-gutter-md no-wrap w-full")
+        with map_controls_row:
+            ui.label("Nominal:")
+            map_nom_select = ui.select(
+                options={None: "All nominal voltages"}, value=None,
+            ).props("dense outlined").classes("w-64")
+            ui.label("Layout:")
+            map_layout_select = ui.select(
+                options=dict(_LAYOUT_OPTIONS),
+                value=next(iter(_LAYOUT_OPTIONS.values())),
+            ).props("dense outlined").classes("w-48")
+            ui.label("View:")
+            map_view_select = ui.select(
+                options=dict(_VIEW_OPTIONS),
+                value=next(iter(_VIEW_OPTIONS.values())),
+            ).props("dense outlined").classes("w-48")
+            ui.label("Full-scale ± pu:")
+            map_vrange_input = ui.number(
+                value=0.05, min=0.005, max=0.5, step=0.005, format="%.3f",
+            ).props("dense outlined").classes("w-28")
+        map_iframe_holder = ui.html("", sanitize=False).classes("w-full")
+        map_caption_lbl = ui.label("").classes("text-caption q-mt-xs")
+    map_card.visible = False
 
     # ------------------------------------------------------------------
     # Reactive compensation section
@@ -6082,6 +6130,103 @@ def _build_voltage_analysis():
         _render_detail()
 
     # ------------------------------------------------------------------
+    # Render: geographical voltage map
+    # ------------------------------------------------------------------
+    def _set_map_unavailable(message: str) -> None:
+        map_status_lbl.set_text(message)
+        map_status_lbl.visible = True
+        map_controls_row.visible = False
+        map_iframe_holder.set_content("")
+        map_caption_lbl.set_text("")
+
+    def _render_map() -> None:
+        data = state.get("map_data")
+        if data is None:
+            _set_map_unavailable(
+                "No geographical data available. The network needs a "
+                "'substationPosition' extension with latitude/longitude "
+                "coordinates."
+            )
+            return
+        records = data.get("records") or []
+        transport = [
+            r for r in records
+            if r["nominal_v"] >= TRANSPORT_NOMINAL_V_THRESHOLD
+        ]
+        if not transport:
+            _set_map_unavailable(
+                f"No voltage levels at or above "
+                f"{TRANSPORT_NOMINAL_V_THRESHOLD:g} kV with geographical "
+                "coordinates in this network."
+            )
+            return
+        if not data.get("has_lf"):
+            _set_map_unavailable(
+                "Voltage magnitudes are not available on the map — "
+                "run a load flow first."
+            )
+            return
+
+        map_status_lbl.visible = False
+        map_controls_row.visible = True
+
+        # Sync the nominal-voltage picker with the data on hand.
+        counts: dict[float, int] = {}
+        for r in transport:
+            key = round(r["nominal_v"], 3)
+            counts[key] = counts.get(key, 0) + 1
+        options: dict = {None: "All nominal voltages"}
+        for nv in nominal_voltage_options(transport):
+            options[float(nv)] = f"{nv:g} kV ({counts.get(nv, 0)} VL)"
+        previous = map_nom_select.value
+        map_nom_select.options = options
+        if previous not in options:
+            map_nom_select.value = None
+        map_nom_select.update()
+
+        try:
+            v_range = float(map_vrange_input.value)
+        except (TypeError, ValueError):
+            v_range = 0.05
+        try:
+            sel_nom = (
+                float(map_nom_select.value)
+                if map_nom_select.value is not None else None
+            )
+        except (TypeError, ValueError):
+            sel_nom = None
+        html_doc, display = build_voltage_map_html(
+            records,
+            sel_nom=sel_nom,
+            layout=map_layout_select.value or "per_vl",
+            mode=map_view_select.value or "icons",
+            v_range=v_range,
+        )
+        if not html_doc:
+            map_iframe_holder.set_content("")
+            map_caption_lbl.set_text(
+                "No voltage levels match the current filter.",
+            )
+            return
+        # ``srcdoc`` keeps the Leaflet document self-contained and
+        # sandboxed against the rest of the page — no need to mount a
+        # static file. Wrap it in an iframe sized to match Streamlit.
+        escaped = html_lib.escape(html_doc, quote=True)
+        map_iframe_holder.set_content(
+            f'<iframe srcdoc="{escaped}" '
+            'style="width:100%;height:640px;border:none;display:block" '
+            'sandbox="allow-scripts"></iframe>'
+        )
+        map_caption_lbl.set_text(voltage_map_caption(
+            display, sel_nom=sel_nom, layout=map_layout_select.value or "per_vl",
+        ))
+
+    for widget in (
+        map_nom_select, map_layout_select, map_view_select, map_vrange_input,
+    ):
+        widget.on("update:model-value", lambda _e=None: _render_map())
+
+    # ------------------------------------------------------------------
     # Render: reactive compensation
     # ------------------------------------------------------------------
     def _render_shunt_group(widgets, group, has_lf: bool, empty_msg: str) -> None:
@@ -6194,9 +6339,11 @@ def _build_voltage_analysis():
             state["buses"] = pd.DataFrame()
             state["shunts"] = pd.DataFrame()
             state["svcs"] = pd.DataFrame()
+            state["map_data"] = None
             placeholder.set_text("Load a network to see voltage analysis.")
             placeholder.visible = True
             bus_card.visible = False
+            map_card.visible = False
             reactive_card.visible = False
             return
         try:
@@ -6207,10 +6354,12 @@ def _build_voltage_analysis():
             placeholder.set_text(f"Voltage analysis failed: {exc}")
             placeholder.visible = True
             bus_card.visible = False
+            map_card.visible = False
             reactive_card.visible = False
             state["buses"] = pd.DataFrame()
             state["shunts"] = pd.DataFrame()
             state["svcs"] = pd.DataFrame()
+            state["map_data"] = None
             return
         state["buses"] = data.buses
         state["shunts"] = data.shunts
@@ -6219,12 +6368,23 @@ def _build_voltage_analysis():
             placeholder.set_text("No bus data available in this network.")
             placeholder.visible = True
             bus_card.visible = False
+            map_card.visible = False
             reactive_card.visible = False
             return
+        # Map is best-effort — its fetch failing shouldn't hide the
+        # bus and reactive sections.
+        try:
+            state["map_data"] = await asyncio.to_thread(
+                _extract_voltage_map_data, _state.network,
+            )
+        except Exception:
+            state["map_data"] = None
         placeholder.visible = False
         bus_card.visible = True
+        map_card.visible = True
         reactive_card.visible = True
         _render_bus_section()
+        _render_map()
         _render_reactive_section()
 
     return refresh

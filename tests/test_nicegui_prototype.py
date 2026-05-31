@@ -1253,3 +1253,23 @@ def test_voltage_analysis_builder_uses_shared_core():
     assert "shunt_totals" in src
     assert "svc_totals" in src
     assert "bus_pu_classify" in src
+
+
+def test_voltage_analysis_builder_renders_geographical_map():
+    """The NiceGUI tab must include the Leaflet voltage map driven by
+    the shared :func:`build_voltage_map_html` helper — ports parity
+    with the Streamlit + PySide6 hosts."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_voltage_analysis)
+    # Builder + worker-routed fetch from the shared core.
+    assert "build_voltage_map_html" in src
+    assert "_extract_voltage_map_data" in src
+    assert "voltage_map_caption" in src
+    assert "nominal_voltage_options" in src
+    # Controls: nominal voltage filter, layout, view mode, ± pu spin.
+    assert "_LAYOUT_OPTIONS" in src
+    assert "_VIEW_OPTIONS" in src
+    # The HTML lands in a sandboxed iframe via srcdoc.
+    assert "srcdoc" in src
