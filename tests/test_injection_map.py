@@ -150,6 +150,39 @@ def test_suggest_full_scale_scales_with_magnitude():
     assert out >= 1000
 
 
+def test_suggest_full_scale_subscalar_values_promote_to_max():
+    """Every value below 1 MW falls through the ``p90 < 1`` branch
+    and uses the max of the absolute values."""
+    records = [
+        {"inj_p_mw": 0.5, "inj_q_mvar": 0.0},
+        {"inj_p_mw": 0.6, "inj_q_mvar": 0.0},
+    ]
+    out = _suggest_full_scale(records, "P")
+    # max(|values|) = 0.6 → rounded up to 1 (1 × 10^0).
+    assert out == pytest.approx(1.0)
+
+
+def test_suggest_full_scale_only_zero_injections_returns_default():
+    """A list of strict-zero injections has ``p90 == 0`` → falls back
+    to the 500 MW default."""
+    records = [{"inj_p_mw": 0.0, "inj_q_mvar": 0.0} for _ in range(3)]
+    out = _suggest_full_scale(records, "P")
+    assert out == 500.0
+
+
+def test_suggest_full_scale_picks_max_at_10x_magnitude():
+    """A value strictly above 5 × 10^n falls through the for-loop and
+    lands on the explicit ``10 * magnitude`` return — make sure the
+    branch is exercised."""
+    # 800 → magnitude=100, candidate=1×100=100 < 800, 2×100=200 < 800,
+    # 5×100=500 < 800, 10×100=1000 >= 800. Return path is the inner
+    # ``return float(candidate)``, exercising the for-loop's last
+    # iteration. Test sanity-checks the rounding stays "nice".
+    records = [{"inj_p_mw": 800.0, "inj_q_mvar": 0.0}]
+    out = _suggest_full_scale(records, "P")
+    assert out == 1000.0
+
+
 # ── _extract_injection_data — no extension ───────────────────────────────────
 
 def test_extract_returns_none_without_substation_position(blank_network):
@@ -159,6 +192,51 @@ def test_extract_returns_none_without_substation_position(blank_network):
 def test_extract_returns_none_on_four_substations(node_breaker_network):
     # The four_substations factory doesn't create substationPosition entries.
     assert _extract_injection_data(node_breaker_network) is None
+
+
+def test_extract_recovers_when_get_generators_raises(xiidm_upload):
+    """If ``get_generators`` blows up on the worker, the extractor falls
+    back to an empty frame instead of propagating the error — the
+    per-substation aggregation just sees zero gens."""
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+
+    raw = object.__getattribute__(load_network(xiidm_upload), "_obj")
+
+    def _broken_get_generators(*_a, **_k):
+        raise RuntimeError("simulated pypowsybl failure")
+
+    # Wrap the network so only ``get_generators`` raises.
+    class _Wrap:
+        def __init__(self, inner):
+            self._inner = inner
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    wrap = _Wrap(raw)
+    wrap.get_generators = _broken_get_generators
+    data = _extract_injection_data(NetworkProxy(wrap))
+    assert data is not None
+    # IEEE14 has substationPosition; records still populate (gen_count=0).
+    assert any(r["gen_count"] == 0 for r in data["records"])
+
+
+def test_extract_recovers_when_get_loads_raises(xiidm_upload):
+    """Symmetric to the generator case: ``get_loads`` raising drops
+    every load count to 0 but keeps the records list non-empty."""
+    raw = object.__getattribute__(load_network(xiidm_upload), "_obj")
+
+    class _Wrap:
+        def __init__(self, inner):
+            self._inner = inner
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    wrap = _Wrap(raw)
+    wrap.get_loads = lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("x"))
+    from iidm_viewer.powsybl_worker import NetworkProxy
+    data = _extract_injection_data(NetworkProxy(wrap))
+    assert data is not None
+    assert all(r["load_count"] == 0 for r in data["records"])
 
 
 # ── _extract_injection_data — IEEE14 ─────────────────────────────────────────

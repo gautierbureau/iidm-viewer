@@ -3245,6 +3245,67 @@ def test_injection_map_status_when_no_substation_position(qapp):
     assert tab._controls.isHidden() is True
 
 
+def test_injection_map_set_network_none_clears(qapp):
+    """``set_network(None)`` reverts the tab to its placeholder copy."""
+    from iidm_viewer.qt.injection_map_tab import InjectionMapTab
+
+    tab = InjectionMapTab()
+    tab.set_network(None)
+    qapp.processEvents()
+    assert tab._data is None
+    assert "Load a network" in tab._status_lbl.text()
+    assert tab._controls.isHidden() is True
+
+
+def test_injection_map_render_map_no_op_when_data_is_none(qapp):
+    """``_render_map`` short-circuits when ``_data`` is ``None`` — the
+    map view + caption stay untouched."""
+    from iidm_viewer.qt.injection_map_tab import InjectionMapTab
+
+    tab = InjectionMapTab()
+    tab._data = None
+    # Should not raise.
+    tab._render_map()
+    tab._on_metric_changed()
+    tab._on_scale_changed()
+    qapp.processEvents()
+
+
+def test_injection_map_lf_note_hides_when_terminal_p_populated(qapp, loaded_window):
+    """When ``has_lf_p`` is True the "showing scheduled setpoints" copy
+    must hide; force the flag and re-render to exercise the branch."""
+    tab = loaded_window.injection_map_tab
+    qapp.processEvents()
+    if tab._data is None:
+        return
+    tab._data["has_lf_p"] = True
+    # Make sure the metric combo is on P.
+    for i in range(tab._metric_combo.count()):
+        if tab._metric_combo.itemData(i) == "P":
+            tab._metric_combo.setCurrentIndex(i)
+            break
+    tab._update_lf_note()
+    qapp.processEvents()
+    assert tab._lf_note.isHidden() is True
+
+
+def test_injection_map_render_caption_when_filter_excludes_all(qapp, loaded_window):
+    """If ``build_injection_map_html`` returns an empty document (every
+    record dropped by the transport filter), the caption switches to
+    the "no matches" copy."""
+    tab = loaded_window.injection_map_tab
+    qapp.processEvents()
+    if tab._data is None:
+        return
+    # Force every record below the transport threshold so the filter
+    # excludes them all.
+    for r in tab._data.get("records") or []:
+        r["max_nominal_v"] = 1.0
+    tab._render_map()
+    qapp.processEvents()
+    assert "match the filter" in tab._caption_lbl.text()
+
+
 def test_main_window_carries_an_overview_tab(qapp):
     """``Overview`` must be the first top-level tab — matches the
     Streamlit + NiceGUI tab order."""
@@ -3313,6 +3374,64 @@ def test_overview_tab_counts_expansion_toggle(qapp, loaded_window):
     assert "Hide" in tab._counts_toggle.text()
 
 
+def test_overview_set_network_none_hides_groups(qapp):
+    """Clearing the network reverts the tab to its placeholder."""
+    from iidm_viewer.qt.overview_tab import OverviewTab
+
+    tab = OverviewTab()
+    tab.set_network(None)
+    qapp.processEvents()
+    assert tab._placeholder.isHidden() is False
+    assert tab._meta_row.isHidden() is True
+    assert tab._counts_group.isHidden() is True
+
+
+def test_overview_post_loadflow_populates_losses(qapp, loaded_window):
+    """After a load flow the losses metric trio + the per-country
+    table fill in. Forces an LF on the IEEE14 fixture and refreshes."""
+    from iidm_viewer.state import run_loadflow
+
+    run_loadflow(loaded_window.state.network)
+    tab = loaded_window.overview_tab
+    tab.refresh()
+    qapp.processEvents()
+    assert tab._losses_empty_lbl.isHidden() is True
+    assert "MW" in tab._losses_total_lbl.text()
+    assert tab._losses_lines_lbl.isHidden() is False
+    # Per-country table populated when at least one branch carries losses.
+    assert tab._losses_by_country_model.rowCount() >= 1
+
+
+def test_overview_refresh_rebuilds_component_counts_grid(qapp, loaded_window):
+    """A second ``refresh()`` clears the previous count widgets before
+    re-adding them — exercises the rebuild loop in
+    ``_render_component_counts``."""
+    tab = loaded_window.overview_tab
+    qapp.processEvents()
+    initial_count = tab._counts_grid.count()
+    assert initial_count > 0
+    tab.refresh()
+    qapp.processEvents()
+    # Counts widgets re-created from scratch.
+    assert tab._counts_grid.count() == initial_count
+
+
+def test_overview_compute_exception_shows_error_placeholder(qapp):
+    """If ``compute_overview_data`` raises, the placeholder surfaces
+    the error and every group hides."""
+    from iidm_viewer.qt.overview_tab import OverviewTab
+
+    class _BrokenProxy:
+        pass
+
+    tab = OverviewTab()
+    tab._network = _BrokenProxy()  # type: ignore[assignment]
+    tab.refresh()
+    qapp.processEvents()
+    assert "Overview failed" in tab._placeholder.text()
+    assert tab._meta_row.isHidden() is True
+
+
 def test_voltage_analysis_map_status_when_no_substation_position(qapp):
     """A four-substations network has no substationPosition extension
     → the map section reports it without disabling the rest of the
@@ -3334,3 +3453,71 @@ def test_voltage_analysis_map_status_when_no_substation_position(qapp):
     assert "substationPosition" in tab._map_status_lbl.text()
     assert tab._map_controls.isHidden() is True
     assert tab._bus_group.isHidden() is False
+
+
+def test_voltage_analysis_set_network_none_hides_groups(qapp):
+    """Clearing the network reverts the tab to its placeholder state."""
+    from iidm_viewer.qt.voltage_analysis_tab import VoltageAnalysisTab
+
+    tab = VoltageAnalysisTab()
+    tab.set_network(None)
+    qapp.processEvents()
+    assert tab._buses.empty
+    assert tab._map_data is None
+    assert tab._placeholder.isHidden() is False
+    assert tab._bus_group.isHidden() is True
+    assert tab._reactive_group.isHidden() is True
+
+
+def test_voltage_analysis_render_map_no_html_falls_back_to_caption(qapp, loaded_window):
+    """``build_voltage_map_html`` returns an empty html when the filter
+    excludes every record — the tab surfaces the "no matches" caption."""
+    tab = loaded_window.voltage_analysis_tab
+    qapp.processEvents()
+    if tab._map_data is None or not tab._map_data.get("records"):
+        return
+    # Force-pick a sentinel nominal value that doesn't exist in the data.
+    tab._map_nom_combo.blockSignals(True)
+    tab._map_nom_combo.clear()
+    tab._map_nom_combo.addItem("Bogus 999 kV", 999.0)
+    tab._map_nom_combo.blockSignals(False)
+    tab._render_map()
+    qapp.processEvents()
+    assert "No voltage levels match" in tab._map_caption.text()
+
+
+def test_voltage_analysis_reactive_section_empty_when_no_equipment(qapp):
+    """The reactive section shows the consolidated "no equipment" copy
+    when both shunts and SVCs frames are empty — exercises the early
+    bail-out branch in ``_refresh_reactive_section``."""
+    import pandas as pd
+    from iidm_viewer.qt.voltage_analysis_tab import VoltageAnalysisTab
+
+    tab = VoltageAnalysisTab()
+    tab._shunts = pd.DataFrame()
+    tab._svcs = pd.DataFrame()
+    tab._refresh_reactive_section()
+    qapp.processEvents()
+    assert tab._reactive_empty_lbl.isHidden() is False
+    assert tab._cap_group.isHidden() is True
+    assert tab._svc_box.isHidden() is True
+
+
+def test_voltage_analysis_no_lf_hides_detail_table(qapp, loaded_window):
+    """When ``has_loadflow`` returns False the detail-table widgets are
+    disabled and hidden — IEEE14 ships with v_mag populated so we have
+    to force the state."""
+    import pandas as pd
+    from iidm_viewer.voltage_analysis_core import enrich_bus_voltages
+    tab = loaded_window.voltage_analysis_tab
+    qapp.processEvents()
+    # Replace the buses frame with one where v_mag is all NaN.
+    fake = tab._buses.copy()
+    fake["v_mag"] = float("nan")
+    fake["v_pu"] = float("nan")
+    tab._buses = fake
+    tab._refresh_bus_section()
+    qapp.processEvents()
+    assert tab._lf_warning.isHidden() is False
+    assert tab._detail_table.isHidden() is True
+    assert tab._nom_combo.isEnabled() is False
