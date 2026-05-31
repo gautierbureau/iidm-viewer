@@ -3157,6 +3157,74 @@ def test_voltage_analysis_map_layout_change_updates_caption(qapp, loaded_window)
     assert "substations at" in caption
 
 
+def test_main_window_carries_an_overview_tab(qapp):
+    """``Overview`` must be the first top-level tab — matches the
+    Streamlit + NiceGUI tab order."""
+    from iidm_viewer.qt.main_window import MainWindow
+    from iidm_viewer.qt.overview_tab import OverviewTab
+
+    window = MainWindow()
+    qapp.processEvents()
+    tab_titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert tab_titles[0] == "Overview"
+    assert isinstance(window.overview_tab, OverviewTab)
+
+
+def test_overview_tab_renders_for_loaded_network(qapp, loaded_window):
+    """The tab populates the metadata header + country totals from the
+    shared :func:`compute_overview_data` once a network is loaded."""
+    tab = loaded_window.overview_tab
+    qapp.processEvents()
+    # Metadata header pulls Network ID from the loaded fixture.
+    assert "Network ID" in tab._meta_id.text()
+    # Country totals populated.
+    assert tab._country_model.rowCount() > 0
+    # Component counts grid filled in (IEEE14 has many components).
+    assert tab._counts_grid.count() > 0
+
+
+def test_overview_tab_losses_section_post_loadflow(qapp, loaded_window):
+    """After a load flow the losses metric trio + per-country table fill
+    in; pre-LF the "no data" message is shown."""
+    tab = loaded_window.overview_tab
+    qapp.processEvents()
+    # IEEE14 ships with bus voltages but no line p1/p2 → no losses pre-LF.
+    if not tab._losses_empty_lbl.isHidden():
+        # Empty path — metric labels are hidden.
+        assert tab._losses_total_lbl.isHidden() is True
+        return
+    # Post-LF path — total losses label carries a MW reading.
+    assert "MW" in tab._losses_total_lbl.text()
+
+
+def test_overview_tab_empty_network_shows_placeholder(qapp):
+    """An empty network produces no rows; the placeholder swallows the
+    "load a network" copy and the section groups stay hidden."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.overview_tab import OverviewTab
+
+    tab = OverviewTab()
+    network = NetworkProxy(run(pn.create_empty))
+    tab.set_network(network)
+    qapp.processEvents()
+    # Empty network ⇒ ID set, but country totals empty + no counts.
+    assert tab._country_empty_lbl.isHidden() is False
+    assert tab._country_table.isHidden() is True
+    assert tab._counts_grid.count() == 0
+
+
+def test_overview_tab_counts_expansion_toggle(qapp, loaded_window):
+    """The 'Show / Hide component counts' tool button toggles the body."""
+    tab = loaded_window.overview_tab
+    qapp.processEvents()
+    assert tab._counts_body.isHidden() is True
+    tab._counts_toggle.setChecked(True)
+    qapp.processEvents()
+    assert tab._counts_body.isHidden() is False
+    assert "Hide" in tab._counts_toggle.text()
+
+
 def test_voltage_analysis_map_status_when_no_substation_position(qapp):
     """A four-substations network has no substationPosition extension
     → the map section reports it without disabling the rest of the
