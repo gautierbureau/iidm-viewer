@@ -40,6 +40,7 @@ from iidm_viewer.qt.extensions_explorer_tab import ExtensionsExplorerTab
 from iidm_viewer.qt.map_tab import MapTab
 from iidm_viewer.qt.nad_tab import NadTab
 from iidm_viewer.qt.operational_limits_tab import OperationalLimitsTab
+from iidm_viewer.qt.overview_tab import OverviewTab
 from iidm_viewer.qt.pmax_visualization_tab import PmaxVisualizationTab
 from iidm_viewer.qt.reactive_curves_tab import ReactiveCurvesTab
 from iidm_viewer.qt.security_analysis_tab import SecurityAnalysisTab
@@ -269,6 +270,7 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
 
         self.state = AppState(self)
+        self.overview_tab = OverviewTab()
         self.map_tab = MapTab()
         self.nad_tab = NadTab()
         self.sld_tab = SldTab()
@@ -282,6 +284,7 @@ class MainWindow(QMainWindow):
         self.voltage_analysis_tab = VoltageAnalysisTab()
 
         self.tabs = QTabWidget()
+        self.tabs.addTab(self.overview_tab, "Overview")
         self.tabs.addTab(self.map_tab, "Network Map")
         self.tabs.addTab(self.nad_tab, "Network Area Diagram")
         self.tabs.addTab(self.sld_tab, "Single Line Diagram")
@@ -629,6 +632,10 @@ class MainWindow(QMainWindow):
         # refresh so the summary, the per-pu drill-down, and the
         # current-Q metrics reflect the post-LF state.
         self.voltage_analysis_tab.refresh()
+        # Overview: branch p1/p2 (losses) + generator/load p come from
+        # the LF — refresh so the country-totals table fills in actuals
+        # and the losses metrics populate.
+        self.overview_tab.refresh()
 
     # ------------------------------------------------------------------
     # State → UI plumbing
@@ -650,6 +657,7 @@ class MainWindow(QMainWindow):
         self.sidebar.set_view_logs_enabled(False)
         self.sidebar.set_save_enabled(network is not None)
         self.sidebar.set_reduction_enabled(network is not None)
+        self.overview_tab.set_network(network)
         self.map_tab.set_network(network)
         self.nad_tab.set_network(network)
         self.sld_tab.set_network(network)
