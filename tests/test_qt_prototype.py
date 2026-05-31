@@ -3157,6 +3157,94 @@ def test_voltage_analysis_map_layout_change_updates_caption(qapp, loaded_window)
     assert "substations at" in caption
 
 
+def test_main_window_carries_an_injection_map_tab(qapp):
+    """``Injection Map`` must be a top-level tab — parity with Streamlit
+    + NiceGUI."""
+    from iidm_viewer.qt.injection_map_tab import InjectionMapTab
+    from iidm_viewer.qt.main_window import MainWindow
+
+    window = MainWindow()
+    qapp.processEvents()
+    tab_titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert "Injection Map" in tab_titles
+    assert isinstance(window.injection_map_tab, InjectionMapTab)
+
+
+def test_injection_map_tab_renders_for_loaded_network(qapp, loaded_window):
+    """IEEE14 ships with substationPosition entries; the tab populates
+    the controls + writes a non-empty caption."""
+    tab = loaded_window.injection_map_tab
+    qapp.processEvents()
+    assert tab._data is not None
+    assert tab._data.get("records")
+    assert tab._controls.isHidden() is False
+    assert tab._status_lbl.isHidden() is True
+    # Default-scale seeded by ``_suggest_full_scale``.
+    assert tab._scale_spin.value() > 0
+    assert "substations" in tab._caption_lbl.text()
+
+
+def test_injection_map_metric_switch_updates_scale_label(qapp, loaded_window):
+    """Flipping P↔Q changes the unit label + the LF-note copy."""
+    tab = loaded_window.injection_map_tab
+    qapp.processEvents()
+    if tab._data is None:
+        return
+    # Pick the reactive-power entry.
+    for i in range(tab._metric_combo.count()):
+        if tab._metric_combo.itemData(i) == "Q":
+            tab._metric_combo.setCurrentIndex(i)
+            break
+    qapp.processEvents()
+    assert "MVAr" in tab._scale_label.text()
+    # IEEE14 has no LF by default → the "showing scheduled setpoints"
+    # note surfaces for Q with target_q / q0.
+    if not tab._lf_note.isHidden():
+        assert "target_q" in tab._lf_note.text()
+
+
+def test_injection_map_per_metric_scale_memory(qapp, loaded_window):
+    """Setting a scale for P + flipping to Q + back must restore P's."""
+    tab = loaded_window.injection_map_tab
+    qapp.processEvents()
+    if tab._data is None:
+        return
+    # Force a known value for P, switch to Q, back to P, expect P's value.
+    tab._scale_spin.setValue(1234.0)
+    qapp.processEvents()
+    for i in range(tab._metric_combo.count()):
+        if tab._metric_combo.itemData(i) == "Q":
+            tab._metric_combo.setCurrentIndex(i)
+            break
+    qapp.processEvents()
+    assert tab._scale_spin.value() != 1234.0  # Q has its own default
+    for i in range(tab._metric_combo.count()):
+        if tab._metric_combo.itemData(i) == "P":
+            tab._metric_combo.setCurrentIndex(i)
+            break
+    qapp.processEvents()
+    assert tab._scale_spin.value() == pytest.approx(1234.0)
+
+
+def test_injection_map_status_when_no_substation_position(qapp):
+    """A four-substations network has no substationPosition → the tab
+    surfaces the explanation copy and hides the controls."""
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.injection_map_tab import InjectionMapTab
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    tab = InjectionMapTab()
+    network = NetworkProxy(run(_make))
+    tab.set_network(network)
+    qapp.processEvents()
+    assert tab._status_lbl.isHidden() is False
+    assert "substationPosition" in tab._status_lbl.text()
+    assert tab._controls.isHidden() is True
+
+
 def test_main_window_carries_an_overview_tab(qapp):
     """``Overview`` must be the first top-level tab — matches the
     Streamlit + NiceGUI tab order."""
