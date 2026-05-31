@@ -30,9 +30,6 @@ import json
 from dataclasses import dataclass
 from typing import Iterable
 
-import streamlit as st
-import streamlit.components.v1 as st_components
-
 from iidm_viewer.powsybl_worker import run
 
 
@@ -106,6 +103,8 @@ def get_substation_positions(network) -> dict[str, tuple[float, float]]:
     missing or has no valid entries — callers can
     ``if not positions: return`` and render an info message.
     """
+    import streamlit as st
+
     cached = st.session_state.get(_SUBSTATION_POSITIONS_CACHE_KEY)
     if cached is not None:
         return cached
@@ -116,6 +115,8 @@ def get_substation_positions(network) -> dict[str, tuple[float, float]]:
 
 def clear_substation_positions_cache() -> None:
     """Drop the cached substation positions for the current session."""
+    import streamlit as st
+
     st.session_state.pop(_SUBSTATION_POSITIONS_CACHE_KEY, None)
 
 
@@ -277,6 +278,56 @@ def default_legend_stops(
     return stops
 
 
+def build_scalar_map_html(
+    records: Iterable[dict],
+    *,
+    mode: str,
+    color_scale: DivergingColorScale,
+    legend_title: str,
+    legend_subtitle: str = "",
+    legend_stops: list[tuple[float, str]] | None = None,
+    height: int = 620,
+    center_latlon: tuple[float, float] = (46.6, 2.5),
+    zoom: int = 6,
+    gradient_radius_m: float = 25000.0,
+    default_icon_radius: float = 7.0,
+) -> str:
+    """Build the standalone Leaflet HTML document — host-agnostic.
+
+    Same record shape as :func:`render_scalar_map`. Returns the full
+    HTML string; the caller decides how to display it (Streamlit
+    ``components.html``, PySide6 ``QWebEngineView``, NiceGUI ``srcdoc``
+    iframe, …).
+    """
+    records_list = list(records)
+    if legend_stops is None:
+        legend_stops = default_legend_stops(color_scale)
+
+    scale_js = {
+        "center": float(color_scale.center),
+        "range": float(color_scale.range),
+        "mid": list(color_scale.mid_rgb),
+        "lo": list(color_scale.low_rgb),
+        "hi": list(color_scale.high_rgb),
+    }
+    legend_js = {
+        "title": legend_title,
+        "subtitle": legend_subtitle,
+        "stops": [{"value": float(v), "label": l} for v, l in legend_stops],
+    }
+    return _LEAFLET_HTML.format(
+        height=height,
+        records=json.dumps(records_list),
+        mode=json.dumps(mode),
+        scale=json.dumps(scale_js),
+        legend=json.dumps(legend_js),
+        center_latlon=json.dumps(list(center_latlon)),
+        zoom=json.dumps(int(zoom)),
+        gradient_radius_m=json.dumps(float(gradient_radius_m)),
+        default_icon_radius=json.dumps(float(default_icon_radius)),
+    )
+
+
 def render_scalar_map(
     records: Iterable[dict],
     *,
@@ -305,31 +356,19 @@ def render_scalar_map(
     omitted, which is the right default for voltage (centered, ±5 stops);
     callers with signed or unit-bearing scales should pass their own.
     """
-    records_list = list(records)
-    if legend_stops is None:
-        legend_stops = default_legend_stops(color_scale)
+    import streamlit.components.v1 as st_components
 
-    scale_js = {
-        "center": float(color_scale.center),
-        "range": float(color_scale.range),
-        "mid": list(color_scale.mid_rgb),
-        "lo": list(color_scale.low_rgb),
-        "hi": list(color_scale.high_rgb),
-    }
-    legend_js = {
-        "title": legend_title,
-        "subtitle": legend_subtitle,
-        "stops": [{"value": float(v), "label": l} for v, l in legend_stops],
-    }
-    html = _LEAFLET_HTML.format(
+    html = build_scalar_map_html(
+        records,
+        mode=mode,
+        color_scale=color_scale,
+        legend_title=legend_title,
+        legend_subtitle=legend_subtitle,
+        legend_stops=legend_stops,
         height=height,
-        records=json.dumps(records_list),
-        mode=json.dumps(mode),
-        scale=json.dumps(scale_js),
-        legend=json.dumps(legend_js),
-        center_latlon=json.dumps(list(center_latlon)),
-        zoom=json.dumps(int(zoom)),
-        gradient_radius_m=json.dumps(float(gradient_radius_m)),
-        default_icon_radius=json.dumps(float(default_icon_radius)),
+        center_latlon=center_latlon,
+        zoom=zoom,
+        gradient_radius_m=gradient_radius_m,
+        default_icon_radius=default_icon_radius,
     )
     st_components.html(html, height=height + 20)

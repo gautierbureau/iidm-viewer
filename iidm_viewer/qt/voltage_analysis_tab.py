@@ -6,16 +6,17 @@ PySide6 widgets:
 * **Bus voltages** — summary ``QTableView`` keyed by nominal voltage,
   plus a drill-down table for one nominal where ``V (pu)`` outside the
   lo/hi band turns red.
+* **Geographical voltage map** — Leaflet markers per VL (or fanned,
+  or per-substation worst) coloured by per-unit deviation from
+  nominal. Hosted in a ``QWebEngineView`` and driven by
+  :func:`iidm_viewer.voltage_map.build_voltage_map_html`.
 * **Reactive compensation** — three shunt groups (capacitive,
   inductive, unknown) and one SVC group; each renders a metrics row
   plus a sortable detail table.
 
-The Leaflet geographical voltage map (Streamlit tab's middle section)
-is intentionally skipped — see :mod:`iidm_viewer.voltage_map` for the
-Streamlit-only implementation.
-
 All pypowsybl calls hop through the worker thread (per AGENTS.md §1)
-via :func:`iidm_viewer.voltage_analysis_core.compute_voltage_analysis`.
+via :func:`iidm_viewer.voltage_analysis_core.compute_voltage_analysis`
+and :func:`iidm_viewer.voltage_map._extract_voltage_map_data`.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from typing import Optional
 import pandas as pd
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor
+from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -33,6 +35,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QScrollArea,
+    QSizePolicy,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -55,6 +58,15 @@ from iidm_viewer.voltage_analysis_core import (
     shunt_totals,
     split_shunts_by_b,
     svc_totals,
+)
+from iidm_viewer.voltage_map import (
+    _LAYOUT_OPTIONS,
+    _VIEW_OPTIONS,
+    TRANSPORT_NOMINAL_V_THRESHOLD,
+    _extract_voltage_map_data,
+    build_voltage_map_html,
+    nominal_voltage_options,
+    voltage_map_caption,
 )
 
 
@@ -186,6 +198,9 @@ class VoltageAnalysisTab(QWidget):
         self._buses: pd.DataFrame = pd.DataFrame()
         self._shunts: pd.DataFrame = pd.DataFrame()
         self._svcs: pd.DataFrame = pd.DataFrame()
+        # Map data — one worker hop per network; controls drive the
+        # HTML re-render in-memory without re-querying pypowsybl.
+        self._map_data: Optional[dict] = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -265,6 +280,67 @@ class VoltageAnalysisTab(QWidget):
         bus_layout.addWidget(self._detail_table)
 
         layout.addWidget(self._bus_group)
+
+        # ------------------------------------------------------------------
+        # Geographical voltage map
+        # ------------------------------------------------------------------
+        self._map_group = QGroupBox("Geographical voltage map")
+        map_layout = QVBoxLayout(self._map_group)
+
+        self._map_status_lbl = QLabel("")
+        self._map_status_lbl.setStyleSheet("color: #666;")
+        self._map_status_lbl.setWordWrap(True)
+        map_layout.addWidget(self._map_status_lbl)
+
+        # Controls — same affordances as Streamlit (nominal filter,
+        # layout, view mode, full-scale ± pu).
+        self._map_controls = QWidget()
+        controls = QHBoxLayout(self._map_controls)
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.addWidget(QLabel("Nominal:"))
+        self._map_nom_combo = QComboBox()
+        self._map_nom_combo.setMinimumWidth(150)
+        self._map_nom_combo.currentIndexChanged.connect(self._on_map_changed)
+        controls.addWidget(self._map_nom_combo)
+        controls.addSpacing(12)
+        controls.addWidget(QLabel("Layout:"))
+        self._map_layout_combo = QComboBox()
+        for label in _LAYOUT_OPTIONS:
+            self._map_layout_combo.addItem(label, _LAYOUT_OPTIONS[label])
+        self._map_layout_combo.currentIndexChanged.connect(self._on_map_changed)
+        controls.addWidget(self._map_layout_combo)
+        controls.addSpacing(12)
+        controls.addWidget(QLabel("View:"))
+        self._map_view_combo = QComboBox()
+        for label in _VIEW_OPTIONS:
+            self._map_view_combo.addItem(label, _VIEW_OPTIONS[label])
+        self._map_view_combo.currentIndexChanged.connect(self._on_map_changed)
+        controls.addWidget(self._map_view_combo)
+        controls.addSpacing(12)
+        controls.addWidget(QLabel("Full-scale ± pu:"))
+        self._map_vrange_spin = QDoubleSpinBox()
+        self._map_vrange_spin.setDecimals(3)
+        self._map_vrange_spin.setSingleStep(0.005)
+        self._map_vrange_spin.setRange(0.005, 0.5)
+        self._map_vrange_spin.setValue(0.05)
+        self._map_vrange_spin.valueChanged.connect(self._on_map_changed)
+        controls.addWidget(self._map_vrange_spin)
+        controls.addStretch(1)
+        map_layout.addWidget(self._map_controls)
+
+        self._map_view = QWebEngineView()
+        self._map_view.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding,
+        )
+        self._map_view.setMinimumHeight(560)
+        map_layout.addWidget(self._map_view, 1)
+
+        self._map_caption = QLabel("")
+        self._map_caption.setStyleSheet("color: #555; padding: 4px;")
+        self._map_caption.setWordWrap(True)
+        map_layout.addWidget(self._map_caption)
+
+        layout.addWidget(self._map_group)
 
         # ------------------------------------------------------------------
         # Reactive compensation
@@ -360,6 +436,7 @@ class VoltageAnalysisTab(QWidget):
             self._buses = pd.DataFrame()
             self._shunts = pd.DataFrame()
             self._svcs = pd.DataFrame()
+            self._map_data = None
             self._placeholder.setText("Load a network to see voltage analysis.")
             self._set_data_visible(False)
             return
@@ -369,6 +446,7 @@ class VoltageAnalysisTab(QWidget):
             self._buses = pd.DataFrame()
             self._shunts = pd.DataFrame()
             self._svcs = pd.DataFrame()
+            self._map_data = None
             self._placeholder.setText(f"Voltage analysis failed: {exc}")
             self._set_data_visible(False)
             return
@@ -376,13 +454,21 @@ class VoltageAnalysisTab(QWidget):
         self._shunts = data.shunts
         self._svcs = data.svcs
         if self._buses.empty:
+            self._map_data = None
             self._placeholder.setText(
                 "No bus data available in this network.",
             )
             self._set_data_visible(False)
             return
+        # Map is best-effort — a failure here shouldn't hide the bus
+        # and reactive sections.
+        try:
+            self._map_data = _extract_voltage_map_data(self._network)
+        except Exception:
+            self._map_data = None
         self._set_data_visible(True)
         self._refresh_bus_section()
+        self._refresh_map_section()
         self._refresh_reactive_section()
 
     # ------------------------------------------------------------------
@@ -391,6 +477,7 @@ class VoltageAnalysisTab(QWidget):
     def _set_data_visible(self, visible: bool) -> None:
         self._placeholder.setVisible(not visible)
         self._bus_group.setVisible(visible)
+        self._map_group.setVisible(visible)
         self._reactive_group.setVisible(visible)
 
     def _refresh_bus_section(self) -> None:
@@ -464,6 +551,107 @@ class VoltageAnalysisTab(QWidget):
 
     def _on_threshold_changed(self, _value: float) -> None:
         self._render_detail()
+
+    # ------------------------------------------------------------------
+    # Geographical voltage map
+    # ------------------------------------------------------------------
+    def _refresh_map_section(self) -> None:
+        """Rebuild the nominal-voltage picker + render the map for the
+        current control values. Called once per network — the
+        :meth:`_on_map_changed` slot drives subsequent re-renders."""
+        if self._map_data is None:
+            self._map_status_lbl.setText(
+                "No geographical data available. The network needs a "
+                "'substationPosition' extension with latitude/longitude "
+                "coordinates."
+            )
+            self._map_status_lbl.setVisible(True)
+            self._map_controls.setVisible(False)
+            self._map_view.setVisible(False)
+            self._map_caption.setText("")
+            return
+
+        records = self._map_data.get("records") or []
+        has_lf = bool(self._map_data.get("has_lf"))
+        transport = [
+            r for r in records
+            if r["nominal_v"] >= TRANSPORT_NOMINAL_V_THRESHOLD
+        ]
+        if not transport:
+            self._map_status_lbl.setText(
+                f"No voltage levels at or above {TRANSPORT_NOMINAL_V_THRESHOLD:g} kV "
+                "with geographical coordinates in this network."
+            )
+            self._map_status_lbl.setVisible(True)
+            self._map_controls.setVisible(False)
+            self._map_view.setVisible(False)
+            self._map_caption.setText("")
+            return
+        if not has_lf:
+            self._map_status_lbl.setText(
+                "Voltage magnitudes are not available on the map — "
+                "run a load flow first."
+            )
+            self._map_status_lbl.setVisible(True)
+            self._map_controls.setVisible(False)
+            self._map_view.setVisible(False)
+            self._map_caption.setText("")
+            return
+
+        self._map_status_lbl.setVisible(False)
+        self._map_controls.setVisible(True)
+        self._map_view.setVisible(True)
+
+        # Rebuild the nominal picker; preserve the selection across
+        # refreshes (a fresh LF leaves the network shape unchanged).
+        previous = self._map_nom_combo.currentData()
+        self._map_nom_combo.blockSignals(True)
+        self._map_nom_combo.clear()
+        self._map_nom_combo.addItem("All nominal voltages", None)
+        noms = nominal_voltage_options(transport)
+        counts: dict[float, int] = {}
+        for r in transport:
+            counts[round(r["nominal_v"], 3)] = counts.get(
+                round(r["nominal_v"], 3), 0,
+            ) + 1
+        for nv in noms:
+            self._map_nom_combo.addItem(
+                f"{nv:g} kV ({counts.get(nv, 0)} VL)", float(nv),
+            )
+        if previous is not None:
+            idx = self._map_nom_combo.findData(previous)
+            if idx >= 0:
+                self._map_nom_combo.setCurrentIndex(idx)
+        self._map_nom_combo.blockSignals(False)
+
+        self._render_map()
+
+    def _render_map(self) -> None:
+        if self._map_data is None:
+            return
+        records = self._map_data.get("records") or []
+        sel_nom = self._map_nom_combo.currentData()
+        layout_value = self._map_layout_combo.currentData() or "per_vl"
+        mode_value = self._map_view_combo.currentData() or "icons"
+        v_range = float(self._map_vrange_spin.value())
+        html, display = build_voltage_map_html(
+            records,
+            sel_nom=sel_nom,
+            layout=layout_value,
+            mode=mode_value,
+            v_range=v_range,
+        )
+        if not html:
+            self._map_view.setHtml("")
+            self._map_caption.setText("No voltage levels match the current filter.")
+            return
+        self._map_view.setHtml(html)
+        self._map_caption.setText(
+            voltage_map_caption(display, sel_nom=sel_nom, layout=layout_value),
+        )
+
+    def _on_map_changed(self, *_args) -> None:
+        self._render_map()
 
     def _refresh_reactive_section(self) -> None:
         has_shunts = not self._shunts.empty
