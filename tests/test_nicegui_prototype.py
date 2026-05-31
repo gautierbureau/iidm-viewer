@@ -1255,6 +1255,34 @@ def test_voltage_analysis_builder_uses_shared_core():
     assert "bus_pu_classify" in src
 
 
+def test_overview_tab_registered_in_main_page():
+    """``Overview`` must be a top-level tab + its refresh closure must
+    be wired into the network-changed + LF-completed listeners. No
+    VL-changed wiring — the section is network-wide."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert 'ui.tab("Overview")' in src
+    assert "refresh_overview = _build_overview()" in src
+    # Called from the on_state_network branch (both load + clear) and
+    # the on_loadflow_completed listener → at least 3 sites.
+    assert src.count("refresh_overview()") >= 3
+
+
+def test_overview_builder_uses_shared_core():
+    """The NiceGUI builder must compose the shared compute + display
+    helpers so PySide6 + Streamlit stay in sync."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_overview)
+    assert "compute_overview_data" in src
+    assert "build_country_totals_display" in src
+    assert "build_losses_by_country_display" in src
+    assert "country_totals_has_lf" in src
+
+
 def test_voltage_analysis_builder_renders_geographical_map():
     """The NiceGUI tab must include the Leaflet voltage map driven by
     the shared :func:`build_voltage_map_html` helper — ports parity

@@ -5546,6 +5546,263 @@ def _build_short_circuit_analysis():
     return refresh
 
 
+def _build_overview():
+    """Materialise the "Overview" tab.
+
+    Composes the shared :mod:`iidm_viewer.network_info_core` core with
+    NiceGUI widgets:
+
+    * a four-metric header (ID / Name / Format / Case Date),
+    * a "Generation and Consumption by Country" aggrid with a
+      "actual values populate after a load flow" caption when the
+      ``*_actual_mw`` columns are still NaN,
+    * a "Network Losses" metric trio (total / lines / transformers)
+      plus an optional per-country aggrid,
+    * a collapsible "Component Statistics" grid of metric labels.
+
+    Returns a closure the page-wide listeners call on network /
+    load-flow changes.
+    """
+    import pandas as pd
+
+    from iidm_viewer.network_info_core import (
+        COUNTRY_TOTALS_DISPLAY_COLUMNS,
+        LOSSES_BY_COUNTRY_COLUMNS,
+        OverviewMetadata,
+        build_country_totals_display,
+        build_losses_by_country_display,
+        compute_overview_data,
+        country_totals_has_lf,
+    )
+
+    state: dict = {
+        "metadata": OverviewMetadata("", "", "", ""),
+        "country_totals": pd.DataFrame(),
+        "losses": {"total": 0.0, "lines": 0.0, "transformers": 0.0,
+                   "has_data": False},
+        "losses_by_country": pd.Series(dtype=float),
+        "component_counts": {},
+    }
+
+    placeholder = ui.label(
+        "Load a network to see the overview.",
+    ).classes("text-caption q-pa-md")
+
+    # ------------------------------------------------------------------
+    # Metadata header
+    # ------------------------------------------------------------------
+    meta_row = ui.row().classes("items-stretch q-gutter-sm no-wrap w-full")
+    with meta_row:
+        meta_id_lbl = ui.html("").classes("col text-center q-pa-sm") \
+            .style("border: 1px solid #ddd; border-radius: 4px;")
+        meta_name_lbl = ui.html("").classes("col text-center q-pa-sm") \
+            .style("border: 1px solid #ddd; border-radius: 4px;")
+        meta_format_lbl = ui.html("").classes("col text-center q-pa-sm") \
+            .style("border: 1px solid #ddd; border-radius: 4px;")
+        meta_case_date_lbl = ui.html("").classes("col text-center q-pa-sm") \
+            .style("border: 1px solid #ddd; border-radius: 4px;")
+    meta_row.visible = False
+
+    # ------------------------------------------------------------------
+    # Country totals
+    # ------------------------------------------------------------------
+    country_card = ui.card().classes("w-full q-pa-sm")
+    with country_card:
+        ui.label("Generation and Consumption by Country").classes("text-h6")
+        country_empty_lbl = ui.label(
+            "No generation or consumption data available.",
+        ).classes("text-caption text-grey-7")
+        country_empty_lbl.visible = False
+        country_lf_caption = ui.label(
+            "Actual values populate once a load flow has run.",
+        ).classes("text-caption q-mt-xs")
+        country_lf_caption.visible = False
+        country_grid = ui.aggrid({
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }).classes("w-full").style("height: 260px")
+    country_card.visible = False
+
+    # ------------------------------------------------------------------
+    # Losses
+    # ------------------------------------------------------------------
+    losses_card = ui.card().classes("w-full q-pa-sm")
+    with losses_card:
+        ui.label("Network Losses").classes("text-h6")
+        losses_empty_lbl = ui.label(
+            "No loss data available (run a load flow first).",
+        ).classes("text-caption text-grey-7")
+        losses_empty_lbl.visible = False
+        losses_metrics_row = ui.row() \
+            .classes("items-stretch q-gutter-sm no-wrap w-full")
+        with losses_metrics_row:
+            losses_total_lbl = ui.html("").classes("col text-center q-pa-sm") \
+                .style("border: 1px solid #ddd; border-radius: 4px;")
+            losses_lines_lbl = ui.html("").classes("col text-center q-pa-sm") \
+                .style("border: 1px solid #ddd; border-radius: 4px;")
+            losses_xfmr_lbl = ui.html("").classes("col text-center q-pa-sm") \
+                .style("border: 1px solid #ddd; border-radius: 4px;")
+        losses_by_country_caption = ui.label(
+            "Losses by country — cross-border branches split 50/50.",
+        ).classes("text-caption q-mt-xs")
+        losses_by_country_caption.visible = False
+        losses_by_country_grid = ui.aggrid({
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+        }).classes("w-full").style("height: 200px")
+        losses_by_country_grid.visible = False
+    losses_card.visible = False
+
+    # ------------------------------------------------------------------
+    # Component statistics (collapsible)
+    # ------------------------------------------------------------------
+    counts_card = ui.card().classes("w-full q-pa-sm")
+    with counts_card:
+        ui.label("Component Statistics").classes("text-h6")
+        counts_expansion = ui.expansion(
+            "Show component counts", value=False,
+        ).classes("w-full")
+        with counts_expansion:
+            counts_grid_container = ui.grid(columns=4).classes("w-full q-gutter-sm")
+        counts_empty_lbl = ui.label(
+            "No components found in this network.",
+        ).classes("text-caption text-grey-7")
+        counts_empty_lbl.visible = False
+    counts_card.visible = False
+
+    def _set_grid_from_df(grid, df, columns=None) -> None:
+        cols = list(columns) if columns is not None else list(df.columns)
+        if df.empty:
+            grid.options.update({
+                "columnDefs": [{"field": c, "headerName": c} for c in cols],
+                "rowData": [],
+                "defaultColDef": _DEFAULT_COL_DEF,
+            })
+        else:
+            grid.options.update({
+                "columnDefs": [
+                    {"field": c, "headerName": c} for c in df.columns
+                ],
+                "rowData": df.fillna("").astype(str).to_dict("records"),
+                "defaultColDef": _DEFAULT_COL_DEF,
+            })
+        grid.update()
+
+    def _render_metadata(metadata) -> None:
+        meta_id_lbl.set_content(
+            f"<b>Network ID</b><br>{metadata.network_id or '—'}",
+        )
+        meta_name_lbl.set_content(
+            f"<b>Name</b><br>{metadata.name or '—'}",
+        )
+        meta_format_lbl.set_content(
+            f"<b>Format</b><br>{metadata.source_format or '—'}",
+        )
+        meta_case_date_lbl.set_content(
+            f"<b>Case Date</b><br>{metadata.case_date or '—'}",
+        )
+
+    def _render_country_totals(df) -> None:
+        if df.empty:
+            country_empty_lbl.visible = True
+            country_lf_caption.visible = False
+            _set_grid_from_df(
+                country_grid,
+                pd.DataFrame(columns=COUNTRY_TOTALS_DISPLAY_COLUMNS),
+                columns=COUNTRY_TOTALS_DISPLAY_COLUMNS,
+            )
+            country_grid.style("height: 0px")
+            return
+        country_empty_lbl.visible = False
+        country_lf_caption.visible = not country_totals_has_lf(df)
+        _set_grid_from_df(country_grid, build_country_totals_display(df))
+        country_grid.style("height: 260px")
+
+    def _render_losses(losses, by_country) -> None:
+        has_data = bool(losses.get("has_data"))
+        if not has_data:
+            losses_empty_lbl.visible = True
+            losses_metrics_row.visible = False
+            losses_by_country_caption.visible = False
+            losses_by_country_grid.visible = False
+            return
+        losses_empty_lbl.visible = False
+        losses_metrics_row.visible = True
+        losses_total_lbl.set_content(
+            f"<b>Total losses</b><br>{losses['total']:.2f} MW",
+        )
+        losses_lines_lbl.set_content(
+            f"<b>Line losses</b><br>{losses['lines']:.2f} MW",
+        )
+        losses_xfmr_lbl.set_content(
+            f"<b>Transformer losses</b><br>{losses['transformers']:.2f} MW",
+        )
+        if by_country.empty:
+            losses_by_country_caption.visible = False
+            losses_by_country_grid.visible = False
+            return
+        losses_by_country_caption.visible = True
+        losses_by_country_grid.visible = True
+        _set_grid_from_df(
+            losses_by_country_grid,
+            build_losses_by_country_display(by_country),
+        )
+
+    def _render_component_counts(counts) -> None:
+        # Rebuild the grid each refresh — counts change per load.
+        counts_grid_container.clear()
+        if not counts:
+            counts_empty_lbl.visible = True
+            return
+        counts_empty_lbl.visible = False
+        with counts_grid_container:
+            for label, count in counts.items():
+                ui.html(
+                    f"<b>{label}</b><br>{count}",
+                ).classes("text-center q-pa-sm") \
+                 .style("border: 1px solid #ddd; border-radius: 4px;")
+
+    async def refresh() -> None:
+        if _state.network is None:
+            placeholder.set_text("Load a network to see the overview.")
+            placeholder.visible = True
+            meta_row.visible = False
+            country_card.visible = False
+            losses_card.visible = False
+            counts_card.visible = False
+            return
+        try:
+            data = await asyncio.to_thread(
+                compute_overview_data, _state.network,
+            )
+        except Exception as exc:
+            placeholder.set_text(f"Overview failed: {exc}")
+            placeholder.visible = True
+            meta_row.visible = False
+            country_card.visible = False
+            losses_card.visible = False
+            counts_card.visible = False
+            return
+        state["metadata"] = data.metadata
+        state["country_totals"] = data.country_totals
+        state["losses"] = data.losses
+        state["losses_by_country"] = data.losses_by_country
+        state["component_counts"] = data.component_counts
+
+        placeholder.visible = False
+        meta_row.visible = True
+        country_card.visible = True
+        losses_card.visible = True
+        counts_card.visible = True
+
+        _render_metadata(data.metadata)
+        _render_country_totals(data.country_totals)
+        _render_losses(data.losses, data.losses_by_country)
+        _render_component_counts(data.component_counts)
+
+    return refresh
+
+
 def _build_pmax_visualization():
     """Materialise the "Pmax Visualization" tab.
 
@@ -6699,6 +6956,7 @@ def main_page() -> None:
         view_script_btn.on_click(_open_session_script_dialog)
 
     with ui.tabs().classes("w-full") as tabs:
+        overview_tab = ui.tab("Overview")
         map_tab = ui.tab("Network Map")
         nad_tab = ui.tab("Network Area Diagram")
         sld_tab = ui.tab("Single Line Diagram")
@@ -6796,6 +7054,8 @@ def main_page() -> None:
             refresh_pmax = _build_pmax_visualization()
         with ui.tab_panel(voltage_analysis_tab).classes("w-full"):
             refresh_voltage_analysis = _build_voltage_analysis()
+        with ui.tab_panel(overview_tab).classes("w-full"):
+            refresh_overview = _build_overview()
 
     # ------------------------------------------------------------------
     # Cross-tab navigation: substation click on map -> SLD tab on that VL.
@@ -6829,6 +7089,7 @@ def main_page() -> None:
             refresh_short_circuit_analysis()
             asyncio.create_task(refresh_pmax())
             asyncio.create_task(refresh_voltage_analysis())
+            asyncio.create_task(refresh_overview())
             return
         try:
             from iidm_viewer.network_loader import (
@@ -6849,6 +7110,7 @@ def main_page() -> None:
         refresh_short_circuit_analysis()
         asyncio.create_task(refresh_pmax())
         asyncio.create_task(refresh_voltage_analysis())
+        asyncio.create_task(refresh_overview())
 
     def _update_sld_header(vl_id):
         """Refresh the VL label + Expand/Collapse button above the SLD."""
@@ -6927,6 +7189,7 @@ def main_page() -> None:
         # Voltage Analysis: bus v_mag + shunt/SVC q come from the LF —
         # refresh so summary, drill-down + current-Q metrics update.
         asyncio.create_task(refresh_voltage_analysis())
+        asyncio.create_task(refresh_overview())
 
     # Listeners are registered fresh on every page connect; if a
     # previous registration is still around (browser refresh), the
