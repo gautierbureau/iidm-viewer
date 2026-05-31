@@ -26,11 +26,10 @@ import math
 from collections import defaultdict
 
 import pandas as pd
-import streamlit as st
 
 from iidm_viewer.leaflet_scalar_map import (
     DivergingColorScale,
-    render_scalar_map,
+    build_scalar_map_html,
 )
 from iidm_viewer.powsybl_worker import run
 
@@ -47,6 +46,11 @@ _LAYOUT_OPTIONS = {
     "Per VL": "per_vl",
     "Per VL (fanned)": "per_vl_fanned",
     "Per substation (worst)": "per_sub_worst",
+}
+
+_VIEW_OPTIONS = {
+    "Icons per substation": "icons",
+    "Continuous gradient": "gradient",
 }
 
 
@@ -339,7 +343,108 @@ def _voltage_legend_stops(v_range: float) -> list[tuple[float, str]]:
     return [(1.0 + f * v_range, f"{1.0 + f * v_range:.3f} pu") for f in fractions]
 
 
+def _gradient_radius_for(sel_nom: float | None) -> int:
+    """Pick the gradient blob radius (m) — wider for transport (≥ 200 kV),
+    tighter for sub-transport so adjacent substations don't merge.
+    """
+    return 25000 if sel_nom is None or sel_nom >= 200 else 12000
+
+
+def _voltage_color_scale(v_range: float) -> DivergingColorScale:
+    return DivergingColorScale(
+        center=1.0,
+        range=float(v_range),
+        mid_rgb=_VOLTAGE_COLOR_SCALE_MID,
+        low_rgb=_VOLTAGE_COLOR_SCALE_LOW,
+        high_rgb=_VOLTAGE_COLOR_SCALE_HIGH,
+    )
+
+
+def nominal_voltage_options(records) -> list[float]:
+    """Distinct transport-grade nominal voltages present in the records,
+    sorted descending. Shared between hosts to build the picker."""
+    seen: dict[float, None] = {}
+    for r in records:
+        nv = r["nominal_v"]
+        if nv >= TRANSPORT_NOMINAL_V_THRESHOLD:
+            seen[round(float(nv), 3)] = None
+    return sorted(seen.keys(), reverse=True)
+
+
+def build_voltage_map_html(
+    records: list[dict],
+    *,
+    sel_nom: float | None,
+    layout: str,
+    mode: str,
+    v_range: float,
+    height: int = 620,
+) -> tuple[str, list[dict]]:
+    """Filter records → apply layout → render the Leaflet HTML.
+
+    Returns ``(html, display)`` where ``html`` is the full standalone
+    Leaflet document (caller plugs it into Streamlit components,
+    ``QWebEngineView`` or a NiceGUI ``srcdoc`` iframe) and ``display``
+    is the post-filter, pre-layout record list — the caller uses it
+    for the "N voltage levels at X kV / Y substations" caption.
+
+    ``html`` is an empty string when no records pass the filter, so the
+    caller can show a "no data" message.
+    """
+    transport = [
+        r for r in records if r["nominal_v"] >= TRANSPORT_NOMINAL_V_THRESHOLD
+    ]
+    display = _prepare_display_records(
+        transport, sel_nom=sel_nom, min_nominal=TRANSPORT_NOMINAL_V_THRESHOLD,
+    )
+    if not display:
+        return "", display
+    laid_out = _apply_layout(display, layout)
+    html = build_scalar_map_html(
+        _to_render_records(laid_out),
+        mode=mode,
+        color_scale=_voltage_color_scale(v_range),
+        legend_title="Voltage (pu)",
+        legend_subtitle=(
+            f"center = 1.000 pu, full scale ±{float(v_range):.3f}"
+        ),
+        legend_stops=_voltage_legend_stops(float(v_range)),
+        gradient_radius_m=_gradient_radius_for(sel_nom),
+        height=height,
+    )
+    return html, display
+
+
+def voltage_map_caption(
+    display: list[dict],
+    *,
+    sel_nom: float | None,
+    layout: str,
+) -> str:
+    """Below-map caption — '{N} voltage levels at {Y} kV across {S} substations'.
+
+    Shared between hosts so the text stays in sync.
+    """
+    with_v = [r for r in display if r["v_pu"] is not None]
+    total_vls = len(display)
+    total_subs = len({r["substation_id"] for r in display})
+    shown_nom = "all nominal voltages" if sel_nom is None else f"{sel_nom:g} kV"
+    if layout == "per_sub_worst":
+        return (
+            f"{total_subs} substations at {shown_nom} "
+            f"(aggregated from {total_vls} VLs, "
+            f"{len(with_v)} with load-flow voltages)"
+        )
+    return (
+        f"{total_vls} voltage levels at {shown_nom} "
+        f"across {total_subs} substations "
+        f"({len(with_v)} with load-flow voltages)"
+    )
+
+
 def _get_cached_voltage_map_data(network):
+    import streamlit as st
+
     cache = st.session_state.get("_voltage_map_cache")
     if cache is not None:
         return cache
@@ -350,6 +455,9 @@ def _get_cached_voltage_map_data(network):
 
 def render_voltage_map(network):
     """Draw the geographical voltage map inside the Voltage Analysis tab."""
+    import streamlit as st
+    import streamlit.components.v1 as st_components
+
     st.subheader("Geographical voltage map")
 
     data = _get_cached_voltage_map_data(network)
@@ -434,49 +542,18 @@ def render_voltage_map(network):
         help="Deviation from 1.0 pu that fully saturates the red / blue color.",
     )
 
-    display = _prepare_display_records(
+    html, display = build_voltage_map_html(
         transport_records,
         sel_nom=sel_nom,
-        min_nominal=TRANSPORT_NOMINAL_V_THRESHOLD,
+        layout=layout,
+        mode=mode,
+        v_range=float(v_range),
     )
 
-    if not display:
+    if not html:
         st.info("No voltage levels match the current filter.")
         return
 
-    laid_out = _apply_layout(display, layout)
+    st_components.html(html, height=640)
 
-    gradient_radius_m = 25000 if sel_nom is None or sel_nom >= 200 else 12000
-
-    color_scale = DivergingColorScale(
-        center=1.0,
-        range=float(v_range),
-        mid_rgb=_VOLTAGE_COLOR_SCALE_MID,
-        low_rgb=_VOLTAGE_COLOR_SCALE_LOW,
-        high_rgb=_VOLTAGE_COLOR_SCALE_HIGH,
-    )
-    render_scalar_map(
-        _to_render_records(laid_out),
-        mode=mode,
-        color_scale=color_scale,
-        legend_title="Voltage (pu)",
-        legend_subtitle=f"center = 1.000 pu, full scale ±{float(v_range):.3f}",
-        legend_stops=_voltage_legend_stops(float(v_range)),
-        gradient_radius_m=gradient_radius_m,
-    )
-
-    with_v = [r for r in display if r["v_pu"] is not None]
-    total_vls = len(display)
-    total_subs = len({r["substation_id"] for r in display})
-    shown_nom = "all nominal voltages" if sel_nom is None else f"{sel_nom:g} kV"
-    if layout == "per_sub_worst":
-        st.caption(
-            f"{total_subs} substations at {shown_nom} "
-            f"(aggregated from {total_vls} VLs, {len(with_v)} with load-flow voltages)"
-        )
-    else:
-        st.caption(
-            f"{total_vls} voltage levels at {shown_nom} "
-            f"across {total_subs} substations "
-            f"({len(with_v)} with load-flow voltages)"
-        )
+    st.caption(voltage_map_caption(display, sel_nom=sel_nom, layout=layout))

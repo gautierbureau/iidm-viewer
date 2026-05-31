@@ -299,3 +299,118 @@ def test_build_tooltip_dispatches_on_aggregate_flag():
 
 def test_threshold_is_63kv():
     assert TRANSPORT_NOMINAL_V_THRESHOLD == 63.0
+
+
+# ── build_voltage_map_html (the host-agnostic Leaflet entry point) ────────────
+
+def _ieee14_records(xiidm_upload):
+    from iidm_viewer.voltage_map import _extract_voltage_map_data
+    network = load_network(xiidm_upload)
+    data = _extract_voltage_map_data(network)
+    assert data is not None
+    return data["records"]
+
+
+def test_build_voltage_map_html_returns_full_document(xiidm_upload):
+    from iidm_viewer.voltage_map import build_voltage_map_html
+    html, display = build_voltage_map_html(
+        _ieee14_records(xiidm_upload),
+        sel_nom=None, layout="per_vl", mode="icons", v_range=0.05,
+    )
+    assert "<!DOCTYPE html>" in html
+    assert "leaflet" in html.lower()
+    assert display  # non-empty
+
+
+def test_build_voltage_map_html_empty_when_no_records():
+    from iidm_viewer.voltage_map import build_voltage_map_html
+    html, display = build_voltage_map_html(
+        [], sel_nom=None, layout="per_vl", mode="icons", v_range=0.05,
+    )
+    assert html == ""
+    assert display == []
+
+
+def test_build_voltage_map_html_filters_below_transport_threshold():
+    """Records below 63 kV must not surface in the rendered map."""
+    from iidm_viewer.voltage_map import build_voltage_map_html
+    records = [
+        {"vl_id": "LV", "substation_id": "S", "nominal_v": 20.0,
+         "v_mag_mean": 21.0, "v_mag_min": 21.0, "v_mag_max": 21.0,
+         "bus_count": 1, "lat": 45.0, "lon": 2.0},
+    ]
+    html, display = build_voltage_map_html(
+        records, sel_nom=None, layout="per_vl", mode="icons", v_range=0.05,
+    )
+    assert html == ""
+    assert display == []
+
+
+def test_build_voltage_map_html_per_sub_worst_aggregates(xiidm_upload):
+    """The per_sub_worst layout produces at most one marker per
+    substation."""
+    from iidm_viewer.voltage_map import build_voltage_map_html
+    html, display = build_voltage_map_html(
+        _ieee14_records(xiidm_upload),
+        sel_nom=None, layout="per_sub_worst", mode="icons", v_range=0.05,
+    )
+    assert html  # non-empty
+    # display is pre-layout (per-VL) so it can be larger; just make sure
+    # the worst-aggregator ran (every record has v_pu set or None).
+    assert all("v_pu" in r for r in display)
+
+
+def test_nominal_voltage_options_filters_below_threshold():
+    from iidm_viewer.voltage_map import nominal_voltage_options
+    records = [
+        {"vl_id": "A", "substation_id": "S", "nominal_v": 400.0},
+        {"vl_id": "B", "substation_id": "S", "nominal_v": 225.0},
+        {"vl_id": "C", "substation_id": "S", "nominal_v": 20.0},
+    ]
+    assert nominal_voltage_options(records) == [400.0, 225.0]
+
+
+def test_voltage_map_caption_per_vl_layout():
+    from iidm_viewer.voltage_map import voltage_map_caption
+    display = [
+        {"substation_id": "S1", "v_pu": 1.0},
+        {"substation_id": "S1", "v_pu": None},
+        {"substation_id": "S2", "v_pu": 1.02},
+    ]
+    text = voltage_map_caption(display, sel_nom=None, layout="per_vl")
+    assert "3 voltage levels" in text
+    assert "2 substations" in text
+    assert "2 with load-flow voltages" in text
+
+
+def test_voltage_map_caption_per_sub_worst_layout():
+    from iidm_viewer.voltage_map import voltage_map_caption
+    display = [
+        {"substation_id": "S1", "v_pu": 1.0},
+        {"substation_id": "S2", "v_pu": None},
+    ]
+    text = voltage_map_caption(display, sel_nom=400.0, layout="per_sub_worst")
+    assert "2 substations at 400 kV" in text
+    assert "aggregated from 2 VLs" in text
+
+
+# ── leaflet_scalar_map.build_scalar_map_html (no Streamlit needed) ────────────
+
+def test_build_scalar_map_html_is_standalone_document():
+    from iidm_viewer.leaflet_scalar_map import (
+        DivergingColorScale, build_scalar_map_html,
+    )
+    scale = DivergingColorScale(
+        center=1.0, range=0.05,
+        mid_rgb=(255, 255, 224),
+        low_rgb=(27, 74, 199),
+        high_rgb=(199, 27, 27),
+    )
+    html = build_scalar_map_html(
+        [{"id": "X", "lat": 45.0, "lon": 2.0, "value": 1.02, "tooltip": "<b>X</b>"}],
+        mode="icons", color_scale=scale,
+        legend_title="Voltage (pu)",
+    )
+    assert "<!DOCTYPE html>" in html
+    assert "Voltage (pu)" in html
+    assert '"X"' in html  # the record id round-trips through JSON

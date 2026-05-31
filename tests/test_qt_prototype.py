@@ -3117,3 +3117,64 @@ def test_voltage_analysis_svc_section_populates_for_four_substations(qapp):
     qapp.processEvents()
     assert not tab._svcs.empty
     assert tab._svc_model.rowCount() >= 1
+
+
+def test_voltage_analysis_map_renders_for_loaded_network(qapp, loaded_window):
+    """IEEE14 ships with substationPosition entries; the map section
+    must surface the nominal-voltage picker, show the controls, and
+    write a non-empty caption."""
+    tab = loaded_window.voltage_analysis_tab
+    qapp.processEvents()
+    # Map data was fetched and at least one record exists.
+    assert tab._map_data is not None
+    assert tab._map_data.get("records")
+    # Controls are visible (the IEEE14 fixture has bus voltages → has_lf).
+    assert tab._map_controls.isHidden() is False
+    assert tab._map_view.isHidden() is False
+    assert tab._map_status_lbl.isHidden() is True
+    # Combo has "All nominal voltages" + at least one nominal entry.
+    assert tab._map_nom_combo.count() >= 2
+    # Caption reads "{N} voltage levels at all nominal voltages …".
+    assert "voltage levels" in tab._map_caption.text()
+
+
+def test_voltage_analysis_map_layout_change_updates_caption(qapp, loaded_window):
+    """Switching the layout combo to per-substation worst routes
+    through :func:`build_voltage_map_html` and rewrites the caption."""
+    tab = loaded_window.voltage_analysis_tab
+    qapp.processEvents()
+    if tab._map_data is None or not tab._map_data.get("records"):
+        return  # nothing to drive
+    # Pick the "Per substation (worst)" entry.
+    for i in range(tab._map_layout_combo.count()):
+        if tab._map_layout_combo.itemData(i) == "per_sub_worst":
+            tab._map_layout_combo.setCurrentIndex(i)
+            break
+    qapp.processEvents()
+    caption = tab._map_caption.text()
+    # The per_sub_worst caption uses "substations at" wording instead
+    # of the per-VL "voltage levels at".
+    assert "substations at" in caption
+
+
+def test_voltage_analysis_map_status_when_no_substation_position(qapp):
+    """A four-substations network has no substationPosition extension
+    → the map section reports it without disabling the rest of the
+    tab."""
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.voltage_analysis_tab import VoltageAnalysisTab
+
+    def _make():
+        import pypowsybl.network as pn
+        return pn.create_four_substations_node_breaker_network()
+
+    tab = VoltageAnalysisTab()
+    network = NetworkProxy(run(_make))
+    tab.set_network(network)
+    qapp.processEvents()
+    # Map status label is visible with the "no geographical data" copy;
+    # the rest of the tab stayed up.
+    assert tab._map_status_lbl.isHidden() is False
+    assert "substationPosition" in tab._map_status_lbl.text()
+    assert tab._map_controls.isHidden() is True
+    assert tab._bus_group.isHidden() is False
