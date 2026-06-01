@@ -45,6 +45,19 @@ def vl_selector(network):
     # "created with a default value but also had its value set via the
     # Session State API" warning.
     vl_set_by_click = st.session_state.pop("_vl_set_by_click", False)
+    if vl_set_by_click and current and current not in options:
+        # The user navigated (via SLD/NAD arrow) to a VL outside the
+        # current filter.  Clear the filter so the target VL is visible,
+        # then rebuild the options list from the full set.
+        st.session_state[filter_key] = ""
+        filtered = vls_df
+        options = filtered["id"].tolist()
+        labels = filtered["display"].tolist()
+        label_map = dict(zip(options, labels))
+        if "nominal_v" in filtered.columns:
+            default_vl = filtered.loc[filtered["nominal_v"].idxmax(), "id"]
+        else:
+            default_vl = options[0]
     if vl_set_by_click and current in options:
         st.session_state[selectbox_key] = current
     elif selectbox_key not in st.session_state:

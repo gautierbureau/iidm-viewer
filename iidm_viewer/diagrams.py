@@ -210,7 +210,13 @@ def render_nad_tab(network, selected_vl):
 
     if click and click.get("type") == "nad-vl-click":
         vl = click.get("vl")
-        if vl and vl != st.session_state.get("selected_vl"):
+        ts = click.get("ts")
+        if (
+            vl
+            and ts
+            and ts != st.session_state.get("_last_nad_vl_click_ts")
+        ):
+            st.session_state["_last_nad_vl_click_ts"] = ts
             st.session_state.selected_vl = vl
             st.session_state["_vl_set_by_click"] = True
             st.rerun()
@@ -360,7 +366,13 @@ def render_sld_tab(network, selected_vl):
 
     if click and click.get("type") == "sld-vl-click":
         vl = click.get("vl")
-        if vl and vl != st.session_state.get("selected_vl"):
+        ts = click.get("ts")
+        if (
+            vl
+            and ts
+            and ts != st.session_state.get("_last_sld_vl_click_ts")
+        ):
+            st.session_state["_last_sld_vl_click_ts"] = ts
             st.session_state.selected_vl = vl
             st.session_state["_vl_set_by_click"] = True
             st.rerun()
