@@ -1,10 +1,11 @@
-"""Shared per-network DataFrame caches.
+"""Streamlit wrappers around :mod:`iidm_viewer.cache_backend`.
 
-The heavy `get_lines(all_attributes=True)` / `get_2_windings_transformers(all_attributes=True)`
-fetches are requested by Operational Limits, Overview losses, and Pmax on
-every rerun. Each call is 2 worker round-trips; on IEEE 14 that's a small
-constant, but on real transmission networks the DataFrame is large and the
-call also drags a lot of JNI data across the GraalVM boundary.
+The heavy ``get_lines(all_attributes=True)`` /
+``get_2_windings_transformers(all_attributes=True)`` fetches are requested by
+Operational Limits, Overview losses, and Pmax on every rerun. Each call is
+2 worker round-trips; on IEEE 14 that's a small constant, but on real
+transmission networks the DataFrame is large and the call also drags a lot of
+JNI data across the GraalVM boundary.
 
 Caches are keyed by ``(net_key, lf_gen)``:
 
@@ -17,11 +18,72 @@ Topology edits (add/remove a line, update r/x/…) don't bump ``lf_gen``
 but *do* change the set of rows. Every ``_vl_lookup_cache`` pop site in
 ``state.py`` also pops ``_lines_all_cache`` / ``_2wt_all_cache`` /
 ``_oplimits_cache`` so the next read rebuilds from the live network.
+
+This module is the Streamlit-flavoured face of the host-agnostic
+:mod:`iidm_viewer.cache_backend`: slot names, invalidation rules and the
+load-flow counter live there; here we plug ``st.session_state`` in as the
+storage backend and expose the per-getter API that the rest of the Streamlit
+codebase imports.
 """
 from __future__ import annotations
 
+from typing import Any, Iterable
+
 import pandas as pd
 import streamlit as st
+
+from iidm_viewer import cache_backend as _cb
+from iidm_viewer.cache_backend import (
+    BUSES_ALL,
+    BUS_VOLTAGES,
+    DE_COMPONENT,
+    ENRICHED_COMPONENT,
+    EXT_DF,
+    GENERATORS_ALL,
+    LINES_ALL,
+    OPLIMITS,
+    REACTIVE_CURVES,
+    SHUNTS_ALL,
+    SVC_ALL,
+    THREE_WT_ALL,
+    TWO_WT_ALL,
+    VL_LOOKUP,
+    VL_NOMINAL_V,
+)
+
+# Re-export slot groupings under their historical private names so any
+# external caller that imported them keeps working.
+_TOPOLOGY_CACHE_KEYS = _cb.TOPOLOGY_SLOTS
+_GEOGRAPHY_CACHE_KEYS = _cb.GEOGRAPHY_SLOTS
+_LOAD_FLOW_CACHE_KEYS = _cb.LOAD_FLOW_SLOTS
+_NETWORK_REPLACE_CACHE_KEYS = _cb.NETWORK_REPLACE_SLOTS
+
+
+class StreamlitSessionBackend:
+    """:class:`~iidm_viewer.cache_backend.CacheBackend` backed by
+    ``st.session_state``.
+
+    The dict-like methods all resolve ``st`` lazily at call time so existing
+    tests that ``patch("iidm_viewer.caches.st")`` still work.
+    """
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return st.session_state.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        st.session_state[key] = value
+
+    def setdefault(self, key: str, default: Any) -> Any:
+        return st.session_state.setdefault(key, default)
+
+    def pop(self, key: str, default: Any = None) -> Any:
+        return st.session_state.pop(key, default)
+
+    def keys(self) -> Iterable[str]:
+        return list(st.session_state.keys())
+
+
+_backend = StreamlitSessionBackend()
 
 
 def _net_key(network) -> int:
@@ -32,11 +94,11 @@ def _net_key(network) -> int:
 
 
 def _lf_gen() -> int:
-    return st.session_state.get("_lf_gen", 0)
+    return _cb.lf_gen(_backend)
 
 
 def _cache_key(network) -> tuple[int, int]:
-    return _net_key(network), _lf_gen()
+    return _cb.cache_key(_net_key(network), _cb.lf_gen(_backend))
 
 
 def _get_all_attrs(network, session_key: str, getter_name: str):
@@ -48,53 +110,53 @@ def _get_all_attrs(network, session_key: str, getter_name: str):
     not mutated. Returns an empty DataFrame when the call raises.
     """
     key = _cache_key(network)
-    cached = st.session_state.get(session_key)
+    cached = _backend.get(session_key)
     if cached is not None and cached.get("key") == key:
         return cached["df"]
     try:
         df = getattr(network, getter_name)(all_attributes=True)
     except Exception:
         return pd.DataFrame()
-    st.session_state[session_key] = {"key": key, "df": df}
+    _backend.set(session_key, {"key": key, "df": df})
     return df
 
 
 def get_lines_all(network):
-    return _get_all_attrs(network, "_lines_all_cache", "get_lines")
+    return _get_all_attrs(network, LINES_ALL, "get_lines")
 
 
 def get_2wt_all(network):
-    return _get_all_attrs(network, "_2wt_all_cache", "get_2_windings_transformers")
+    return _get_all_attrs(network, TWO_WT_ALL, "get_2_windings_transformers")
 
 
 def get_buses_all(network):
     """Cache ``get_buses(all_attributes=True)`` per ``(net_key, lf_gen)``.
 
     Bus voltages (v_mag, v_angle) change after a load flow; the cache is
-    auto-invalidated when ``_lf_gen`` bumps and explicitly popped by
+    auto-invalidated when ``LF_GEN`` bumps and explicitly popped by
     :func:`invalidate_on_load_flow`.
     """
-    return _get_all_attrs(network, "_buses_all", "get_buses")
+    return _get_all_attrs(network, BUSES_ALL, "get_buses")
 
 
 def get_shunts_all(network):
     """Cache ``get_shunt_compensators(all_attributes=True)`` per ``(net_key, lf_gen)``."""
-    return _get_all_attrs(network, "_shunts_all_cache", "get_shunt_compensators")
+    return _get_all_attrs(network, SHUNTS_ALL, "get_shunt_compensators")
 
 
 def get_svc_all(network):
     """Cache ``get_static_var_compensators(all_attributes=True)`` per ``(net_key, lf_gen)``."""
-    return _get_all_attrs(network, "_svc_all_cache", "get_static_var_compensators")
+    return _get_all_attrs(network, SVC_ALL, "get_static_var_compensators")
 
 
 def get_generators_all(network):
     """Cache ``get_generators(all_attributes=True)`` per ``(net_key, lf_gen)``."""
-    return _get_all_attrs(network, "_generators_all_cache", "get_generators")
+    return _get_all_attrs(network, GENERATORS_ALL, "get_generators")
 
 
 def get_3wt_all(network):
     """Cache ``get_3_windings_transformers(all_attributes=True)`` per ``(net_key, lf_gen)``."""
-    return _get_all_attrs(network, "_3wt_all_cache", "get_3_windings_transformers")
+    return _get_all_attrs(network, THREE_WT_ALL, "get_3_windings_transformers")
 
 
 # Map pypowsybl method names to their already-cached getters above so
@@ -115,7 +177,7 @@ def get_component_df(network, method_name: str) -> pd.DataFrame:
 
     For types already cached in this module (lines, generators, buses, etc.)
     delegates to the existing getter so the DataFrame is shared across tabs.
-    For all other component types a general ``"_de_component_cache"`` dict is
+    For all other component types a general :data:`DE_COMPONENT` dict is
     used, keyed by ``(net_key, lf_gen, method_name)``.
     Returns an empty DataFrame on failure.
     """
@@ -123,7 +185,7 @@ def get_component_df(network, method_name: str) -> pd.DataFrame:
     if known is not None:
         return known(network)
 
-    cache = st.session_state.setdefault("_de_component_cache", {})
+    cache = _backend.setdefault(DE_COMPONENT, {})
     key = _cache_key(network) + (method_name,)
     if key in cache:
         return cache[key]
@@ -137,11 +199,11 @@ def get_extension_df(network, extension_name: str) -> pd.DataFrame:
     """Return ``network.get_extensions(extension_name)`` cached per ``(net_key, lf_gen)``.
 
     Some extensions carry post-LF attributes, so the cache is keyed by
-    ``(net_key, lf_gen)``. Invalidated via ``_TOPOLOGY_CACHE_KEYS`` on every
+    ``(net_key, lf_gen)``. Invalidated via ``TOPOLOGY_SLOTS`` on every
     topology or extension edit.
     Returns an empty DataFrame on failure or when the extension is absent.
     """
-    cache = st.session_state.setdefault("_ext_df_cache", {})
+    cache = _backend.setdefault(EXT_DF, {})
     key = _cache_key(network) + (extension_name,)
     if key in cache:
         return cache[key]
@@ -166,14 +228,14 @@ def get_reactive_curve_points(network) -> pd.DataFrame:
     only when the topology changes, not after a load flow.
     """
     key = _net_key(network)
-    cached = st.session_state.get("_reactive_curves_cache")
+    cached = _backend.get(REACTIVE_CURVES)
     if cached is not None and cached.get("key") == key:
         return cached["df"]
     try:
         df = network.get_reactive_capability_curve_points()
     except Exception:
         df = pd.DataFrame()
-    st.session_state["_reactive_curves_cache"] = {"key": key, "df": df}
+    _backend.set(REACTIVE_CURVES, {"key": key, "df": df})
     return df
 
 
@@ -185,7 +247,7 @@ def get_vl_nominal_v(network) -> pd.DataFrame:
     :func:`invalidate_on_topology_change`.
     """
     key = _net_key(network)
-    cached = st.session_state.get("_vl_nominal_v_cache")
+    cached = _backend.get(VL_NOMINAL_V)
     if cached is not None and cached.get("key") == key:
         return cached["df"]
     try:
@@ -194,7 +256,7 @@ def get_vl_nominal_v(network) -> pd.DataFrame:
         df = vls.rename(columns={"id": "voltage_level_id"})[["voltage_level_id", "nominal_v"]]
     except Exception:
         df = pd.DataFrame(columns=["voltage_level_id", "nominal_v"])
-    st.session_state["_vl_nominal_v_cache"] = {"key": key, "df": df}
+    _backend.set(VL_NOMINAL_V, {"key": key, "df": df})
     return df
 
 
@@ -206,11 +268,11 @@ def get_operational_limits_df(network):
     ``state.py`` pop the cache when needed.
     """
     key = _net_key(network)
-    cached = st.session_state.get("_oplimits_cache")
+    cached = _backend.get(OPLIMITS)
     if cached is not None and cached.get("key") == key:
         return cached["df"]
     df = network.get_operational_limits()
-    st.session_state["_oplimits_cache"] = {"key": key, "df": df}
+    _backend.set(OPLIMITS, {"key": key, "df": df})
     return df
 
 
@@ -223,7 +285,7 @@ def get_vl_lookup(network) -> pd.DataFrame:
     Columns: ``id`` (VL id), ``substation_id``, ``nominal_v``, ``country``.
     """
     key = _net_key(network)
-    cached = st.session_state.get("_vl_lookup_cache")
+    cached = _backend.get(VL_LOOKUP)
     if cached is not None and cached.get("key") == key:
         return cached["df"]
     try:
@@ -241,13 +303,55 @@ def get_vl_lookup(network) -> pd.DataFrame:
         df = vls.merge(subs, on="substation_id", how="left")
     except Exception:
         df = pd.DataFrame(columns=["id", "substation_id", "nominal_v", "country"])
-    st.session_state["_vl_lookup_cache"] = {"key": key, "df": df}
+    _backend.set(VL_LOOKUP, {"key": key, "df": df})
     return df
 
 
-# ``enrich_with_joins`` lives in iidm_viewer.data_view so the prototypes
-# share it. Imported above; re-exported here for the existing callers.
-from iidm_viewer.data_view import enrich_with_joins  # noqa: E402, F401
+def enrich_with_joins(df: pd.DataFrame, vl_lookup: pd.DataFrame) -> pd.DataFrame:
+    """Left-join VL/substation-derived columns (``nominal_v``, ``country``) onto ``df``.
+
+    Inspects ``df`` for ``substation_id``, ``voltage_level_id``, and
+    ``voltage_level{1,2}_id`` columns and adds the corresponding lookup
+    columns when they are missing.  Returns a new DataFrame; the index is
+    preserved when possible.
+    """
+    idx_name = df.index.name
+    out = df.reset_index()
+
+    if "substation_id" in out.columns and "country" not in out.columns:
+        out = out.merge(
+            vl_lookup[["substation_id", "country"]].drop_duplicates("substation_id"),
+            on="substation_id",
+            how="left",
+        )
+
+    if "voltage_level_id" in out.columns:
+        missing = [c for c in ("nominal_v", "country") if c not in out.columns]
+        if missing:
+            lookup = vl_lookup.rename(columns={"id": "voltage_level_id"})[
+                ["voltage_level_id", *missing]
+            ].copy()
+            lookup["voltage_level_id"] = lookup["voltage_level_id"].astype(str)
+            out["voltage_level_id"] = out["voltage_level_id"].astype(str)
+            out = out.merge(lookup, on="voltage_level_id", how="left")
+
+    for side in ("1", "2"):
+        col = f"voltage_level{side}_id"
+        if col in out.columns:
+            lookup = vl_lookup.rename(
+                columns={
+                    "id": col,
+                    "nominal_v": f"nominal_v{side}",
+                    "country": f"country{side}",
+                }
+            )[[col, f"nominal_v{side}", f"country{side}"]].copy()
+            lookup[col] = lookup[col].astype(str)
+            out[col] = out[col].astype(str)
+            out = out.merge(lookup, on=col, how="left")
+
+    if idx_name and idx_name in out.columns:
+        out = out.set_index(idx_name)
+    return out
 
 
 def get_enriched_component(network, method_name: str) -> pd.DataFrame:
@@ -259,7 +363,7 @@ def get_enriched_component(network, method_name: str) -> pd.DataFrame:
     filters on the result rather than before calling this function.
     Returns an empty DataFrame when the component type is absent or fails.
     """
-    cache = st.session_state.setdefault("_enriched_component_cache", {})
+    cache = _backend.setdefault(ENRICHED_COMPONENT, {})
     key = _cache_key(network) + (method_name,)
     if key in cache:
         return cache[key]
@@ -277,7 +381,7 @@ def get_bus_voltages(network) -> pd.DataFrame:
     ``v_mag`` / ``v_pu`` are NaN when no load flow has run.
     """
     key = _cache_key(network)
-    cached = st.session_state.get("_bus_voltages_cache")
+    cached = _backend.get(BUS_VOLTAGES)
     if cached is not None and cached.get("key") == key:
         return cached["df"]
     buses = get_buses_all(network)
@@ -293,76 +397,15 @@ def get_bus_voltages(network) -> pd.DataFrame:
         merged = merged.rename(columns={"id": "bus_id"})
         merged["v_pu"] = merged["v_mag"] / merged["nominal_v"]
         df = merged[["bus_id", "voltage_level_id", "nominal_v", "v_mag", "v_pu"]]
-    st.session_state["_bus_voltages_cache"] = {"key": key, "df": df}
+    _backend.set(BUS_VOLTAGES, {"key": key, "df": df})
     return df
 
 
-# --- Invalidation ---
+# --- Invalidation entry points ----------------------------------------------
 #
-# Three levels, called from ``state.py`` to keep every pypowsybl-facing
-# cache consistent with the underlying network:
-#
-# - Topology edit (add/remove/update elements) → network rows change.
-# - Load flow → flow-carrying columns (p/q/i) + bus voltages change.
-# - Network replace (file upload or blank network) → everything.
-#
-# Several caches are keyed by ``(net_key, lf_gen)`` and self-invalidate
-# when ``_lf_gen`` bumps, but we pop them explicitly to free memory and
-# keep the behavior visible from a single place.
-
-# Caches reflecting the component set / attributes (topology).
-_TOPOLOGY_CACHE_KEYS = (
-    "_vl_lookup_cache",
-    "_vl_nominal_v_cache",
-    "_overview_cache",
-    "_lines_all_cache",
-    "_2wt_all_cache",
-    "_oplimits_cache",
-    "_reactive_curves_cache",
-    "_bbt_cache",
-    "_sld_cache",               # switch open/closed state is topology, not load-flow
-    "_sa_id_cache",
-    "_sa_manual_df_cache",
-    "_de_component_cache",
-    "_ext_df_cache",
-    "_enriched_component_cache",  # dict keyed by (net_key, lf_gen, method_name)
-    "_rcc_vl_to_xf_cache",        # VL → step-up 2WT mapping per net_key
-)
-
-# Caches additionally tied to geographic layout (lat/lon extensions).
-_GEOGRAPHY_CACHE_KEYS = (
-    "_map_data_cache",
-)
-
-# Caches depending on load-flow results (p, q, i, bus voltages).
-_LOAD_FLOW_CACHE_KEYS = (
-    "_nad_cache",
-    "_buses_all",
-    "_buses_all_net",   # stale key written by old diagrams._get_buses_all — clean up
-    "_shunts_all_cache",
-    "_svc_all_cache",
-    "_generators_all_cache",
-    "_3wt_all_cache",
-    "_bus_voltages_cache",   # buses + nominal_v + v_pu
-    "_shunts_enriched_cache",
-    "_svcs_enriched_cache",
-    "_loading_cache",        # operational limits loading %
-    "_dq_dv_cache",          # AC sensitivity dQ_bus/dV_target per (network, lf_gen, gen)
-    "_rcc_classified_cache", # classify_targets per (net_key, lf_gen, displayed gen ids)
-)
-
-# Caches holding pre-rendered map payloads or positions — only need to
-# clear when the network itself is swapped out.
-_NETWORK_REPLACE_CACHE_KEYS = (
-    "_substation_positions_cache",
-    "_voltage_map_cache",
-    "_injection_map_cache",
-)
-
-
-def _pop_all(keys) -> None:
-    for key in keys:
-        st.session_state.pop(key, None)
+# Thin wrappers over :mod:`iidm_viewer.cache_backend` so the existing call
+# sites in :mod:`state.py`, :mod:`network_reduction.py` etc. keep their
+# imports untouched.
 
 
 def invalidate_on_topology_change(affects_geography: bool = False) -> None:
@@ -372,9 +415,7 @@ def invalidate_on_topology_change(affects_geography: bool = False) -> None:
     elements carrying a position extension (substations, lines with
     ``linePosition``).
     """
-    _pop_all(_TOPOLOGY_CACHE_KEYS)
-    if affects_geography:
-        _pop_all(_GEOGRAPHY_CACHE_KEYS)
+    _cb.invalidate_topology(_backend, affects_geography=affects_geography)
 
 
 def invalidate_on_load_flow() -> None:
@@ -383,17 +424,11 @@ def invalidate_on_load_flow() -> None:
     ``_lf_gen`` alone would be enough for caches keyed by
     ``(net_key, lf_gen)``; we still pop explicitly to free memory and
     cover caches (``_nad_cache``, ``_sld_cache``, ``_buses_all``) that
-    are not keyed by lf_gen.
+    are not keyed by ``lf_gen``.
     """
-    st.session_state["_lf_gen"] = st.session_state.get("_lf_gen", 0) + 1
-    _pop_all(_TOPOLOGY_CACHE_KEYS + _LOAD_FLOW_CACHE_KEYS)
+    _cb.invalidate_load_flow(_backend)
 
 
 def invalidate_on_network_replace() -> None:
     """Pop every per-network cache — used by load_network / create_empty_network."""
-    _pop_all(
-        _TOPOLOGY_CACHE_KEYS
-        + _GEOGRAPHY_CACHE_KEYS
-        + _LOAD_FLOW_CACHE_KEYS
-        + _NETWORK_REPLACE_CACHE_KEYS
-    )
+    _cb.invalidate_network_replace(_backend)
