@@ -7,6 +7,11 @@ Streamlit (`app.py` + the legacy tab modules), PySide6 (`iidm_viewer/qt/`)
 and NiceGUI (`iidm_viewer/web/`). Cache layers differ across hosts — see
 "Hosts and their cache layers" below.
 
+**Related**: [`host-sharing.md`](host-sharing.md) is the broader cross-host
+unification plan. Steps 1–3 of that plan (CacheBackend, AppState base,
+change-log unification) are recommended prerequisites — they collapse the
+per-host bookkeeping work this doc describes into single backbone changes.
+
 ## Context
 
 Today the viewer holds exactly one network state. After a load flow there is
