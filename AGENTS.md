@@ -148,6 +148,8 @@ and import from each host rather than copying.
 |---|---|---|
 | `powsybl_worker.py` | Single-threaded executor + `NetworkProxy` | [docs/threading.md](docs/threading.md) |
 | `component_registry.py` | Shared pypowsybl component + editable-attribute registry | — |
+| `cache_backend.py` | Host-agnostic cache slot names, `_lf_gen` counter, invalidation rules; `CacheBackend(Protocol)` + `DictBackend` | [docs/host-sharing.md](docs/host-sharing.md) |
+| `caches.py` | Streamlit-flavoured wrappers around `cache_backend` (`st.session_state` backend, per-getter API used by all Streamlit tabs) | [docs/host-sharing.md](docs/host-sharing.md) |
 | `diagram_services.py` | Shared SLD / NAD / map-data generators (worker-routed) | — |
 | `network_loader.py` | Shared network IO (load from path / bytes, default-VL pick) | — |
 | `state.py` | Streamlit session-state shim. Re-exports `EDITABLE_COMPONENTS` from `component_registry`; routes loaders through `network_loader` | [docs/loadflow.md](docs/loadflow.md) |
