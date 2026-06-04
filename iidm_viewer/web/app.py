@@ -127,9 +127,48 @@ _last_map: Optional[dict] = None
 _last_nad: Optional[dict] = None
 _last_sld: Optional[dict] = None
 
-# Diagram caches — same idea as the PySide6 prototype.
-_sld_cache: dict[str, tuple[str, str]] = {}
-_nad_cache: dict[tuple[str, int], tuple[str, str]] = {}
+# Diagram caches now live in ``_state.cache_backend`` — the same
+# host-agnostic backend the PySide6 prototype uses and the Streamlit
+# host's :mod:`iidm_viewer.caches` plugs into. ``_get_sld_cache`` /
+# ``_get_nad_cache`` return the live slot dict so reads, writes and
+# mutations stay routed through one place; the module-level
+# ``__getattr__`` below keeps ``app._sld_cache`` / ``app._nad_cache``
+# working for tests that still access them as attributes.
+def _get_sld_cache() -> dict:
+    from iidm_viewer.cache_backend import SLD
+    return _state.cache_backend.setdefault(SLD, {})
+
+
+def _get_nad_cache() -> dict:
+    from iidm_viewer.cache_backend import NAD
+    return _state.cache_backend.setdefault(NAD, {})
+
+
+def _invalidate_diagram_caches() -> None:
+    """Drop every cache slot affected by a topology mutation.
+
+    Replaces the ``_nad_cache.clear(); _sld_cache.clear()`` pair that
+    used to be sprinkled across every edit handler. Routed through
+    :func:`cache_backend.invalidate_topology` so future tabs that
+    register their own slots get the same lifecycle for free.
+    """
+    from iidm_viewer.cache_backend import invalidate_topology
+    invalidate_topology(_state.cache_backend)
+
+
+def __getattr__(name: str):
+    """Module-level shim: expose ``_sld_cache`` / ``_nad_cache`` as
+    live views of the cache-backend slots so test code that asserts
+    on ``app._sld_cache == {}`` after :func:`_clear_diagrams` keeps
+    working unchanged. PEP 562: only fires on module attribute
+    lookups that miss ``__dict__``; in-module references must still
+    call :func:`_get_sld_cache` / :func:`_get_nad_cache` directly.
+    """
+    if name == "_sld_cache":
+        return _get_sld_cache()
+    if name == "_nad_cache":
+        return _get_nad_cache()
+    raise AttributeError(name)
 
 # NAD depth (number of hops shown around the focus VL). Mutated by
 # the depth input in the NAD tab.
@@ -326,14 +365,14 @@ def _push_sld(vl_id: str) -> None:
         container_id = vl_id
         svg_type = "voltage-level"
 
-    entry = _sld_cache.get(container_id)
+    entry = _get_sld_cache().get(container_id)
     if entry is None:
         try:
             entry = _generate_sld(_state.network, container_id)
         except Exception as exc:
             ui.notify(f"SLD generation failed for {container_id}: {exc}", type="negative")
             return
-        _sld_cache[container_id] = entry
+        _get_sld_cache()[container_id] = entry
     svg, metadata = entry
     args = {
         "svg": svg, "metadata": metadata,
@@ -386,8 +425,7 @@ def _handle_sld_breaker_click(value: dict) -> None:
         ui.notify(f"Switch toggle failed: {exc}", type="negative")
         return
     _state.change_log.record("Switches", switch_id, "open", before, after)
-    _nad_cache.clear()
-    _sld_cache.clear()
+    _invalidate_diagram_caches()
     if _state.selected_vl:
         _push_sld(_state.selected_vl)
         _push_nad(_state.selected_vl, _nad_depth)
@@ -431,14 +469,14 @@ def _push_nad(vl_id: str, depth: int) -> None:
     if not vl_id or _state.network is None:
         return
     key = (vl_id, int(depth))
-    entry = _nad_cache.get(key)
+    entry = _get_nad_cache().get(key)
     if entry is None:
         try:
             entry = _generate_nad(_state.network, vl_id, int(depth))
         except Exception as exc:
             ui.notify(f"NAD generation failed for {vl_id}: {exc}", type="negative")
             return
-        _nad_cache[key] = entry
+        _get_nad_cache()[key] = entry
     svg, metadata = entry
     args = {"svg": svg, "metadata": metadata, "height": 700}
     _last_nad = args
@@ -455,8 +493,14 @@ def _clear_diagrams() -> None:
     can be picked, so the stale SVG would never go away.
     """
     global _last_nad, _last_sld, _sld_show_substation
-    _nad_cache.clear()
-    _sld_cache.clear()
+    # Network-swap context: wipe both diagram slots regardless of the
+    # broader topology/LF semantics (``invalidate_topology`` keeps NAD
+    # around per the Streamlit contract — but on a swap we want both
+    # gone). The mid-app edit sites still go through
+    # :func:`_invalidate_diagram_caches`.
+    from iidm_viewer.cache_backend import NAD, SLD
+    _state.cache_backend.pop(SLD, None)
+    _state.cache_backend.pop(NAD, None)
     _sld_show_substation = False
     blank_sld = {"svg": "", "metadata": "", "height": 700,
                  "svgType": "voltage-level"}
@@ -1476,8 +1520,7 @@ def _build_create_panel_widgets(state: dict, refresh_after_create) -> None:
         ui.notify(f"Created {component.rstrip('s')} {created_id!r}",
                   type="positive", timeout=1500)
         # Topology changed — flush diagram caches and refresh data grid.
-        _nad_cache.clear()
-        _sld_cache.clear()
+        _invalidate_diagram_caches()
         if _state.selected_vl:
             _push_sld(_state.selected_vl)
             _push_nad(_state.selected_vl, _nad_depth)
@@ -1697,8 +1740,7 @@ def _build_create_branch_panel_widgets(state: dict, refresh_after_create) -> Non
         ui.notify(f"Created {component.rstrip('s')} {created_id!r}",
                   type="positive", timeout=1500)
         # Topology changed — flush diagram caches and refresh data grid.
-        _nad_cache.clear()
-        _sld_cache.clear()
+        _invalidate_diagram_caches()
         if _state.selected_vl:
             _push_sld(_state.selected_vl)
             _push_nad(_state.selected_vl, _nad_depth)
@@ -1884,8 +1926,7 @@ def _build_create_container_panel_widgets(state: dict, refresh_after_create) -> 
         ui.notify(f"Created {component.rstrip('s')} {created_id!r}",
                   type="positive", timeout=1500)
         # Topology changed (or geography for substations) -> flush diagram caches.
-        _nad_cache.clear()
-        _sld_cache.clear()
+        _invalidate_diagram_caches()
         if _state.selected_vl:
             _push_sld(_state.selected_vl)
             _push_nad(_state.selected_vl, _nad_depth)
@@ -2064,8 +2105,7 @@ def _build_create_hvdc_panel_widgets(state: dict, refresh_after_create) -> None:
                   type="positive", timeout=1500)
         # HVDC creation also touches the two converter stations on
         # both sides — flush diagram caches.
-        _nad_cache.clear()
-        _sld_cache.clear()
+        _invalidate_diagram_caches()
         if _state.selected_vl:
             _push_sld(_state.selected_vl)
             _push_nad(_state.selected_vl, _nad_depth)
@@ -2426,8 +2466,7 @@ def _build_create_coupling_device_panel_widgets(
         )
         # Coupling devices add switches in a VL — flush diagram caches so
         # the SLD repaints with the new breaker + disconnectors.
-        _nad_cache.clear()
-        _sld_cache.clear()
+        _invalidate_diagram_caches()
         if _state.selected_vl:
             _push_sld(_state.selected_vl)
             _push_nad(_state.selected_vl, _nad_depth)
@@ -3061,8 +3100,7 @@ def _build_create_extension_panel_widgets(state: dict, refresh_after_create) -> 
             type="positive", timeout=1500,
         )
         # Topology / extension change — flush diagram caches + refresh data.
-        _nad_cache.clear()
-        _sld_cache.clear()
+        _invalidate_diagram_caches()
         if _state.selected_vl:
             _push_sld(_state.selected_vl)
             _push_nad(_state.selected_vl, _nad_depth)
@@ -3497,8 +3535,7 @@ def _build_data_explorer(on_topology_changed=None):
         # the next time the user opens the NAD / SLD tab they see
         # the refreshed picture.
         if col_id in TOPOLOGY_AFFECTING_ATTRIBUTES:
-            _nad_cache.clear()
-            _sld_cache.clear()
+            _invalidate_diagram_caches()
             if _state.selected_vl:
                 _push_sld(_state.selected_vl)
                 _push_nad(_state.selected_vl, _nad_depth)
@@ -3535,8 +3572,7 @@ def _build_data_explorer(on_topology_changed=None):
         # Topology-affecting bulk changes flush the diagram caches so
         # a subsequent tab switch shows the updated picture.
         if outcome["topology_affecting"]:
-            _nad_cache.clear()
-            _sld_cache.clear()
+            _invalidate_diagram_caches()
             if _state.selected_vl:
                 _push_sld(_state.selected_vl)
                 _push_nad(_state.selected_vl, _nad_depth)
@@ -3590,8 +3626,7 @@ def _build_data_explorer(on_topology_changed=None):
         )
         # Disconnect always touches a topology-affecting attribute, so
         # flush the diagram caches unconditionally.
-        _nad_cache.clear()
-        _sld_cache.clear()
+        _invalidate_diagram_caches()
         if _state.selected_vl:
             _push_sld(_state.selected_vl)
             _push_nad(_state.selected_vl, _nad_depth)
@@ -3652,8 +3687,7 @@ def _build_data_explorer(on_topology_changed=None):
             )
             return
         # Deletion always changes topology -> flush diagram caches.
-        _nad_cache.clear()
-        _sld_cache.clear()
+        _invalidate_diagram_caches()
         if _state.selected_vl:
             _push_sld(_state.selected_vl)
             _push_nad(_state.selected_vl, _nad_depth)
@@ -6884,8 +6918,7 @@ def _after_revert(touched, refresh_data_grid) -> None:
     the reverted network state.
     """
     if any(attr in TOPOLOGY_AFFECTING_ATTRIBUTES for _, attr in touched):
-        _nad_cache.clear()
-        _sld_cache.clear()
+        _invalidate_diagram_caches()
         if _state.selected_vl:
             _push_sld(_state.selected_vl)
             _push_nad(_state.selected_vl, _nad_depth)
@@ -7238,8 +7271,7 @@ def main_page() -> None:
             except Exception:
                 pass
             _rebuild_vl_options()
-            _nad_cache.clear()
-            _sld_cache.clear()
+            _invalidate_diagram_caches()
             if _state.selected_vl:
                 _push_sld(_state.selected_vl)
                 _push_nad(_state.selected_vl, _nad_depth)
@@ -7380,8 +7412,7 @@ def main_page() -> None:
         the enriched DataFrames. Flush the diagram caches and refresh
         whichever VL is active + the data grid + the extensions tab.
         """
-        _nad_cache.clear()
-        _sld_cache.clear()
+        _invalidate_diagram_caches()
         if _state.selected_vl:
             _push_sld(_state.selected_vl)
             _push_nad(_state.selected_vl, _nad_depth)

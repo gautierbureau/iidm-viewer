@@ -274,7 +274,9 @@ class MainWindow(QMainWindow):
         self.overview_tab = OverviewTab()
         self.map_tab = MapTab()
         self.nad_tab = NadTab()
+        self.nad_tab.set_cache_backend(self.state.cache_backend)
         self.sld_tab = SldTab()
+        self.sld_tab.set_cache_backend(self.state.cache_backend)
         self.data_tab = DataExplorerTab()
         self.extensions_tab = ExtensionsExplorerTab()
         self.reactive_curves_tab = ReactiveCurvesTab()
@@ -608,9 +610,9 @@ class MainWindow(QMainWindow):
             f"AC load flow: {status}",
         )
         # Flush diagram caches (P/Q labels change) and refresh the
-        # currently-shown VL diagrams.
-        self.nad_tab._cache.clear()
-        self.sld_tab._cache.clear()
+        # currently-shown VL diagrams. ``AppState.run_loadflow`` has
+        # already popped the NAD and SLD slots in the shared backend
+        # via ``invalidate_load_flow``; this just re-renders.
         if self.state.selected_vl:
             self.nad_tab.show_voltage_level(self.state.selected_vl)
             self.sld_tab.show_voltage_level(self.state.selected_vl)

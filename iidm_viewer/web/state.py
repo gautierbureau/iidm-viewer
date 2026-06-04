@@ -14,6 +14,11 @@ from typing import Callable, Optional
 import os
 
 from iidm_viewer import network_loader, script_recorder
+from iidm_viewer.cache_backend import (
+    DictBackend,
+    invalidate_load_flow,
+    invalidate_network_replace,
+)
 from iidm_viewer.change_log import ChangeLog
 from iidm_viewer.loadflow import LoadFlowResult, run_ac
 from iidm_viewer.powsybl_worker import NetworkProxy
@@ -51,6 +56,12 @@ class AppState:
         self.import_post_processors: list = []
         # One ChangeLog per process. Reset on every network reload.
         self.change_log = ChangeLog()
+        # Host-agnostic cache slot store (see :mod:`iidm_viewer.cache_backend`).
+        # Diagram caches (and any future shared-getter callers) read /
+        # write the slot constants here; load-flow and network-replace
+        # events pop the corresponding slot groups so a fresh fetch
+        # happens on the next refresh — no scattered ``.clear()`` calls.
+        self.cache_backend = DictBackend()
 
     # ------------------------------------------------------------------
     # Accessors
@@ -116,6 +127,11 @@ class AppState:
         populated by the event loop.
         """
         default_vl = network_loader.pick_default_vl(network) if network else None
+        # Pop every slot before the listeners run so any cache-backed
+        # consumer (diagram tabs, future shared getters) rebuilds from
+        # the new network. Mirrors Streamlit's
+        # ``invalidate_on_network_replace``.
+        invalidate_network_replace(self.cache_backend)
         self._network = network
         self._selected_vl = None
         self._last_report_json = None
@@ -146,6 +162,9 @@ class AppState:
         self._selected_vl = None
         self._last_report_json = None
         self.change_log.clear()
+        # Same blast-radius as install_network — any cached SVG /
+        # DataFrame is stale after an in-place mutation.
+        invalidate_network_replace(self.cache_backend)
         default_vl = network_loader.pick_default_vl(network)
         for listener in list(self._network_listeners):
             listener(network)
@@ -185,5 +204,9 @@ class AppState:
             provider_params = self.lf_provider_params or None
         result = run_ac(self._network, generic_params, provider_params)
         self._last_report_json = getattr(result, "report_json", None)
+        # Bump the LF generation counter + pop flow-dependent caches
+        # so peripheral panels rebuild on the next refresh. Mirrors
+        # Streamlit's ``invalidate_on_load_flow``.
+        invalidate_load_flow(self.cache_backend)
         script_recorder.record_run_loadflow(generic_params, provider_params)
         return result

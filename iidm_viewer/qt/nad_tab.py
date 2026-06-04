@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from iidm_viewer.cache_backend import NAD, CacheBackend, DictBackend
 from iidm_viewer.diagram_services import generate_nad as _generate_nad
 from iidm_viewer.powsybl_worker import NetworkProxy
 from iidm_viewer.qt.web_view import PowsyblWebView
@@ -48,7 +49,11 @@ class NadTab(QWidget):
         self._network: Optional[NetworkProxy] = None
         self._current_vl: Optional[str] = None
         self._depth = 1
-        self._cache: dict[tuple[str, int], tuple[str, str]] = {}
+        # ``(vl, depth) → (svg, metadata)`` lookup, stored in the
+        # AppState's shared cache backend (see :meth:`set_cache_backend`).
+        # Headless tests get an instance-private DictBackend, identical
+        # to the old ``self._cache = {}`` behaviour.
+        self._cache_backend: CacheBackend = DictBackend()
         self._ready = False
 
         self._status = QLabel("Load a network to see the Network Area Diagram.")
@@ -77,9 +82,30 @@ class NadTab(QWidget):
         layout.addLayout(controls)
         layout.addWidget(self._view, 1)
 
+    @property
+    def _cache(self) -> dict:
+        """Live view of the NAD slot in the cache backend.
+
+        Returned dict is the actual slot storage, so existing call sites
+        (and tests) that mutate it via ``_cache[key] = ...`` keep
+        working unchanged.
+        """
+        return self._cache_backend.setdefault(NAD, {})
+
+    def set_cache_backend(self, backend: CacheBackend) -> None:
+        """Plug in the shared AppState backend.
+
+        Called once by the MainWindow after construction so the tab
+        reads / writes the same :data:`cache_backend.NAD` slot the
+        rest of the host invalidates.
+        """
+        self._cache_backend = backend
+
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
-        self._cache.clear()
+        # Pop the NAD slot defensively in case the AppState hasn't
+        # already done so (e.g. headless tests with a private backend).
+        self._cache_backend.pop(NAD, None)
         self._current_vl = None
         self._status.setText(
             "Select a voltage level to display the NAD."
@@ -122,18 +148,20 @@ class NadTab(QWidget):
         """
         if self._network is None or self._current_vl is None:
             return
+        cache = self._cache_backend.setdefault(NAD, {})
         key = (self._current_vl, self._depth)
-        if key in self._cache:
+        if key in cache:
             return
         try:
-            self._cache[key] = _generate_nad(self._network, self._current_vl, self._depth)
+            cache[key] = _generate_nad(self._network, self._current_vl, self._depth)
         except Exception as exc:
             self._status.setText(f"NAD failed for {self._current_vl}: {exc}")
 
     def _render(self) -> None:
         if not self._ready or self._current_vl is None:
             return
-        entry = self._cache.get((self._current_vl, self._depth))
+        cache = self._cache_backend.setdefault(NAD, {})
+        entry = cache.get((self._current_vl, self._depth))
         if entry is None:
             return
         svg, metadata = entry

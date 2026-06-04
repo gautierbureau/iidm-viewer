@@ -16,6 +16,11 @@ from PySide6.QtCore import QObject, Signal
 import os
 
 from iidm_viewer import network_loader, script_recorder
+from iidm_viewer.cache_backend import (
+    DictBackend,
+    invalidate_load_flow,
+    invalidate_network_replace,
+)
 from iidm_viewer.change_log import ChangeLog
 from iidm_viewer.loadflow import LoadFlowResult, run_ac
 from iidm_viewer.powsybl_worker import NetworkProxy
@@ -55,6 +60,12 @@ class AppState(QObject):
         # One ChangeLog per process. Reset on every network reload so
         # entries don't leak between unrelated networks.
         self.change_log = ChangeLog()
+        # Host-agnostic cache slot store (see :mod:`iidm_viewer.cache_backend`).
+        # Diagram tabs use it to share SVG caches with the AppState
+        # invalidation hooks; load-flow and network-replace events pop
+        # the corresponding slot groups here so a fresh fetch happens
+        # on the next refresh — no per-tab manual ``.clear()``.
+        self.cache_backend = DictBackend()
 
     @property
     def network(self) -> Optional[NetworkProxy]:
@@ -117,6 +128,10 @@ class AppState(QObject):
         listeners in lockstep.
         """
         default_vl = network_loader.pick_default_vl(network)
+        # Pop every slot before the listeners run so any cache-backed
+        # tab that reacts to ``network_changed`` rebuilds from the new
+        # network. Mirrors Streamlit's ``invalidate_on_network_replace``.
+        invalidate_network_replace(self.cache_backend)
         self._network = network
         self._selected_vl = None  # cleared first so set_selected_vl emits below
         self._last_report_json = None
@@ -151,6 +166,9 @@ class AppState(QObject):
         self._selected_vl = None
         self._last_report_json = None
         self.change_log.clear()
+        # Same blast-radius as install_network — any cached SVG /
+        # DataFrame is stale.
+        invalidate_network_replace(self.cache_backend)
         # Pick a fresh default-VL (highest nominal V) on the reduced
         # network and broadcast the change to every listener.
         default_vl = network_loader.pick_default_vl(network)
@@ -180,6 +198,10 @@ class AppState(QObject):
             provider_params = self.lf_provider_params or None
         result = run_ac(self._network, generic_params, provider_params)
         self._last_report_json = getattr(result, "report_json", None)
+        # Bump the LF generation counter + pop flow-dependent caches
+        # so peripheral panels rebuild on the next refresh. Mirrors
+        # Streamlit's ``invalidate_on_load_flow``.
+        invalidate_load_flow(self.cache_backend)
         script_recorder.record_run_loadflow(generic_params, provider_params)
         self.loadflow_completed.emit(result)
         return result
