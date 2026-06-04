@@ -1,14 +1,89 @@
 import pandas as pd
 import streamlit as st
 
+from iidm_viewer.app_state import AppState as _BaseAppState
 from iidm_viewer.powsybl_worker import NetworkProxy, run
 from iidm_viewer import network_loader
 from iidm_viewer.caches import (
+    backend as _caches_backend,
     invalidate_on_load_flow,
     invalidate_on_network_replace,
     invalidate_on_topology_change,
 )
+from iidm_viewer.loadflow import LoadFlowResult, run_ac
 from iidm_viewer import script_recorder
+
+
+class AppState(_BaseAppState):
+    """Streamlit-flavoured :class:`iidm_viewer.app_state.AppState`.
+
+    Plugs ``st.session_state`` in as the storage backend so the
+    inherited properties (``network``, ``selected_vl``,
+    ``last_report_json``, the persisted LF / import overrides) read /
+    write the same session-state keys the existing module-level
+    functions in this file already use. Cache backend is the shared
+    Streamlit one from :mod:`iidm_viewer.caches`.
+
+    Notification hooks are no-ops because Streamlit's rerun model
+    fans state changes out implicitly — every tab re-reads on its
+    next rerun, so no listener registry is needed.
+
+    The historical module-level functions (``load_network``,
+    ``run_loadflow``, …) are unchanged for backward compatibility;
+    they read / write the same session-state keys this class
+    exposes, so existing code and the new unified ``state.app_state()``
+    accessor see the same data.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Swap in the Streamlit-backed cache backend (the singleton
+        # used by the rest of ``iidm_viewer.caches``).
+        self.cache_backend = _caches_backend
+
+    # Storage hooks — back the AppState fields with ``st.session_state``
+    # so the unified API and the legacy module-level functions share
+    # one source of truth.
+    def _get(self, key: str, default=None):
+        return st.session_state.get(key, default)
+
+    def _set(self, key: str, value) -> None:
+        st.session_state[key] = value
+
+    # Notification hooks — no-ops. Streamlit reruns on every interaction
+    # and every tab re-reads ``st.session_state`` on its next render, so
+    # there's no listener registry to fire.
+    def _emit_network_changed(self, network) -> None:
+        pass
+
+    def _emit_selected_vl_changed(self, vl_id) -> None:
+        pass
+
+    def _emit_loadflow_completed(self, result) -> None:
+        pass
+
+    def _run_ac(self, network, generic_params, provider_params) -> LoadFlowResult:
+        # Resolves via this module's ``run_ac`` import so tests that
+        # ``monkeypatch.setattr("iidm_viewer.state.run_ac", …)`` still
+        # intercept the call.
+        return run_ac(network, generic_params, provider_params)
+
+
+def app_state() -> AppState:
+    """Return the per-session :class:`AppState` singleton.
+
+    Created lazily on first call inside the current Streamlit session
+    and stashed in ``st.session_state``. The AppState's stored fields
+    (network, selected_vl, …) live in ``st.session_state`` directly
+    via the ``_get`` / ``_set`` overrides, so any code reaching for
+    those keys keeps working; the singleton itself carries the
+    ``change_log`` instance and the cache backend reference.
+    """
+    instance = st.session_state.get("_app_state_instance")
+    if instance is None:
+        instance = AppState()
+        st.session_state["_app_state_instance"] = instance
+    return instance
 
 
 def init_state():
