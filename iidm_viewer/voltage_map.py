@@ -443,13 +443,14 @@ def voltage_map_caption(
 
 
 def _get_cached_voltage_map_data(network):
-    import streamlit as st
+    from iidm_viewer.cache_backend import VOLTAGE_MAP
+    from iidm_viewer.caches import backend as _backend
 
-    cache = st.session_state.get("_voltage_map_cache")
+    cache = _backend.get(VOLTAGE_MAP)
     if cache is not None:
         return cache
     result = _extract_voltage_map_data(network)
-    st.session_state["_voltage_map_cache"] = result
+    _backend.set(VOLTAGE_MAP, result)
     return result
 
 

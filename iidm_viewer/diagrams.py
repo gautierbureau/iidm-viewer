@@ -4,6 +4,8 @@ import re
 
 import pandas as pd
 import streamlit as st
+from iidm_viewer.cache_backend import BBT, NAD, SLD
+from iidm_viewer.caches import backend as _backend
 from iidm_viewer.nad_component import render_interactive_nad
 from iidm_viewer.navigation import decode_svg_id as _decode_svg_id
 from iidm_viewer.sld_component import render_interactive_sld
@@ -188,7 +190,7 @@ def render_nad_tab(network, selected_vl):
         return
 
     cache_key = (selected_vl, depth)
-    nad_cache = st.session_state.setdefault("_nad_cache", {})
+    nad_cache = _backend.setdefault(NAD, {})
     cached = nad_cache.get(cache_key)
     if cached is not None:
         svg, metadata = cached
@@ -293,7 +295,7 @@ def _get_bbt_buses(network, vl_id: str):
     Returns ``None`` on failure.
     """
     key = _net_key(network)
-    cache = st.session_state.setdefault("_bbt_cache", {})
+    cache = _backend.setdefault(BBT, {})
     cache_key = (key, vl_id)
     if cache_key in cache:
         return cache[cache_key]
@@ -340,7 +342,7 @@ def render_sld_tab(network, selected_vl):
                 st.session_state["sld_show_substation"] = True
                 st.rerun()
 
-    sld_cache = st.session_state.setdefault("_sld_cache", {})
+    sld_cache = _backend.setdefault(SLD, {})
     cached_sld = sld_cache.get(container_id)
     if cached_sld is not None:
         svg, metadata = cached_sld

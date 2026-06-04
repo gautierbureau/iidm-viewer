@@ -14,9 +14,11 @@ import tempfile
 import pandas as pd
 import streamlit as st
 
+from iidm_viewer.cache_backend import SA_ID, SA_MANUAL_DF
 from iidm_viewer.caches import (
     _cache_key as _caches_cache_key,
     _net_key as _caches_net_key,
+    backend as _backend,
     get_2wt_all,
     get_3wt_all,
     get_generators_all,
@@ -66,17 +68,17 @@ def _get_nominal_voltages(network) -> list[float]:
 def _get_ids(network) -> dict[str, list[str]]:
     """Streamlit-cached wrapper around the shared ``get_element_ids``.
 
-    Cached per ``net_key`` in ``st.session_state["_sa_id_cache"]``;
-    invalidated by ``caches._TOPOLOGY_CACHE_KEYS`` on every topology
-    edit. The PySide6 / NiceGUI hosts call ``get_element_ids``
+    Cached per ``net_key`` in the :data:`cache_backend.SA_ID` slot;
+    invalidated by :func:`cache_backend.invalidate_topology` on every
+    topology edit. The PySide6 / NiceGUI hosts call ``get_element_ids``
     directly with their own caching layer.
     """
     net_key = _caches_net_key(network)
-    cached = st.session_state.get("_sa_id_cache")
+    cached = _backend.get(SA_ID)
     if cached is not None and cached.get("key") == net_key:
         return cached["data"]
     data = get_element_ids(network)
-    st.session_state["_sa_id_cache"] = {"key": net_key, "data": data}
+    _backend.set(SA_ID, {"key": net_key, "data": data})
     return data
 
 
@@ -97,7 +99,7 @@ def _get_filterable_df(network, manual_type: str) -> pd.DataFrame:
     within a rerun are free. Invalidated via ``caches._TOPOLOGY_CACHE_KEYS``
     on topology edits, and self-invalidating after a load flow (lf_gen bumps).
     """
-    cache = st.session_state.setdefault("_sa_manual_df_cache", {})
+    cache = _backend.setdefault(SA_MANUAL_DF, {})
     key = _caches_cache_key(network) + (manual_type,)
     if key in cache:
         return cache[key]
