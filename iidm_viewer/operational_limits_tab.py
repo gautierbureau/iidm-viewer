@@ -11,8 +11,10 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from iidm_viewer.cache_backend import LOADING
 from iidm_viewer.caches import (
     _cache_key,
+    backend as _backend,
     get_enriched_component,
     get_operational_limits_df,
 )
@@ -40,11 +42,11 @@ def _compute_loading_cached(network, limits_reset: pd.DataFrame) -> pd.DataFrame
     ``invalidate_on_load_flow`` bumps ``_lf_gen``.
     """
     key = _cache_key(network)
-    cached = st.session_state.get("_loading_cache")
+    cached = _backend.get(LOADING)
     if cached is not None and cached.get("key") == key:
         return cached["df"]
     df = compute_loading(network, limits_reset)
-    st.session_state["_loading_cache"] = {"key": key, "df": df}
+    _backend.set(LOADING, {"key": key, "df": df})
     return df
 
 

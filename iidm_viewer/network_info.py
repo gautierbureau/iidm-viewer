@@ -11,6 +11,8 @@ import pandas as pd
 # Source of truth lives in the framework-agnostic registry so the Qt and
 # NiceGUI prototypes can reuse the same component map without dragging
 # streamlit into their dependency graph.
+from iidm_viewer.cache_backend import OVERVIEW, lf_gen as _lf_gen
+from iidm_viewer.caches import backend as _backend
 from iidm_viewer.component_registry import COMPONENT_TYPES  # noqa: F401
 from iidm_viewer.network_info_core import (
     branch_losses_totals,
@@ -45,16 +47,14 @@ def _get_overview_data(network) -> tuple:
     the previous Streamlit implementation exposed, used by
     :func:`render_overview` below.
     """
-    import streamlit as st
-
     net_key = _net_key(network)
-    lf_gen = st.session_state.get("_lf_gen", 0)
+    gen = _lf_gen(_backend)
 
-    cached = st.session_state.get("_overview_cache")
+    cached = _backend.get(OVERVIEW)
     if (
         cached is not None
         and cached.get("net_key") == net_key
-        and cached.get("lf_gen") == lf_gen
+        and cached.get("lf_gen") == gen
     ):
         return cached["data"]
 
@@ -64,11 +64,11 @@ def _get_overview_data(network) -> tuple:
     counts = build_component_counts(network)
 
     data = (country_df, losses, by_country, counts)
-    st.session_state["_overview_cache"] = {
+    _backend.set(OVERVIEW, {
         "net_key": net_key,
-        "lf_gen": lf_gen,
+        "lf_gen": gen,
         "data": data,
-    }
+    })
     return data
 
 

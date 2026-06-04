@@ -203,13 +203,14 @@ def _extract_injection_data(network) -> dict | None:
 
 
 def _get_cached_injection_data(network):
-    import streamlit as st
+    from iidm_viewer.cache_backend import INJECTION_MAP
+    from iidm_viewer.caches import backend as _backend
 
-    cache = st.session_state.get("_injection_map_cache")
+    cache = _backend.get(INJECTION_MAP)
     if cache is not None:
         return cache
     result = _extract_injection_data(network)
-    st.session_state["_injection_map_cache"] = result
+    _backend.set(INJECTION_MAP, result)
     return result
 
 

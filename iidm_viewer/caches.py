@@ -85,6 +85,13 @@ class StreamlitSessionBackend:
 
 _backend = StreamlitSessionBackend()
 
+#: Public alias for other Streamlit-side modules that hold their own cache
+#: dicts (``diagrams``, ``network_info``, ``voltage_analysis``, …). Using
+#: this single instance instead of touching ``st.session_state`` directly
+#: lets the host-agnostic :func:`cache_backend.invalidate_*` hooks pop every
+#: slot in one place.
+backend = _backend
+
 
 def _net_key(network) -> int:
     try:

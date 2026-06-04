@@ -21,8 +21,10 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from iidm_viewer.cache_backend import SHUNTS_ENRICHED, SVCS_ENRICHED
 from iidm_viewer.caches import (
     _cache_key,
+    backend as _backend,
     get_bus_voltages,
     get_shunts_all,
     get_svc_all,
@@ -48,36 +50,32 @@ from iidm_viewer.voltage_map import render_voltage_map
 def _shunt_compensation(network) -> pd.DataFrame:
     """Per-session cache around :func:`enrich_shunts`."""
     key = _cache_key(network)
-    cached = st.session_state.get("_shunts_enriched_cache")
+    cached = _backend.get(SHUNTS_ENRICHED)
     if cached is not None and cached.get("key") == key:
         return cached["df"]
 
     shunts = get_shunts_all(network)
     if shunts.empty:
-        st.session_state["_shunts_enriched_cache"] = {
-            "key": key, "df": pd.DataFrame(),
-        }
+        _backend.set(SHUNTS_ENRICHED, {"key": key, "df": pd.DataFrame()})
         return pd.DataFrame()
     result = enrich_shunts(shunts, get_vl_nominal_v(network))
-    st.session_state["_shunts_enriched_cache"] = {"key": key, "df": result}
+    _backend.set(SHUNTS_ENRICHED, {"key": key, "df": result})
     return result
 
 
 def _svc_compensation(network) -> pd.DataFrame:
     """Per-session cache around :func:`enrich_svcs`."""
     key = _cache_key(network)
-    cached = st.session_state.get("_svcs_enriched_cache")
+    cached = _backend.get(SVCS_ENRICHED)
     if cached is not None and cached.get("key") == key:
         return cached["df"]
 
     svcs = get_svc_all(network)
     if svcs.empty:
-        st.session_state["_svcs_enriched_cache"] = {
-            "key": key, "df": pd.DataFrame(),
-        }
+        _backend.set(SVCS_ENRICHED, {"key": key, "df": pd.DataFrame()})
         return pd.DataFrame()
     result = enrich_svcs(svcs, get_vl_nominal_v(network))
-    st.session_state["_svcs_enriched_cache"] = {"key": key, "df": result}
+    _backend.set(SVCS_ENRICHED, {"key": key, "df": result})
     return result
 
 

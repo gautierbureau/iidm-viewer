@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import streamlit as st
 
+from iidm_viewer.cache_backend import MAP_DATA
+from iidm_viewer.caches import backend as _backend
 from iidm_viewer.diagram_services import extract_map_data as _extract_map_data
 from iidm_viewer.map_component import render_interactive_map
 
@@ -20,11 +22,11 @@ _MISSING = object()  # sentinel: key absent from session state (distinct from No
 
 def _get_cached_map_data(network):
     """Cache extraction in session state so reruns don't reprocess."""
-    cache = st.session_state.get("_map_data_cache", _MISSING)
+    cache = _backend.get(MAP_DATA, _MISSING)
     if cache is not _MISSING:
         return cache  # may be None when the network has no geo data
     result = _extract_map_data(network)
-    st.session_state["_map_data_cache"] = result
+    _backend.set(MAP_DATA, result)
     # Bump the version so the JS map component knows to rebuild layers.
     st.session_state["_map_data_version"] = st.session_state.get("_map_data_version", 0) + 1
     return result

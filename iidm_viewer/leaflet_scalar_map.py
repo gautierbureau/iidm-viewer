@@ -33,7 +33,7 @@ from typing import Iterable
 from iidm_viewer.powsybl_worker import run
 
 
-_SUBSTATION_POSITIONS_CACHE_KEY = "_substation_positions_cache"
+from iidm_viewer.cache_backend import SUBSTATION_POSITIONS as _SUBSTATION_POSITIONS_CACHE_KEY  # noqa: F401  (legacy alias)
 
 
 @dataclass(frozen=True)
@@ -103,21 +103,21 @@ def get_substation_positions(network) -> dict[str, tuple[float, float]]:
     missing or has no valid entries — callers can
     ``if not positions: return`` and render an info message.
     """
-    import streamlit as st
+    from iidm_viewer.caches import backend as _backend
 
-    cached = st.session_state.get(_SUBSTATION_POSITIONS_CACHE_KEY)
+    cached = _backend.get(_SUBSTATION_POSITIONS_CACHE_KEY)
     if cached is not None:
         return cached
     positions = _extract_substation_positions(network)
-    st.session_state[_SUBSTATION_POSITIONS_CACHE_KEY] = positions
+    _backend.set(_SUBSTATION_POSITIONS_CACHE_KEY, positions)
     return positions
 
 
 def clear_substation_positions_cache() -> None:
     """Drop the cached substation positions for the current session."""
-    import streamlit as st
+    from iidm_viewer.caches import backend as _backend
 
-    st.session_state.pop(_SUBSTATION_POSITIONS_CACHE_KEY, None)
+    _backend.pop(_SUBSTATION_POSITIONS_CACHE_KEY, None)
 
 
 _LEAFLET_HTML = """
