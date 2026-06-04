@@ -107,13 +107,14 @@ class AppState:
         self.change_log = ChangeLog()
         self.cache_backend: CacheBackend = DictBackend()
 
-        # Persisted user overrides — accessed via the properties below
-        # so subclasses don't need to know the storage key.
-        self._set("lf_generic_params", {})
-        self._set("lf_provider_params", {})
-        self._set("import_format", None)
-        self._set("import_params", {})
-        self._set("import_post_processors", [])
+        # NOTE: persisted user overrides (lf_generic_params,
+        # lf_provider_params, import_format, import_params,
+        # import_post_processors) are intentionally **not** pre-populated
+        # here. The property accessors below return sane defaults
+        # (``{}`` / ``[]`` / ``None``) for a missing key, and skipping
+        # the writes keeps the Streamlit subclass from clobbering a
+        # value already stashed in ``st.session_state`` from a previous
+        # rerun.
 
     # ------------------------------------------------------------------
     # Storage hooks (default = in-memory dict)
