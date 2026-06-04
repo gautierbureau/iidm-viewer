@@ -26,6 +26,7 @@ from typing import Optional
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from iidm_viewer.cache_backend import SLD, CacheBackend, DictBackend
 from iidm_viewer.diagram_services import generate_sld as _generate_sld
 from iidm_viewer.powsybl_worker import NetworkProxy
 from iidm_viewer.qt.web_view import PowsyblWebView
@@ -64,7 +65,13 @@ class SldTab(QWidget):
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
         self._current_vl: Optional[str] = None
-        self._cache: dict[str, tuple[str, str]] = {}
+        # Container-id → (svg, metadata) lookup, stored in the
+        # AppState's cache backend so :func:`cache_backend.invalidate_*`
+        # hooks clear it without the tab having to listen for events.
+        # Each instance owns a private DictBackend until the MainWindow
+        # injects the shared one via :meth:`set_cache_backend` — this
+        # keeps headless tests independent.
+        self._cache_backend: CacheBackend = DictBackend()
         self._ready = False
         self._show_substation = False
 
@@ -89,9 +96,32 @@ class SldTab(QWidget):
         layout.addLayout(header)
         layout.addWidget(self._view, 1)
 
+    @property
+    def _cache(self) -> dict:
+        """Live view of the SLD slot in the cache backend.
+
+        Returned dict is the actual slot storage, so existing call sites
+        (and tests) that mutate it via ``_cache[key] = ...`` keep
+        working unchanged.
+        """
+        return self._cache_backend.setdefault(SLD, {})
+
+    def set_cache_backend(self, backend: CacheBackend) -> None:
+        """Plug in the shared AppState backend.
+
+        Called once by the MainWindow after construction so the tab
+        reads / writes the same :data:`cache_backend.SLD` slot the
+        rest of the host invalidates. Has no effect on tests that
+        never call it — the private DictBackend created in ``__init__``
+        gives the same behaviour the previous ``self._cache`` dict had.
+        """
+        self._cache_backend = backend
+
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
-        self._cache.clear()
+        # Pop the SLD slot defensively in case the AppState hasn't
+        # already done so (e.g. headless tests with a private backend).
+        self._cache_backend.pop(SLD, None)
         self._current_vl = None
         self._show_substation = False
         self._expand_btn.setVisible(False)
@@ -134,15 +164,16 @@ class SldTab(QWidget):
             container_id = vl_id
             svg_type = "voltage-level"
 
-        if container_id in self._cache:
-            svg, metadata = self._cache[container_id]
+        cache = self._cache_backend.setdefault(SLD, {})
+        if container_id in cache:
+            svg, metadata = cache[container_id]
         else:
             try:
                 svg, metadata = _generate_sld(self._network, container_id)
             except Exception as exc:
                 self._status.setText(f"SLD failed for {container_id}: {exc}")
                 return
-            self._cache[container_id] = (svg, metadata)
+            cache[container_id] = (svg, metadata)
         if self._show_substation and sid:
             self._status.setText(f"Substation: {sid}")
         else:
@@ -214,7 +245,8 @@ class SldTab(QWidget):
         # When showing the substation, the cache key is the substation id.
         sid, _ = self._get_substation_for_vl(self._current_vl)
         cache_key = sid if (self._show_substation and sid) else self._current_vl
-        entry = self._cache.get(cache_key)
+        cache = self._cache_backend.setdefault(SLD, {})
+        entry = cache.get(cache_key)
         if entry is None:
             return
         svg, metadata = entry
