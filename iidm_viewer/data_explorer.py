@@ -239,15 +239,32 @@ def _render_change_log(network, component: str, method_name: str):
 
 
 def _add_to_removal_log(component: str, ids: list[str], snapshot_df: pd.DataFrame):
-    """Record removed element ids (with full snapshot) in a per-component session-state log."""
+    """Record removed element ids (with full snapshot) in the removal log.
+
+    Dual-writes:
+
+    * Legacy per-component ``st.session_state[f"_removal_log_{component}"]``
+      list (what the existing Streamlit render code reads).
+    * Shared :meth:`iidm_viewer.change_log.ChangeLog.record_removal` on
+      :func:`state.app_state` (what new cross-host code reads).
+    """
+    from iidm_viewer.state import app_state
+
     key = f"_removal_log_{component}"
     log: list[dict] = list(st.session_state.get(key, []))
     existing_ids = {e["element_id"] for e in log}
+    new_ids: list[str] = []
     for eid in ids:
         if eid not in existing_ids:
             snapshot = snapshot_df.loc[eid].to_dict() if eid in snapshot_df.index else {}
             log.append({"element_id": eid, "snapshot": snapshot})
+            new_ids.append(eid)
     st.session_state[key] = log
+    if new_ids:
+        # The shared ChangeLog stores one record per id; pass the
+        # snapshot DataFrame so future "undo" hosts can reconstruct
+        # the removed row via the pypowsybl ``create_*`` APIs.
+        app_state().change_log.record_removal(component, new_ids, snapshot=snapshot_df)
 
 
 def _render_removal_log(component: str):
