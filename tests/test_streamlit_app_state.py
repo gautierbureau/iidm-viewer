@@ -174,7 +174,10 @@ def test_run_loadflow_writes_report_to_session_state():
 
         assert result is fake_result
         assert state.last_report_json == '{"report": "ok"}'
-        assert shared["last_report_json"] == '{"report": "ok"}'
+        # The Streamlit AppState maps ``last_report_json`` to the legacy
+        # ``_lf_report_json`` session-state key so the LF report dialog
+        # and any other reader keeps finding it.
+        assert shared["_lf_report_json"] == '{"report": "ok"}'
         # _lf_gen bumped via the Streamlit cache backend.
         assert shared[LF_GEN] == 1
 

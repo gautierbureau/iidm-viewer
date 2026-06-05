@@ -29,11 +29,18 @@ class AppState(_BaseAppState):
     next rerun, so no listener registry is needed.
 
     The historical module-level functions (``load_network``,
-    ``run_loadflow``, …) are unchanged for backward compatibility;
-    they read / write the same session-state keys this class
-    exposes, so existing code and the new unified ``state.app_state()``
-    accessor see the same data.
+    ``run_loadflow``, …) delegate to a session-scoped singleton of
+    this class via :func:`app_state`, so the unified API and the
+    legacy callers share one source of truth for every field.
     """
+
+    # Translate AppState field names to the legacy session-state keys
+    # the existing Streamlit code already uses. ``last_report_json``
+    # historically lives at ``_lf_report_json``; keep it that way so
+    # the LF report dialog and any other reader keeps finding it.
+    _STREAMLIT_KEY_MAP = {
+        "last_report_json": "_lf_report_json",
+    }
 
     def __init__(self) -> None:
         super().__init__()
@@ -45,10 +52,10 @@ class AppState(_BaseAppState):
     # so the unified API and the legacy module-level functions share
     # one source of truth.
     def _get(self, key: str, default=None):
-        return st.session_state.get(key, default)
+        return st.session_state.get(self._STREAMLIT_KEY_MAP.get(key, key), default)
 
     def _set(self, key: str, value) -> None:
-        st.session_state[key] = value
+        st.session_state[self._STREAMLIT_KEY_MAP.get(key, key)] = value
 
     # Notification hooks — no-ops. Streamlit reruns on every interaction
     # and every tab re-reads ``st.session_state`` on its next render, so
@@ -67,6 +74,45 @@ class AppState(_BaseAppState):
         # ``monkeypatch.setattr("iidm_viewer.state.run_ac", …)`` still
         # intercept the call.
         return run_ac(network, generic_params, provider_params)
+
+    # ------------------------------------------------------------------
+    # Streamlit-specific lifecycle extras
+    # ------------------------------------------------------------------
+    def install_network(self, network) -> None:
+        """Install a network, plus the Streamlit-specific session-state
+        housekeeping the legacy ``load_network`` / ``create_empty_network``
+        used to do inline:
+
+        * bump ``vl_selector_gen`` so the VL picker widget remounts;
+        * pop ``_vl_set_by_click`` so a stale post-click flag doesn't carry over;
+        * pop ``_export_*`` and ``va_nom_select`` so the previous network's
+          widget state doesn't leak into the new one;
+        * delete the per-method ``_change_log_*`` / ``_removal_log_*`` /
+          ``_ext_change_log_*`` / ``_ext_removal_log_*`` / ``_export_cache_*``
+          session-state keys (the Streamlit-only per-method change log
+          shape; the shared ``self.change_log`` is reset by ``super()``).
+
+        The shared cache invalidation, selected-VL reset and default-VL
+        emission happen inside ``super().install_network``.
+        """
+        st.session_state["vl_selector_gen"] = (
+            st.session_state.get("vl_selector_gen", 0) + 1
+        )
+        for k in ("_vl_set_by_click", "_export_bytes", "_export_fmt",
+                  "_export_ext", "va_nom_select"):
+            st.session_state.pop(k, None)
+        for k in [
+            key for key in list(st.session_state)
+            if (
+                key.startswith("_change_log_")
+                or key.startswith("_removal_log_")
+                or key.startswith("_ext_change_log_")
+                or key.startswith("_ext_removal_log_")
+                or key.startswith("_export_cache_")
+            )
+        ]:
+            del st.session_state[k]
+        super().install_network(network)
 
 
 def app_state() -> AppState:
@@ -145,6 +191,11 @@ def load_network(
 ):
     """Load a network from an uploaded file into session state.
 
+    Thin wrapper around :meth:`AppState.load_network_from_bytes`.
+    The cache invalidation, ``vl_selector_gen`` bump, per-method
+    change-log cleanup and ``script_recorder`` recording happen inside
+    the shared lifecycle (see :meth:`AppState.install_network`).
+
     *parameters* is forwarded to ``load_from_binary_buffer`` so callers can
     pass format-specific import options discovered via
     :func:`~iidm_viewer.io_options.get_format_parameters`.
@@ -153,87 +204,60 @@ def load_network(
     parsing, e.g. ``['loadflowResultsCompletion']``.  Available names are
     returned by :func:`~iidm_viewer.io_options.get_import_post_processors`.
 
-    The raw file bytes are stored in ``_last_file_bytes`` so the UI can offer
-    a "Reload with options" flow without requiring a second upload.
+    The raw file bytes are stashed in ``_last_file_bytes`` so the UI can
+    offer a "Reload with options" flow without requiring a second upload.
     """
     raw_bytes = uploaded_file.getvalue()
-    network = network_loader.load_from_bytes(
+    network = app_state().load_network_from_bytes(
         uploaded_file.name,
         raw_bytes,
         parameters=parameters,
         post_processors=post_processors,
     )
-    st.session_state.network = network
-    st.session_state.selected_vl = None
-    st.session_state["vl_selector_gen"] = st.session_state.get("vl_selector_gen", 0) + 1
-    st.session_state.pop("_vl_set_by_click", None)
-    st.session_state.pop("_lf_report_json", None)
-    invalidate_on_network_replace()
+    # Streamlit-specific extra: the "Reload with options" flow needs the
+    # raw bytes; the shared lifecycle in the AppState doesn't know about it.
     st.session_state["_last_file_bytes"] = raw_bytes
-    st.session_state.pop("_export_bytes", None)
-    st.session_state.pop("_export_fmt", None)
-    st.session_state.pop("_export_ext", None)
-    st.session_state.pop("va_nom_select", None)
-    for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_") or k.startswith("_export_cache_")]:
-        del st.session_state[k]
-    script_recorder.record_load_network(
-        uploaded_file.name, parameters or {}, post_processors or [],
-    )
     return network
 
 
 def create_empty_network(network_id: str = "network"):
     """Create a blank network and install it as the session network.
 
-    Lets users bootstrap a model from scratch without uploading anything —
+    Thin wrapper around :meth:`AppState.create_empty_network`. Lets
+    users bootstrap a model from scratch without uploading anything —
     they can then build it up via the Data Explorer's "Create a new …"
     forms. Like :func:`load_network`, the resulting object is a
-    :class:`NetworkProxy` so every subsequent pypowsybl call runs on the
-    worker thread.
+    :class:`NetworkProxy` so every subsequent pypowsybl call runs on
+    the worker thread.
     """
-    network = network_loader.create_empty(network_id)
-    st.session_state.network = network
-    st.session_state.selected_vl = None
-    st.session_state["vl_selector_gen"] = st.session_state.get("vl_selector_gen", 0) + 1
-    st.session_state.pop("_vl_set_by_click", None)
-    st.session_state.pop("_lf_report_json", None)
-    invalidate_on_network_replace()
+    network = app_state().create_empty_network(network_id)
+    # Streamlit-specific extras: reset the file-upload widget keys so
+    # the next upload starts from a clean state. These are widget keys,
+    # not part of the shared AppState contract.
     st.session_state.pop("_last_file", None)
     st.session_state.pop("_last_file_id", None)
-    st.session_state.pop("_export_bytes", None)
-    st.session_state.pop("_export_fmt", None)
-    st.session_state.pop("_export_ext", None)
-    for k in [k for k in st.session_state if k.startswith("_change_log_") or k.startswith("_removal_log_") or k.startswith("_ext_change_log_") or k.startswith("_ext_removal_log_") or k.startswith("_export_cache_")]:
-        del st.session_state[k]
-    script_recorder.record_create_empty(network_id)
     return network
 
 
 def get_network():
-    return st.session_state.get("network")
+    """Return the currently-open network (or ``None``)."""
+    return app_state().network
 
 
 def run_loadflow(network):
     """Run AC load flow + invalidate Streamlit caches.
 
-    The actual pypowsybl call lives in
-    :func:`iidm_viewer.loadflow.run_ac` so the PySide6 and NiceGUI
-    prototypes share the same worker round-trip. This wrapper reads
-    the dialog parameters from session_state, stashes the report JSON
-    in session_state, and calls :func:`invalidate_on_load_flow`.
-
-    Returns the raw pypowsybl ``LoadFlowResult`` list (legacy
-    contract — callers index `[0].status.name`).
+    Thin wrapper around :meth:`AppState.run_loadflow`. Reads the LF
+    parameters from the sidebar dialog (Streamlit-specific) and
+    returns the raw pypowsybl results list (legacy contract — callers
+    index ``[0].status.name``).
     """
     from iidm_viewer.lf_parameters import get_lf_parameters
-    from iidm_viewer.loadflow import run_ac
 
     generic, provider = get_lf_parameters()
-    result = run_ac(network, generic, provider)
-    st.session_state["_lf_report_json"] = result.report_json
-    # Invalidate cached lookups so tabs reload fresh data
-    invalidate_on_load_flow()
-    script_recorder.record_run_loadflow(generic, provider)
+    result = app_state().run_loadflow(generic, provider)
+    if result is None:
+        return None
     return result.results
 
 
