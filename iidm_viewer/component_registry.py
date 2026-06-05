@@ -41,6 +41,19 @@ COMPONENT_TYPES: dict[str, str] = {
 }
 
 
+# Inverse of :data:`COMPONENT_TYPES` — pypowsybl getter method name →
+# component label. Used by the Streamlit ``add_to_change_log`` path to
+# derive the component label from a method name when writing into the
+# shared :class:`iidm_viewer.change_log.ChangeLog`. ``Switches`` lives
+# under :data:`EDITABLE_COMPONENTS` (it's editable but not surfaced as
+# a Data Explorer tab) so add it explicitly to keep the switch-toggle
+# path symmetric with the cell-edit path.
+LABEL_FOR_METHOD: dict[str, str] = {
+    method: label for label, method in COMPONENT_TYPES.items()
+}
+LABEL_FOR_METHOD["get_switches"] = "Switches"
+
+
 # Component label -> (update method name, list of editable attribute names).
 # Mirrors ``state.EDITABLE_COMPONENTS``. Voltage Levels and Substations are
 # intentionally omitted: their pypowsybl update story is different

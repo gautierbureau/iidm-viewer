@@ -331,24 +331,38 @@ def update_components(network, component: str, changes_df):
 
 
 def add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: pd.DataFrame):
-    """Accumulate successfully-applied cell changes into a per-component session-state log.
+    """Accumulate successfully-applied cell changes into the change log.
 
-    Writes to ``st.session_state[f"_change_log_{method_name}"]``.  The
-    collapse + net-diff invariants are delegated to
-    :func:`iidm_viewer.change_log.merge_entry` so the PySide6 and
-    NiceGUI prototypes' ``ChangeLog`` class apply the same rules; the
-    session-state list layout (no ``component`` key — Streamlit looks
-    it up by method-name index) stays unchanged.
+    Dual-writes:
+
+    * The legacy per-method ``st.session_state[f"_change_log_{method_name}"]``
+      list (no ``component`` key, entries shaped
+      ``{element_id, property, before, after}``) — what the existing
+      Streamlit Data Explorer render code consumes.
+    * The shared :class:`iidm_viewer.change_log.ChangeLog` instance on
+      :func:`app_state` — what new code (N-K variant comparison, future
+      cross-host panels) reads from. Entries here carry the component
+      label (e.g. ``"Generators"``), derived from ``method_name`` via
+      :data:`component_registry.LABEL_FOR_METHOD`. Unknown method names
+      are skipped on the shared side (the legacy list is still written).
+
+    The collapse + net-diff invariants are the same in both stores —
+    both go through :func:`iidm_viewer.change_log.merge_entry`.
     """
     from iidm_viewer.change_log import merge_entry
+    from iidm_viewer.component_registry import LABEL_FOR_METHOD
 
     key = f"_change_log_{method_name}"
     log: list[dict] = list(st.session_state.get(key, []))
-    # Streamlit's existing on-disk entries don't carry a ``component``
-    # key (the method_name is the implicit grouping). Use the empty
-    # string here; ``merge_entry`` will only compare it against the
-    # same default and the entries stay shape-compatible.
-    component = ""
+
+    # Shared ChangeLog write — only when we can resolve a component
+    # label for the method name. Failing closed (instead of raising)
+    # keeps the dual-write strictly additive for any caller using a
+    # method name not in the registry yet.
+    shared_log = None
+    component_label = LABEL_FOR_METHOD.get(method_name)
+    if component_label is not None:
+        shared_log = app_state().change_log
 
     for element_id in changes_df.index:
         for col in changes_df.columns:
@@ -358,7 +372,14 @@ def add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: p
                 if col in original_df.columns
                 else None
             )
-            merge_entry(log, component, element_id, col, before_val, new_val)
+            # Legacy list: keep the existing ``component=""`` key
+            # (Streamlit looks entries up by method-name index, not
+            # by component, so the empty string keeps the on-disk
+            # shape unchanged after the ``pop("component")`` below).
+            merge_entry(log, "", element_id, col, before_val, new_val)
+            # Shared ChangeLog: component label is the on-disk grouping.
+            if shared_log is not None:
+                shared_log.record(component_label, element_id, col, before_val, new_val)
 
     # Drop the ``component`` key on freshly-appended entries so the
     # on-disk shape matches what the existing render code expects
