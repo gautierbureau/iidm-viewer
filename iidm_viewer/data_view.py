@@ -27,6 +27,7 @@ and the PySide6 + NiceGUI prototypes consume the same primitives.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import pandas as pd
@@ -309,6 +310,156 @@ def get_enriched_dataframe(
         return df
     lookup = build_vl_lookup(network)
     return enrich_with_joins(df, lookup)
+
+
+# ---------------------------------------------------------------------------
+# View-model + change detection (host-agnostic Data Explorer pipeline)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class DataExplorerViewModel:
+    """Resolved state of the Data Explorer's main grid for one component.
+
+    Captures everything a host needs to render the table + decide what
+    actions are available:
+
+    * :attr:`component` / :attr:`method_name` — what's selected, plus
+      the pypowsybl getter name (for keying widget state etc.).
+    * :attr:`rows_df` — the **filtered** DataFrame the host renders.
+    * :attr:`total_count` — total before the filter chain ran; lets
+      the host caption "X of Y".
+    * :attr:`editable_cols` — editable attribute names intersected with
+      ``rows_df.columns`` (so the host renders only what's actually
+      editable on this slice).
+    * :attr:`is_removable` — whether removal is available for this
+      component (the host wires up the "_remove" checkbox column).
+
+    Built by :func:`build_data_explorer_view_model` — hosts pass their
+    filter state and get a fully-resolved view-model back. The actual
+    application of edits / removals stays host-driven (calling
+    :func:`apply_and_log_bulk_edit` / :func:`delete_and_log_elements`
+    / their Streamlit ``update_components`` wrapper, etc.).
+    """
+
+    component: str
+    method_name: str
+    rows_df: pd.DataFrame
+    total_count: int
+    editable_cols: tuple[str, ...]
+    is_removable: bool
+
+    @property
+    def filtered_count(self) -> int:
+        return len(self.rows_df)
+
+    @property
+    def is_editable(self) -> bool:
+        return bool(self.editable_cols)
+
+    @property
+    def is_empty(self) -> bool:
+        return self.rows_df.empty
+
+
+def build_data_explorer_view_model(
+    network: NetworkProxy,
+    component: str,
+    *,
+    selected_vl: Optional[str] = None,
+    filter_by_vl: bool = False,
+    filter_specs: Optional[dict[str, Any]] = None,
+    id_filter_substring: str = "",
+) -> DataExplorerViewModel:
+    """Assemble the Data Explorer view-model for ``component``.
+
+    Pipeline:
+
+    1. Fetch enriched DataFrame via :func:`get_enriched_dataframe`.
+    2. Capture ``total_count`` *before* the filter chain runs so the
+       caption "X of Y" reflects the pre-filter total.
+    3. :func:`reorder_columns` for the component's priority layout.
+    4. Optional VL filter (when ``filter_by_vl`` is True and the column
+       exists on the DataFrame).
+    5. Optional structured filter specs via :func:`apply_filter_specs`.
+    6. Optional case-insensitive id substring filter.
+
+    The editable-columns whitelist is intersected with ``rows_df.columns``
+    so the host doesn't try to render an editor for an attribute that's
+    been filtered or projected away.
+    """
+    from iidm_viewer.component_registry import (
+        EDITABLE_COMPONENTS,
+        REMOVABLE_COMPONENTS,
+    )
+
+    method_name = COMPONENT_TYPES.get(component, "")
+    df = get_enriched_dataframe(network, component)
+    total_count = len(df)
+    if not df.empty:
+        df = reorder_columns(df, component)
+        if filter_by_vl and selected_vl and "voltage_level_id" in df.columns:
+            df = filter_by_voltage_level(df, selected_vl)
+        if filter_specs:
+            df = apply_filter_specs(df, filter_specs)
+        if id_filter_substring:
+            mask = df.index.astype(str).str.contains(
+                id_filter_substring, case=False, na=False, regex=False,
+            )
+            df = df[mask]
+
+    editable_cols: tuple[str, ...] = ()
+    entry = EDITABLE_COMPONENTS.get(component)
+    if entry is not None:
+        _, all_editable = entry
+        editable_cols = tuple(c for c in all_editable if c in df.columns)
+
+    return DataExplorerViewModel(
+        component=component,
+        method_name=method_name,
+        rows_df=df,
+        total_count=total_count,
+        editable_cols=editable_cols,
+        is_removable=component in REMOVABLE_COMPONENTS,
+    )
+
+
+def compute_changes(
+    base_df: pd.DataFrame,
+    edited_df: pd.DataFrame,
+    editable_cols,
+) -> pd.DataFrame:
+    """Return a DataFrame (indexed by element id) holding only the cells
+    that changed between ``base_df`` and ``edited_df``.
+
+    Rows where no editable cell changed are dropped; unchanged cells in
+    a partially-changed row are dropped too (so the resulting frame is
+    sparse and the per-attribute update call only touches what the user
+    actually modified). NaN cells in ``edited_df`` are treated as equal
+    to NaN in ``base_df`` so opening a grid without editing anything
+    yields an empty change set.
+
+    Pure pandas — no host imports — so the Streamlit, PySide6 and
+    NiceGUI hosts can share one implementation.
+    """
+    cols = [c for c in editable_cols if c in base_df.columns]
+    if not cols:
+        return pd.DataFrame()
+
+    orig = base_df[cols]
+    edit = edited_df[cols]
+
+    diff = (orig != edit) & ~(orig.isna() & edit.isna())
+    changed_rows = diff.any(axis=1)
+    if not changed_rows.any():
+        return pd.DataFrame()
+
+    rows: list[pd.Series] = []
+    for idx in edit.index[changed_rows]:
+        row_changes = {col: edit.at[idx, col] for col in cols if diff.at[idx, col]}
+        if row_changes:
+            rows.append(pd.Series(row_changes, name=idx))
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------

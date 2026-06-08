@@ -53,6 +53,8 @@ from iidm_viewer import script_recorder
 # Column-ordering registries + the reorder helper live in
 # iidm_viewer.data_view; the Streamlit and prototype paths share them.
 from iidm_viewer.data_view import (  # noqa: F401  (re-exported)
+    build_data_explorer_view_model as _build_view_model,
+    compute_changes as _data_view_compute_changes,
     PRIORITY_ANCHOR,
     PRIORITY_COLUMNS,
     VL_FILTERABLE,
@@ -71,44 +73,12 @@ def _column_config(df: pd.DataFrame, editable_cols: set[str]) -> dict:
 
 def _compute_changes(original: pd.DataFrame, edited: pd.DataFrame,
                      editable_cols: list[str]) -> pd.DataFrame:
-    """Return a DataFrame (indexed by element id) with only changed cells.
+    """Thin Streamlit-side alias for :func:`data_view.compute_changes`.
 
-    Columns that didn't change for a given row are dropped so the update
-    call only touches what the user actually modified.
+    Kept under the legacy ``_compute_changes`` name so the existing
+    extensions_explorer import (and any future caller) still resolves.
     """
-    cols = [c for c in editable_cols if c in original.columns]
-    if not cols:
-        return pd.DataFrame()
-
-    orig = original[cols]
-    edit = edited[cols]
-
-    # Boolean comparison that handles NaN==NaN as equal
-    diff = (orig != edit) & ~(orig.isna() & edit.isna())
-
-    changed_rows = diff.any(axis=1)
-    if not changed_rows.any():
-        return pd.DataFrame()
-
-    # For each changed row, keep only the columns that actually changed
-    result = edit.loc[changed_rows].copy()
-    for col in cols:
-        unchanged = ~diff.loc[changed_rows, col]
-        if unchanged.any():
-            result.loc[unchanged, col] = None
-    # Drop all-None columns then dropna columns per row is tricky;
-    # instead build a sparse frame of only changed cells
-    rows = []
-    for idx in result.index:
-        row_changes = {}
-        for col in cols:
-            if diff.at[idx, col]:
-                row_changes[col] = edit.at[idx, col]
-        if row_changes:
-            rows.append(pd.Series(row_changes, name=idx))
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows)
+    return _data_view_compute_changes(original, edited, editable_cols)
 
 
 def _add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: pd.DataFrame):
@@ -1232,8 +1202,14 @@ def render_data_explorer(network, selected_vl):
 
     with st.spinner(f"Loading {component}..."):
         try:
+            # Fetch the enriched DataFrame upfront so the Streamlit
+            # ``render_filters`` widget pass (which mutates the frame +
+            # owns its own widget state) can run as before. The
+            # framework-agnostic ``build_data_explorer_view_model``
+            # handles the VL + ID-substring filters and the editable
+            # / removable derivation in one place; the streamlit-only
+            # column-filter widget chain stays in this file.
             df = get_enriched_component(network, method_name)
-
             if df.empty:
                 st.info(f"No {component.lower()} found in this network.")
                 return
@@ -1266,11 +1242,13 @@ def render_data_explorer(network, selected_vl):
             else:
                 st.caption(f"{len(df)} {component.lower()}")
 
-            # Determine editable columns for this component
+            # Editable / removable derivation now lives in the shared
+            # view-model contract; reuse those rules here so the
+            # Streamlit path and the prototype hosts stay in lockstep.
             editable_cols: list[str] = []
             if component in EDITABLE_COMPONENTS:
-                _, editable_cols = EDITABLE_COMPONENTS[component]
-                editable_cols = [c for c in editable_cols if c in df.columns]
+                _, all_editable = EDITABLE_COMPONENTS[component]
+                editable_cols = [c for c in all_editable if c in df.columns]
 
             is_removable = component in REMOVABLE_COMPONENTS
 
