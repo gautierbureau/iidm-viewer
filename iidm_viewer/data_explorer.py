@@ -179,13 +179,11 @@ def _revert_all_changes(network) -> None:
         except Exception as e:
             errors.append((comp, str(e)))
             continue
-        # Drop the reverted entries from the shared log; the dual-write
-        # legacy list at ``_change_log_{meth}`` is kept in sync by the
-        # mirror below so the per-method shape stays correct for any
-        # caller still reading it.
+        # Drop the reverted entries from the shared log — Phase C of
+        # the change-log unification: the shared store is the only one
+        # we mirror revert mutations into.
         for entry in revertable:
             change_log.drop_entry(entry)
-        st.session_state[f"_change_log_{meth}"] = list(unrevertable)
         total_reverted += len(revertable)
         _bump_editor_version(meth)
 
@@ -208,10 +206,8 @@ def _render_change_log(network, component: str, method_name: str):
     """Display applied changes with individual Revert buttons below the data editor.
 
     Reads from the shared :class:`iidm_viewer.change_log.ChangeLog` on
-    :func:`iidm_viewer.state.app_state`. On revert, drops the entry
-    from the shared log and mirrors the removal into the legacy
-    ``_change_log_{method_name}`` session-state list so any caller
-    still reading it (Phase A dual-write contract) stays in sync.
+    :func:`iidm_viewer.state.app_state` — the canonical store after
+    Phase C of the change-log unification (docs/host-sharing.md §2c).
     """
     from iidm_viewer.state import app_state
 
@@ -251,19 +247,9 @@ def _render_change_log(network, component: str, method_name: str):
                         pd.DataFrame(),
                         is_revert=True,
                     )
-                    # Drop from the shared log (canonical store).
+                    # Drop from the shared log — the canonical (and only)
+                    # store after Phase C of the change-log unification.
                     state.change_log.drop_entry(entry)
-                    # Mirror the removal into the legacy per-method list
-                    # so the Phase A dual-write contract stays exact.
-                    legacy_key = f"_change_log_{method_name}"
-                    legacy = list(st.session_state.get(legacy_key, []))
-                    st.session_state[legacy_key] = [
-                        e for e in legacy
-                        if not (
-                            e.get("element_id") == entry["element_id"]
-                            and e.get("property") == entry["property"]
-                        )
-                    ]
                     _bump_editor_version(method_name)
                     st.rerun()
                 except Exception as e:
@@ -271,40 +257,28 @@ def _render_change_log(network, component: str, method_name: str):
 
 
 def _add_to_removal_log(component: str, ids: list[str], snapshot_df: pd.DataFrame):
-    """Record removed element ids (with full snapshot) in the removal log.
+    """Record removed element ids (with full snapshot) in the shared change log.
 
-    Dual-writes:
-
-    * Legacy per-component ``st.session_state[f"_removal_log_{component}"]``
-      list (what the existing Streamlit render code reads).
-    * Shared :meth:`iidm_viewer.change_log.ChangeLog.record_removal` on
-      :func:`state.app_state` (what new cross-host code reads).
+    Writes ``app_state().change_log.record_removal(component, ids, snapshot)``
+    — the canonical store after Phase C of the change-log unification
+    (docs/host-sharing.md §2c). The snapshot DataFrame lets a future
+    "undo" host reconstruct removed rows via the pypowsybl ``create_*``
+    APIs. ``record_removal`` dedupes by (component, element_id), so
+    repeated calls with the same id are safe.
     """
     from iidm_viewer.state import app_state
 
-    key = f"_removal_log_{component}"
-    log: list[dict] = list(st.session_state.get(key, []))
-    existing_ids = {e["element_id"] for e in log}
-    new_ids: list[str] = []
-    for eid in ids:
-        if eid not in existing_ids:
-            snapshot = snapshot_df.loc[eid].to_dict() if eid in snapshot_df.index else {}
-            log.append({"element_id": eid, "snapshot": snapshot})
-            new_ids.append(eid)
-    st.session_state[key] = log
-    if new_ids:
-        # The shared ChangeLog stores one record per id; pass the
-        # snapshot DataFrame so future "undo" hosts can reconstruct
-        # the removed row via the pypowsybl ``create_*`` APIs.
-        app_state().change_log.record_removal(component, new_ids, snapshot=snapshot_df)
+    if not ids:
+        return
+    app_state().change_log.record_removal(component, list(ids), snapshot=snapshot_df)
 
 
 def _render_removal_log(component: str):
     """Display removed element ids in a visually distinct section (no revert for now).
 
     Reads from the shared :class:`iidm_viewer.change_log.ChangeLog` —
-    the legacy ``_removal_log_{component}`` list is kept in sync by the
-    Phase A dual-write so external callers reading it stay correct.
+    the canonical store after Phase C of the change-log unification
+    (docs/host-sharing.md §2c).
     """
     from iidm_viewer.state import app_state
 

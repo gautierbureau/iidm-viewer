@@ -87,13 +87,16 @@ class AppState(_BaseAppState):
         * pop ``_vl_set_by_click`` so a stale post-click flag doesn't carry over;
         * pop ``_export_*`` and ``va_nom_select`` so the previous network's
           widget state doesn't leak into the new one;
-        * delete the per-method ``_change_log_*`` / ``_removal_log_*`` /
-          ``_ext_change_log_*`` / ``_ext_removal_log_*`` / ``_export_cache_*``
-          session-state keys (the Streamlit-only per-method change log
-          shape; the shared ``self.change_log`` is reset by ``super()``).
+        * delete the per-extension ``_ext_change_log_*`` /
+          ``_ext_removal_log_*`` session-state keys (the Extensions
+          Explorer still uses per-extension lists; the change-log
+          unification (docs/host-sharing.md §2c) only covers the
+          component edit / removal flow so the extension path keeps
+          its current shape) and the ``_export_cache_*`` cache keys.
 
-        The shared cache invalidation, selected-VL reset and default-VL
-        emission happen inside ``super().install_network``.
+        The shared ``self.change_log`` is cleared inside
+        ``super().install_network`` together with the cache invalidation,
+        the selected-VL reset and the default-VL emission.
         """
         st.session_state["vl_selector_gen"] = (
             st.session_state.get("vl_selector_gen", 0) + 1
@@ -104,9 +107,7 @@ class AppState(_BaseAppState):
         for k in [
             key for key in list(st.session_state)
             if (
-                key.startswith("_change_log_")
-                or key.startswith("_removal_log_")
-                or key.startswith("_ext_change_log_")
+                key.startswith("_ext_change_log_")
                 or key.startswith("_ext_removal_log_")
                 or key.startswith("_export_cache_")
             )
@@ -331,38 +332,25 @@ def update_components(network, component: str, changes_df):
 
 
 def add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: pd.DataFrame):
-    """Accumulate successfully-applied cell changes into the change log.
+    """Accumulate successfully-applied cell changes into the shared change log.
 
-    Dual-writes:
+    Writes one :meth:`~iidm_viewer.change_log.ChangeLog.record` call per
+    edited cell into ``app_state().change_log`` — the canonical store
+    after Phase C of the change-log unification
+    (docs/host-sharing.md §2c).
 
-    * The legacy per-method ``st.session_state[f"_change_log_{method_name}"]``
-      list (no ``component`` key, entries shaped
-      ``{element_id, property, before, after}``) — what the existing
-      Streamlit Data Explorer render code consumes.
-    * The shared :class:`iidm_viewer.change_log.ChangeLog` instance on
-      :func:`app_state` — what new code (N-K variant comparison, future
-      cross-host panels) reads from. Entries here carry the component
-      label (e.g. ``"Generators"``), derived from ``method_name`` via
-      :data:`component_registry.LABEL_FOR_METHOD`. Unknown method names
-      are skipped on the shared side (the legacy list is still written).
-
-    The collapse + net-diff invariants are the same in both stores —
-    both go through :func:`iidm_viewer.change_log.merge_entry`.
+    The component label is derived from ``method_name`` via
+    :data:`component_registry.LABEL_FOR_METHOD`. Method names not in
+    the registry are silently ignored: this keeps any future callers
+    using a still-unmapped getter safe (the contract is "best-effort
+    record"), at the cost of those edits not being tracked.
     """
-    from iidm_viewer.change_log import merge_entry
     from iidm_viewer.component_registry import LABEL_FOR_METHOD
 
-    key = f"_change_log_{method_name}"
-    log: list[dict] = list(st.session_state.get(key, []))
-
-    # Shared ChangeLog write — only when we can resolve a component
-    # label for the method name. Failing closed (instead of raising)
-    # keeps the dual-write strictly additive for any caller using a
-    # method name not in the registry yet.
-    shared_log = None
     component_label = LABEL_FOR_METHOD.get(method_name)
-    if component_label is not None:
-        shared_log = app_state().change_log
+    if component_label is None:
+        return
+    shared_log = app_state().change_log
 
     for element_id in changes_df.index:
         for col in changes_df.columns:
@@ -372,22 +360,7 @@ def add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: p
                 if col in original_df.columns
                 else None
             )
-            # Legacy list: keep the existing ``component=""`` key
-            # (Streamlit looks entries up by method-name index, not
-            # by component, so the empty string keeps the on-disk
-            # shape unchanged after the ``pop("component")`` below).
-            merge_entry(log, "", element_id, col, before_val, new_val)
-            # Shared ChangeLog: component label is the on-disk grouping.
-            if shared_log is not None:
-                shared_log.record(component_label, element_id, col, before_val, new_val)
-
-    # Drop the ``component`` key on freshly-appended entries so the
-    # on-disk shape matches what the existing render code expects
-    # (``element_id``, ``property``, ``before``, ``after`` only).
-    for entry in log:
-        entry.pop("component", None)
-
-    st.session_state[key] = log
+            shared_log.record(component_label, element_id, col, before_val, new_val)
 
 
 def toggle_switch(network, switch_id: str, new_open: bool) -> tuple[bool, bool]:

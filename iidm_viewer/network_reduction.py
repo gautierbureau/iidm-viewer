@@ -23,6 +23,8 @@ from .state import get_network
 
 
 def _clear_caches():
+    from iidm_viewer.state import app_state
+
     invalidate_on_network_replace()
     st.session_state["selected_vl"] = None
     st.session_state["vl_selector_gen"] = st.session_state.get("vl_selector_gen", 0) + 1
@@ -34,15 +36,19 @@ def _clear_caches():
         "_vl_set_by_click",
     ):
         st.session_state.pop(key, None)
+    # Per-extension change logs and the Streamlit export cache stay on
+    # session-state keys (unification doesn't cover the extension path),
+    # so clear them by prefix.
     for k in list(st.session_state.keys()):
         if (
-            k.startswith("_change_log_")
-            or k.startswith("_removal_log_")
-            or k.startswith("_ext_change_log_")
+            k.startswith("_ext_change_log_")
             or k.startswith("_ext_removal_log_")
             or k.startswith("_export_cache_")
         ):
             del st.session_state[k]
+    # The shared component change log is the canonical store after
+    # Phase C of the change-log unification — reset it directly.
+    app_state().change_log.clear()
 
 
 @st.dialog("Network Reduction", width="large")

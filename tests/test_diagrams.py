@@ -116,12 +116,18 @@ def test_nad_and_sld_render_without_exception_for_valid_vl(xiidm_upload):
 # ---------------------------------------------------------------------------
 
 def test_breaker_click_writes_to_change_log(node_breaker_network):
-    """Simulating a sld-breaker-click updates the switch and logs the change."""
+    """Simulating a sld-breaker-click updates the switch and logs the
+    change into the shared :class:`ChangeLog` under the ``Switches``
+    component (Phase C of the change-log unification)."""
+    from iidm_viewer.state import app_state
+
     sw = node_breaker_network.get_switches(all_attributes=True)
     sw_id = sw.index[0]
     original_open = bool(sw.loc[sw_id, "open"])
 
-    st.session_state.pop("_change_log_get_switches", None)
+    st.session_state.pop("_app_state_instance", None)
+    state = app_state()
+    state.change_log.clear()
     st.session_state.pop("_last_breaker_click_ts", None)
 
     fake_click = {"type": "sld-breaker-click", "breakerId": sw_id,
@@ -135,21 +141,26 @@ def test_breaker_click_writes_to_change_log(node_breaker_network):
         except Exception:
             pass  # st.rerun() raises in test context
 
-    log = st.session_state.get("_change_log_get_switches", [])
-    assert len(log) == 1
-    assert log[0]["element_id"] == sw_id
-    assert log[0]["property"] == "open"
-    assert log[0]["before"] == original_open
-    assert log[0]["after"] == (not original_open)
+    entries = state.change_log.entries(component="Switches")
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["element_id"] == sw_id
+    assert e["property"] == "open"
+    assert e["before"] == original_open
+    assert e["after"] == (not original_open)
 
 
 def test_breaker_click_deduplication_skips_same_ts(node_breaker_network):
     """Second render with same ts must not re-toggle the switch."""
+    from iidm_viewer.state import app_state
+
     sw = node_breaker_network.get_switches(all_attributes=True)
     sw_id = sw.index[0]
     original_open = bool(sw.loc[sw_id, "open"])
 
-    st.session_state.pop("_change_log_get_switches", None)
+    st.session_state.pop("_app_state_instance", None)
+    state = app_state()
+    state.change_log.clear()
     # Pre-set the ts so the handler thinks this event was already processed
     st.session_state["_last_breaker_click_ts"] = 99999
 
@@ -165,7 +176,7 @@ def test_breaker_click_deduplication_skips_same_ts(node_breaker_network):
             pass
 
     # Log must be empty — duplicate ts was skipped
-    assert st.session_state.get("_change_log_get_switches", []) == []
+    assert state.change_log.entries(component="Switches") == []
     # Switch state must be unchanged
     sw2 = node_breaker_network.get_switches(all_attributes=True)
     assert bool(sw2.loc[sw_id, "open"]) == original_open

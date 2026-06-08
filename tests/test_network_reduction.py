@@ -68,24 +68,42 @@ def test_clear_caches_removes_cache_keys():
     assert fake["network"] == "kept"
 
 
-def test_clear_caches_removes_log_keys():
+def test_clear_caches_clears_shared_changelog_and_ext_log_keys():
+    """Phase C of the change-log unification: the component change log
+    lives in the shared :class:`ChangeLog` on
+    ``app_state().change_log``; per-extension session-state lists keep
+    their old shape until the extensions explorer migrates. ``_clear_caches``
+    resets both."""
     import iidm_viewer.network_reduction as nr
+    from iidm_viewer.state import app_state
 
     fake = {
         "selected_vl": "VL2",
-        "_change_log_generators": [{"id": "G1"}],
-        "_removal_log_lines": [{"id": "L1"}],
-        "_change_log_loads": [],
+        "_ext_change_log_activePowerControl": [{"id": "G1"}],
+        "_ext_removal_log_activePowerControl": [{"id": "L1"}],
+        "_export_cache_xiidm": b"stale",
     }
     with patch("iidm_viewer.network_reduction.st") as mock_st, \
+         patch("iidm_viewer.state.st") as state_st, \
          patch("iidm_viewer.caches.st") as mock_caches_st:
         mock_st.session_state = fake
+        state_st.session_state = fake
         mock_caches_st.session_state = fake
+
+        # Seed the shared component change log so we can prove it's reset.
+        state = app_state()
+        state.change_log.record("Generators", "G1", "target_p", 10.0, 42.0)
+        assert len(state.change_log.entries()) == 1
+
         nr._clear_caches()
 
-    assert "_change_log_generators" not in fake
-    assert "_removal_log_lines" not in fake
-    assert "_change_log_loads" not in fake
+        # Shared component change log cleared.
+        assert state.change_log.entries() == []
+
+    # Per-extension lists and the Streamlit export cache are popped too.
+    assert "_ext_change_log_activePowerControl" not in fake
+    assert "_ext_removal_log_activePowerControl" not in fake
+    assert "_export_cache_xiidm" not in fake
 
 
 def test_clear_caches_tolerates_absent_keys():
