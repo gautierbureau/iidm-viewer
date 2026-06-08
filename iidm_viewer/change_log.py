@@ -265,6 +265,24 @@ class ChangeLog:
             pass
         self._fire()
 
+    def drop_entry(self, entry: ChangeLogEntry) -> bool:
+        """Remove ``entry`` from the log without applying any inverse edit.
+
+        Used when the caller has already applied the revert through
+        another path (e.g. the Streamlit ``update_components`` wrapper,
+        which also invalidates the Streamlit cache layer) and just needs
+        to keep the shared log in sync.
+
+        Returns ``True`` when the entry was removed, ``False`` when it
+        was already gone — callers can treat both as success.
+        """
+        try:
+            self._entries.remove(entry)
+        except ValueError:
+            return False
+        self._fire()
+        return True
+
     def revert_all(
         self,
         network: NetworkProxy,

@@ -135,17 +135,22 @@ def _editor_key(method_name: str) -> str:
 
 def _revert_all_changes(network) -> None:
     """Revert every logged change across all components in one pass."""
+    from iidm_viewer.state import app_state
+
+    state = app_state()
+    change_log = state.change_log
+
     total_reverted = 0
     skipped = 0
     errors: list[tuple[str, str]] = []
     for comp, meth in COMPONENT_TYPES.items():
-        log_key = f"_change_log_{meth}"
-        log: list[dict] = list(st.session_state.get(log_key, []))
-        if not log:
+        entries = change_log.entries(component=comp)
+        if not entries:
             continue
         rows: dict[str, dict] = {}
         unrevertable: list[dict] = []
-        for entry in log:
+        revertable: list[dict] = []
+        for entry in entries:
             before = entry["before"]
             is_missing = before is None
             if not is_missing:
@@ -157,6 +162,7 @@ def _revert_all_changes(network) -> None:
                 unrevertable.append(entry)
                 skipped += 1
                 continue
+            revertable.append(entry)
             rows.setdefault(entry["element_id"], {})[entry["property"]] = before
         if not rows:
             continue
@@ -173,8 +179,14 @@ def _revert_all_changes(network) -> None:
         except Exception as e:
             errors.append((comp, str(e)))
             continue
-        total_reverted += len(log) - len(unrevertable)
-        st.session_state[log_key] = unrevertable
+        # Drop the reverted entries from the shared log; the dual-write
+        # legacy list at ``_change_log_{meth}`` is kept in sync by the
+        # mirror below so the per-method shape stays correct for any
+        # caller still reading it.
+        for entry in revertable:
+            change_log.drop_entry(entry)
+        st.session_state[f"_change_log_{meth}"] = list(unrevertable)
+        total_reverted += len(revertable)
         _bump_editor_version(meth)
 
     parts: list[str] = []
@@ -193,17 +205,26 @@ def _revert_all_changes(network) -> None:
 
 
 def _render_change_log(network, component: str, method_name: str):
-    """Display applied changes with individual Revert buttons below the data editor."""
-    key = f"_change_log_{method_name}"
-    log: list[dict] = st.session_state.get(key, [])
-    if not log:
+    """Display applied changes with individual Revert buttons below the data editor.
+
+    Reads from the shared :class:`iidm_viewer.change_log.ChangeLog` on
+    :func:`iidm_viewer.state.app_state`. On revert, drops the entry
+    from the shared log and mirrors the removal into the legacy
+    ``_change_log_{method_name}`` session-state list so any caller
+    still reading it (Phase A dual-write contract) stays in sync.
+    """
+    from iidm_viewer.state import app_state
+
+    state = app_state()
+    entries = state.change_log.entries(component=component)
+    if not entries:
         return
 
     hdr = st.columns([3, 2, 2, 2, 1])
     for widget, label in zip(hdr, ["Element", "Property", "Before", "After", ""]):
         widget.caption(label)
 
-    for i, entry in enumerate(list(log)):
+    for i, entry in enumerate(entries):
         row = st.columns([3, 2, 2, 2, 1])
         row[0].text(str(entry["element_id"]))
         row[1].text(entry["property"])
@@ -230,8 +251,19 @@ def _render_change_log(network, component: str, method_name: str):
                         pd.DataFrame(),
                         is_revert=True,
                     )
-                    log.pop(i)
-                    st.session_state[key] = log
+                    # Drop from the shared log (canonical store).
+                    state.change_log.drop_entry(entry)
+                    # Mirror the removal into the legacy per-method list
+                    # so the Phase A dual-write contract stays exact.
+                    legacy_key = f"_change_log_{method_name}"
+                    legacy = list(st.session_state.get(legacy_key, []))
+                    st.session_state[legacy_key] = [
+                        e for e in legacy
+                        if not (
+                            e.get("element_id") == entry["element_id"]
+                            and e.get("property") == entry["property"]
+                        )
+                    ]
                     _bump_editor_version(method_name)
                     st.rerun()
                 except Exception as e:
@@ -268,14 +300,20 @@ def _add_to_removal_log(component: str, ids: list[str], snapshot_df: pd.DataFram
 
 
 def _render_removal_log(component: str):
-    """Display removed element ids in a visually distinct section (no revert for now)."""
-    key = f"_removal_log_{component}"
-    log: list[dict] = st.session_state.get(key, [])
-    if not log:
+    """Display removed element ids in a visually distinct section (no revert for now).
+
+    Reads from the shared :class:`iidm_viewer.change_log.ChangeLog` —
+    the legacy ``_removal_log_{component}`` list is kept in sync by the
+    Phase A dual-write so external callers reading it stay correct.
+    """
+    from iidm_viewer.state import app_state
+
+    removals = app_state().change_log.removals(component=component)
+    if not removals:
         return
-    n = len(log)
+    n = len(removals)
     st.markdown(f"**:red[Removed {component.lower()} ({n})]**")
-    for entry in log:
+    for entry in removals:
         st.caption(f"• {entry['element_id']}")
 
 
@@ -283,20 +321,23 @@ def _render_all_change_logs(network):
     """Render applied changes and removals across all component types.
 
     Always visible regardless of the currently selected component so the
-    user never loses sight of pending modifications.
+    user never loses sight of pending modifications. Reads from the
+    shared :class:`iidm_viewer.change_log.ChangeLog`.
     """
+    from iidm_viewer.state import app_state
+
     status = st.session_state.pop("_revert_status_message", None)
     if status:
         text, ok = status
         (st.success if ok else st.error)(text)
 
-    total_changes = 0
-    total_removals = 0
-    for comp, meth in COMPONENT_TYPES.items():
-        change_key = f"_change_log_{meth}"
-        removal_key = f"_removal_log_{comp}"
-        total_changes += len(st.session_state.get(change_key, []))
-        total_removals += len(st.session_state.get(removal_key, []))
+    change_log = app_state().change_log
+    total_changes = sum(
+        len(change_log.entries(component=comp)) for comp in COMPONENT_TYPES
+    )
+    total_removals = sum(
+        len(change_log.removals(component=comp)) for comp in COMPONENT_TYPES
+    )
 
     if total_changes == 0 and total_removals == 0:
         return
@@ -316,9 +357,7 @@ def _render_all_change_logs(network):
                 _revert_all_changes(network)
 
     for comp, meth in COMPONENT_TYPES.items():
-        change_log = st.session_state.get(f"_change_log_{meth}", [])
-        removal_log = st.session_state.get(f"_removal_log_{comp}", [])
-        if not change_log and not removal_log:
+        if not change_log.entries(component=comp) and not change_log.removals(component=comp):
             continue
 
         st.caption(comp)
