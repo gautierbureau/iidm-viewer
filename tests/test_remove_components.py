@@ -443,7 +443,21 @@ def test_remove_2_winding_transformer(node_breaker_network):
 # ---------------------------------------------------------------------------
 
 
+def _fresh_app_state(fake_state):
+    """Wire ``fake_state`` as st.session_state in every Streamlit-side
+    module that touches it, then return a fresh AppState singleton."""
+    from iidm_viewer.state import app_state
+
+    fake_state.pop("_app_state_instance", None)
+    state = app_state()
+    state.change_log.clear()
+    return state
+
+
 def test_add_to_removal_log_stores_element_id_and_snapshot():
+    """Phase C of the change-log unification: ``_add_to_removal_log``
+    writes one entry per id into ``app_state().change_log`` under the
+    component label, carrying the snapshot dict."""
     from iidm_viewer.data_explorer import _add_to_removal_log
 
     snapshot_df = pd.DataFrame(
@@ -451,14 +465,17 @@ def test_add_to_removal_log_stores_element_id_and_snapshot():
         index=pd.Index(["LOAD1"], name="id"),
     )
     fake_state = {}
-    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_removal_log("Loads", ["LOAD1"], snapshot_df)
+        removals = state.change_log.removals(component="Loads")
 
-    log = fake_state["_removal_log_Loads"]
-    assert len(log) == 1
-    assert log[0]["element_id"] == "LOAD1"
-    assert log[0]["snapshot"]["p0"] == 100.0
-    assert log[0]["snapshot"]["q0"] == 10.0
+    assert len(removals) == 1
+    e = removals[0]
+    assert e["element_id"] == "LOAD1"
+    assert e["snapshot"]["p0"] == 100.0
+    assert e["snapshot"]["q0"] == 10.0
 
 
 def test_add_to_removal_log_deduplicates_repeated_ids():
@@ -469,15 +486,17 @@ def test_add_to_removal_log_deduplicates_repeated_ids():
         index=pd.Index(["LOAD1"], name="id"),
     )
     fake_state = {}
-    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_removal_log("Loads", ["LOAD1"], snapshot_df)
         _add_to_removal_log("Loads", ["LOAD1"], snapshot_df)  # same id again
 
-    assert len(fake_state["_removal_log_Loads"]) == 1
+    assert len(state.change_log.removals(component="Loads")) == 1
 
 
 def test_add_to_removal_log_cascaded_id_gets_empty_snapshot():
-    """IDs not in snapshot_df (cascaded elements) receive an empty snapshot dict."""
+    """IDs not in snapshot_df (cascaded elements) get no snapshot key."""
     from iidm_viewer.data_explorer import _add_to_removal_log
 
     snapshot_df = pd.DataFrame(
@@ -485,28 +504,37 @@ def test_add_to_removal_log_cascaded_id_gets_empty_snapshot():
         index=pd.Index(["LOAD1"], name="id"),
     )
     fake_state = {}
-    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_removal_log("Loads", ["LOAD1", "CASCADED_HVDC"], snapshot_df)
+        removals = state.change_log.removals(component="Loads")
 
-    log = fake_state["_removal_log_Loads"]
-    assert len(log) == 2
-    by_id = {e["element_id"]: e for e in log}
+    assert len(removals) == 2
+    by_id = {r["element_id"]: r for r in removals}
     assert by_id["LOAD1"]["snapshot"]["p0"] == 100.0
-    assert by_id["CASCADED_HVDC"]["snapshot"] == {}
+    # The shared ChangeLog omits the ``snapshot`` key when the id
+    # isn't in the snapshot DataFrame (vs the legacy list which
+    # stored an empty dict).
+    assert "snapshot" not in by_id["CASCADED_HVDC"]
 
 
-def test_add_to_removal_log_multiple_components_use_separate_keys():
+def test_add_to_removal_log_multiple_components_isolated():
+    """Removals are tracked per-component in the shared log."""
     from iidm_viewer.data_explorer import _add_to_removal_log
 
     fake_state = {}
-    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_removal_log("Loads", ["L1"], pd.DataFrame())
         _add_to_removal_log("Generators", ["G1"], pd.DataFrame())
 
-    assert "_removal_log_Loads" in fake_state
-    assert "_removal_log_Generators" in fake_state
-    assert fake_state["_removal_log_Loads"][0]["element_id"] == "L1"
-    assert fake_state["_removal_log_Generators"][0]["element_id"] == "G1"
+        loads = state.change_log.removals(component="Loads")
+        gens = state.change_log.removals(component="Generators")
+
+    assert len(loads) == 1 and loads[0]["element_id"] == "L1"
+    assert len(gens) == 1 and gens[0]["element_id"] == "G1"
 
 
 # ---------------------------------------------------------------------------
@@ -632,21 +660,26 @@ def test_compute_changes_multiple_rows_changed():
 
 
 def test_add_to_change_log_creates_entry_with_before_and_after():
+    """Phase C: ``_add_to_change_log`` writes only into the shared log
+    under the component label derived from the method name."""
     from iidm_viewer.data_explorer import _add_to_change_log
 
     orig = pd.DataFrame({"target_p": [100.0]}, index=pd.Index(["G1"]))
     changes = pd.DataFrame({"target_p": [200.0]}, index=pd.Index(["G1"]))
 
     fake_state = {}
-    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_change_log("get_generators", changes, orig)
+        entries = state.change_log.entries(component="Generators")
 
-    log = fake_state["_change_log_get_generators"]
-    assert len(log) == 1
-    assert log[0]["element_id"] == "G1"
-    assert log[0]["property"] == "target_p"
-    assert log[0]["before"] == 100.0
-    assert log[0]["after"] == 200.0
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["element_id"] == "G1"
+    assert e["property"] == "target_p"
+    assert e["before"] == 100.0
+    assert e["after"] == 200.0
 
 
 def test_add_to_change_log_updates_after_on_second_edit():
@@ -657,14 +690,16 @@ def test_add_to_change_log_updates_after_on_second_edit():
     edit2 = pd.DataFrame({"target_p": [250.0]}, index=pd.Index(["G1"]))
 
     fake_state = {}
-    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_change_log("get_generators", edit1, orig)
         _add_to_change_log("get_generators", edit2, orig)
+        entries = state.change_log.entries(component="Generators")
 
-    log = fake_state["_change_log_get_generators"]
-    assert len(log) == 1
-    assert log[0]["before"] == 100.0
-    assert log[0]["after"] == 250.0
+    assert len(entries) == 1
+    assert entries[0]["before"] == 100.0
+    assert entries[0]["after"] == 250.0
 
 
 def test_add_to_change_log_removes_entry_when_reverted_to_original():
@@ -675,11 +710,12 @@ def test_add_to_change_log_removes_entry_when_reverted_to_original():
     back = pd.DataFrame({"target_p": [100.0]}, index=pd.Index(["G1"]))
 
     fake_state = {}
-    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_change_log("get_generators", fwd, orig)
         _add_to_change_log("get_generators", back, orig)
-
-    assert fake_state["_change_log_get_generators"] == []
+        assert state.change_log.entries(component="Generators") == []
 
 
 def test_add_to_change_log_skips_nan_new_values():
@@ -689,10 +725,11 @@ def test_add_to_change_log_skips_nan_new_values():
     changes = pd.DataFrame({"target_p": [float("nan")]}, index=pd.Index(["G1"]))
 
     fake_state = {}
-    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_change_log("get_generators", changes, orig)
-
-    assert fake_state.get("_change_log_get_generators", []) == []
+        assert state.change_log.entries(component="Generators") == []
 
 
 def test_add_to_change_log_before_value_is_none_when_col_not_in_original():
@@ -702,24 +739,32 @@ def test_add_to_change_log_before_value_is_none_when_col_not_in_original():
     changes = pd.DataFrame({"target_p": [200.0]}, index=pd.Index(["G1"]))
 
     fake_state = {}
-    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_change_log("get_generators", changes, orig)
+        entries = state.change_log.entries(component="Generators")
 
-    log = fake_state["_change_log_get_generators"]
-    assert log[0]["before"] is None
-    assert log[0]["after"] == 200.0
+    assert entries[0]["before"] is None
+    assert entries[0]["after"] == 200.0
 
 
-def test_add_to_change_log_separate_keys_per_method():
+def test_add_to_change_log_separate_components_per_method():
+    """Different method names route to different components in the shared log."""
     from iidm_viewer.data_explorer import _add_to_change_log
 
     orig = pd.DataFrame({"p0": [10.0]}, index=pd.Index(["L1"]))
     changes = pd.DataFrame({"p0": [20.0]}, index=pd.Index(["L1"]))
 
     fake_state = {}
-    with patch("iidm_viewer.data_explorer.st.session_state", fake_state):
-        _add_to_change_log("get_generators", changes, orig)
+    with patch("iidm_viewer.data_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_change_log("get_loads", changes, orig)
 
-    assert "_change_log_get_generators" in fake_state
-    assert "_change_log_get_loads" in fake_state
+        gens = state.change_log.entries(component="Generators")
+        loads = state.change_log.entries(component="Loads")
+
+    # The single edit routed to "Loads"; "Generators" is empty.
+    assert gens == []
+    assert len(loads) == 1 and loads[0]["element_id"] == "L1"

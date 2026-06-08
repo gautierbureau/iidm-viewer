@@ -251,37 +251,38 @@ def test_revert_via_apply_rejects_nan_before(ieee14):
 
 
 # ---------------------------------------------------------------------------
-# Streamlit add_to_change_log shape compatibility
+# Streamlit add_to_change_log writes the shared ChangeLog
 # ---------------------------------------------------------------------------
-def test_streamlit_change_log_shape_is_preserved():
-    """The Streamlit path uses ``state.add_to_change_log`` which writes
-    per-method session-state lists. After the refactor those lists
-    still contain dicts with the legacy keys
-    (``element_id``, ``property``, ``before``, ``after``) and *no*
-    ``component`` key — so the existing ``data_explorer`` render code
-    keeps working unchanged.
+def test_streamlit_add_to_change_log_writes_shared_changelog():
+    """After Phase C of the change-log unification
+    (docs/host-sharing.md §2c) the Streamlit ``add_to_change_log``
+    writes only into the shared :class:`ChangeLog` on
+    ``app_state().change_log``. Entries carry the component label;
+    re-edits collapse via ``merge_entry``.
     """
     pytest.importorskip("streamlit")
     import streamlit as st
     import pandas as pd
-    from iidm_viewer.state import add_to_change_log
+    from iidm_viewer.state import add_to_change_log, app_state
 
-    # ``add_to_change_log`` reads / writes st.session_state — but bare
-    # mode without a script runner has a thin shim, so this works
-    # without booting an AppTest.
-    st.session_state.pop("_change_log_get_generators", None)
+    # Fresh AppState singleton + empty shared log for this test.
+    st.session_state.pop("_app_state_instance", None)
+    state = app_state()
+    state.change_log.clear()
+
     changes = pd.DataFrame({"target_p": [42.0]}, index=pd.Index(["G1"], name="id"))
     original = pd.DataFrame({"target_p": [10.0]}, index=pd.Index(["G1"], name="id"))
     add_to_change_log("get_generators", changes, original)
-    log = st.session_state["_change_log_get_generators"]
-    assert log == [{
-        "element_id": "G1",
-        "property": "target_p",
-        "before": 10.0,
-        "after": 42.0,
-    }]
+    entries = state.change_log.entries(component="Generators")
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["component"] == "Generators"
+    assert e["element_id"] == "G1"
+    assert e["property"] == "target_p"
+    assert e["before"] == 10.0
+    assert e["after"] == 42.0
 
-    # Re-edit collapses; setting it back to original removes it.
+    # Re-edit collapses; setting it back to original removes the entry.
     changes2 = pd.DataFrame({"target_p": [10.0]}, index=pd.Index(["G1"], name="id"))
     add_to_change_log("get_generators", changes2, original)
-    assert st.session_state["_change_log_get_generators"] == []
+    assert state.change_log.entries(component="Generators") == []

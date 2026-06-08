@@ -1581,32 +1581,46 @@ def test_toggle_switch_unknown_id_raises(node_breaker_network):
 # ---------------------------------------------------------------------------
 
 def test_add_to_change_log_records_entry(node_breaker_network):
-    from iidm_viewer.state import add_to_change_log
+    """Phase C of the change-log unification: entries land in the
+    shared :class:`ChangeLog` on ``app_state().change_log`` under the
+    component label derived from the method name."""
+    from iidm_viewer.state import add_to_change_log, app_state
     import streamlit as st
-    st.session_state.pop("_change_log_get_switches", None)
+    st.session_state.pop("_app_state_instance", None)
+    state = app_state()
+    state.change_log.clear()
 
     changes = pd.DataFrame({"open": [True]}, index=pd.Index(["SW1"], name="id"))
     original = pd.DataFrame({"open": [False]}, index=pd.Index(["SW1"], name="id"))
     add_to_change_log("get_switches", changes, original)
 
-    log = st.session_state["_change_log_get_switches"]
-    assert len(log) == 1
-    assert log[0] == {"element_id": "SW1", "property": "open", "before": False, "after": True}
+    entries = state.change_log.entries(component="Switches")
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["element_id"] == "SW1"
+    assert e["property"] == "open"
+    # Allow np.bool_ in addition to Python bool — pypowsybl DataFrames
+    # surface numpy scalars and the shared log doesn't coerce them.
+    assert bool(e["before"]) is False
+    assert bool(e["after"]) is True
 
 
 def test_add_to_change_log_collapses_re_edit(node_breaker_network):
-    from iidm_viewer.state import add_to_change_log
+    """Re-edits collapse via ``merge_entry`` — setting a cell back to
+    its original value drops the shared-log entry."""
+    from iidm_viewer.state import add_to_change_log, app_state
     import streamlit as st
-    st.session_state.pop("_change_log_get_switches", None)
+    st.session_state.pop("_app_state_instance", None)
+    state = app_state()
+    state.change_log.clear()
 
     original = pd.DataFrame({"open": [False]}, index=pd.Index(["SW1"], name="id"))
     add_to_change_log("get_switches",
                       pd.DataFrame({"open": [True]}, index=pd.Index(["SW1"], name="id")),
                       original)
-    # Re-edit: set back to original value — entry should vanish
+    # Re-edit: set back to original value — entry should vanish.
     add_to_change_log("get_switches",
                       pd.DataFrame({"open": [False]}, index=pd.Index(["SW1"], name="id")),
                       original)
 
-    log = st.session_state.get("_change_log_get_switches", [])
-    assert log == []
+    assert state.change_log.entries(component="Switches") == []
