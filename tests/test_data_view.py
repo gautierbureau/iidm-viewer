@@ -308,3 +308,167 @@ def test_apply_and_log_helpers_tolerate_no_change_log(ieee14):
         ieee14, "Generators", [gen_id], "target_p", 33.0,
     )
     assert outcome["display_value"] == 33.0
+
+
+# ---------------------------------------------------------------------------
+# DataExplorerViewModel + build_data_explorer_view_model
+# ---------------------------------------------------------------------------
+
+
+def test_build_data_explorer_view_model_basic_shape(ieee14):
+    """The view-model surfaces filtered rows, editability and total count."""
+    from iidm_viewer.data_view import build_data_explorer_view_model
+
+    vm = build_data_explorer_view_model(ieee14, "Generators")
+
+    assert vm.component == "Generators"
+    assert vm.method_name == "get_generators"
+    assert vm.total_count == len(vm.rows_df)  # no filter applied
+    assert vm.filtered_count == vm.total_count
+    assert vm.is_editable is True
+    assert vm.is_removable is True
+    assert "target_p" in vm.editable_cols
+    assert vm.is_empty is False
+
+
+def test_build_data_explorer_view_model_with_vl_filter(ieee14):
+    """Filtering by a specific VL narrows the rows but keeps total_count
+    at the pre-filter total."""
+    from iidm_viewer.data_view import build_data_explorer_view_model
+
+    full = build_data_explorer_view_model(ieee14, "Generators")
+    target_vl = str(full.rows_df["voltage_level_id"].iloc[0])
+
+    vm = build_data_explorer_view_model(
+        ieee14, "Generators",
+        selected_vl=target_vl,
+        filter_by_vl=True,
+    )
+    assert vm.total_count == full.total_count
+    assert vm.filtered_count <= full.total_count
+    assert vm.filtered_count >= 1
+    assert (vm.rows_df["voltage_level_id"].astype(str) == target_vl).all()
+
+
+def test_build_data_explorer_view_model_with_id_substring(ieee14):
+    """Case-insensitive id substring filter."""
+    from iidm_viewer.data_view import build_data_explorer_view_model
+
+    full = build_data_explorer_view_model(ieee14, "Generators")
+    target_id = str(full.rows_df.index[0])
+    # Lower-case half the id so we exercise case-insensitivity too.
+    fragment = target_id[: max(1, len(target_id) // 2)].lower()
+
+    vm = build_data_explorer_view_model(
+        ieee14, "Generators",
+        id_filter_substring=fragment,
+    )
+    assert vm.filtered_count >= 1
+    assert vm.total_count == full.total_count
+    assert all(
+        fragment.lower() in str(idx).lower()
+        for idx in vm.rows_df.index
+    )
+
+
+def test_build_data_explorer_view_model_empty_component(ieee14):
+    """A component absent from the network yields an empty view-model
+    without raising."""
+    from iidm_viewer.data_view import build_data_explorer_view_model
+
+    vm = build_data_explorer_view_model(ieee14, "Batteries")
+    assert vm.is_empty
+    assert vm.total_count == 0
+    assert vm.filtered_count == 0
+
+
+def test_build_data_explorer_view_model_non_editable_component(ieee14):
+    """Voltage Levels are surfaced but not editable: editable_cols
+    is empty, is_editable False, is_removable True (registry says so)."""
+    from iidm_viewer.data_view import build_data_explorer_view_model
+
+    vm = build_data_explorer_view_model(ieee14, "Voltage Levels")
+    assert vm.is_editable is False
+    assert vm.editable_cols == ()
+    # Voltage Levels are in REMOVABLE_COMPONENTS.
+    assert vm.is_removable is True
+
+
+# ---------------------------------------------------------------------------
+# compute_changes
+# ---------------------------------------------------------------------------
+
+
+def test_compute_changes_returns_only_changed_cells():
+    from iidm_viewer.data_view import compute_changes
+
+    base = pd.DataFrame(
+        {"a": [1, 2, 3], "b": [10.0, 20.0, 30.0]},
+        index=pd.Index(["G1", "G2", "G3"]),
+    )
+    edited = pd.DataFrame(
+        {"a": [1, 2, 9], "b": [10.0, 99.0, 30.0]},
+        index=pd.Index(["G1", "G2", "G3"]),
+    )
+    changes = compute_changes(base, edited, ["a", "b"])
+    # G1 unchanged → dropped. G2 changed in b only. G3 changed in a only.
+    assert set(changes.index) == {"G2", "G3"}
+    assert changes.at["G2", "b"] == 99.0
+    # G3 row has only the "a" change; "b" cell should be NaN (sparse).
+    assert pd.isna(changes.at["G3", "b"])
+    assert changes.at["G3", "a"] == 9
+
+
+def test_compute_changes_empty_when_no_edits():
+    from iidm_viewer.data_view import compute_changes
+
+    base = pd.DataFrame({"a": [1, 2]}, index=pd.Index(["G1", "G2"]))
+    edited = base.copy()
+    assert compute_changes(base, edited, ["a"]).empty
+
+
+def test_compute_changes_ignores_non_editable_columns():
+    from iidm_viewer.data_view import compute_changes
+
+    base = pd.DataFrame(
+        {"a": [1, 2], "readonly": [10, 20]},
+        index=pd.Index(["G1", "G2"]),
+    )
+    edited = pd.DataFrame(
+        {"a": [1, 2], "readonly": [99, 99]},  # readonly changed but not editable
+        index=pd.Index(["G1", "G2"]),
+    )
+    assert compute_changes(base, edited, ["a"]).empty
+
+
+def test_compute_changes_treats_nan_equal_to_nan():
+    """A grid that opens with NaN cells the user doesn't touch must
+    not register changes — even though ``NaN != NaN`` in pandas."""
+    from iidm_viewer.data_view import compute_changes
+    import numpy as np
+
+    base = pd.DataFrame(
+        {"a": [1.0, np.nan]}, index=pd.Index(["G1", "G2"]),
+    )
+    edited = base.copy()
+    assert compute_changes(base, edited, ["a"]).empty
+
+
+def test_compute_changes_handles_missing_columns():
+    """Editable cols that don't exist on ``base_df`` are skipped, not
+    raised."""
+    from iidm_viewer.data_view import compute_changes
+
+    base = pd.DataFrame({"a": [1]}, index=pd.Index(["G1"]))
+    edited = pd.DataFrame({"a": [9]}, index=pd.Index(["G1"]))
+    # "missing_col" not in base.columns — filtered out.
+    changes = compute_changes(base, edited, ["a", "missing_col"])
+    assert changes.at["G1", "a"] == 9
+
+
+def test_compute_changes_returns_empty_for_no_editable_intersection():
+    from iidm_viewer.data_view import compute_changes
+
+    base = pd.DataFrame({"a": [1]}, index=pd.Index(["G1"]))
+    edited = pd.DataFrame({"a": [9]}, index=pd.Index(["G1"]))
+    assert compute_changes(base, edited, ["x", "y"]).empty
