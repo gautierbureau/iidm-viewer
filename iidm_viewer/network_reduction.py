@@ -36,18 +36,13 @@ def _clear_caches():
         "_vl_set_by_click",
     ):
         st.session_state.pop(key, None)
-    # Per-extension change logs and the Streamlit export cache stay on
-    # session-state keys (unification doesn't cover the extension path),
-    # so clear them by prefix.
+    # The Streamlit export cache still lives on session-state keys.
     for k in list(st.session_state.keys()):
-        if (
-            k.startswith("_ext_change_log_")
-            or k.startswith("_ext_removal_log_")
-            or k.startswith("_export_cache_")
-        ):
+        if k.startswith("_export_cache_"):
             del st.session_state[k]
-    # The shared component change log is the canonical store after
-    # Phase C of the change-log unification — reset it directly.
+    # Both the component and extension change logs (the extension path
+    # buckets entries under "ext:<extension_name>") live in the shared
+    # ChangeLog after the change-log unification — reset it directly.
     app_state().change_log.clear()
 
 

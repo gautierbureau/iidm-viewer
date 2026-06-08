@@ -121,22 +121,41 @@ def _mock_ext_state(module):
 # ---------------------------------------------------------------------------
 
 
+def _fresh_app_state(fake_state):
+    """Wire ``fake_state`` as st.session_state in every Streamlit-side
+    module that touches it for the shared-log path, then return a
+    fresh AppState singleton."""
+    from iidm_viewer.state import app_state
+
+    fake_state.pop("_app_state_instance", None)
+    state = app_state()
+    state.change_log.clear()
+    return state
+
+
 def test_add_to_ext_change_log_creates_entry_with_before_and_after():
+    """Extension change-log unification: entries land in the shared
+    ChangeLog under the ``"ext:<extension_name>"`` component label."""
     from iidm_viewer.extensions_explorer import _add_to_ext_change_log
 
     orig = pd.DataFrame({"droop": [4.0]}, index=pd.Index(["B1-G"]))
     changes = pd.DataFrame({"droop": [6.0]}, index=pd.Index(["B1-G"]))
 
     fake_state = {}
-    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_ext_change_log("activePowerControl", changes, orig)
+        entries = state.change_log.entries(component="ext:activePowerControl")
 
-    log = fake_state["_ext_change_log_activePowerControl"]
-    assert len(log) == 1
-    assert log[0]["element_id"] == "B1-G"
-    assert log[0]["property"] == "droop"
-    assert log[0]["before"] == 4.0
-    assert log[0]["after"] == 6.0
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["element_id"] == "B1-G"
+    assert e["property"] == "droop"
+    assert e["before"] == 4.0
+    assert e["after"] == 6.0
+    # Phase C: the legacy session key is not created.
+    assert "_ext_change_log_activePowerControl" not in fake_state
 
 
 def test_add_to_ext_change_log_updates_after_on_second_edit():
@@ -147,15 +166,16 @@ def test_add_to_ext_change_log_updates_after_on_second_edit():
     changes2 = pd.DataFrame({"droop": [8.0]}, index=pd.Index(["B1-G"]))
 
     fake_state = {}
-    with patch("iidm_explorer.extensions_explorer.st.session_state", fake_state) if False else \
-         patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_ext_change_log("activePowerControl", changes1, orig)
         _add_to_ext_change_log("activePowerControl", changes2, orig)
+        entries = state.change_log.entries(component="ext:activePowerControl")
 
-    log = fake_state["_ext_change_log_activePowerControl"]
-    assert len(log) == 1
-    assert log[0]["before"] == 4.0
-    assert log[0]["after"] == 8.0
+    assert len(entries) == 1
+    assert entries[0]["before"] == 4.0
+    assert entries[0]["after"] == 8.0
 
 
 def test_add_to_ext_change_log_removes_entry_when_reverted_to_original():
@@ -166,47 +186,46 @@ def test_add_to_ext_change_log_removes_entry_when_reverted_to_original():
     changes_back = pd.DataFrame({"droop": [4.0]}, index=pd.Index(["B1-G"]))
 
     fake_state = {}
-    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_ext_change_log("activePowerControl", changes_fwd, orig)
         _add_to_ext_change_log("activePowerControl", changes_back, orig)
-
-    log = fake_state["_ext_change_log_activePowerControl"]
-    assert log == []
+        assert state.change_log.entries(component="ext:activePowerControl") == []
 
 
 def test_add_to_ext_change_log_skips_nan_new_values():
-    import numpy as np
     from iidm_viewer.extensions_explorer import _add_to_ext_change_log
 
     orig = pd.DataFrame({"droop": [4.0]}, index=pd.Index(["B1-G"]))
     changes = pd.DataFrame({"droop": [float("nan")]}, index=pd.Index(["B1-G"]))
 
     fake_state = {}
-    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_ext_change_log("activePowerControl", changes, orig)
-
-    log = fake_state.get("_ext_change_log_activePowerControl", [])
-    assert log == []
+        assert state.change_log.entries(component="ext:activePowerControl") == []
 
 
 def test_add_to_ext_change_log_handles_nonscalar_that_raises_in_isna():
-    """When pd.isna(value) raises TypeError (e.g. for a list), the value is
-    treated as non-NaN and the entry is recorded — covers the except branch."""
+    """A non-scalar value (list) is treated as non-NaN by the shared
+    ChangeLog's ``_is_nan`` helper (try/except returns False for
+    TypeError/ValueError), so the entry is recorded."""
     from iidm_viewer.extensions_explorer import _add_to_ext_change_log
 
-    # pd.isna([1, 2]) returns an array; using it in a boolean context raises
-    # ValueError, which triggers the except (TypeError, ValueError): pass branch.
     orig = pd.DataFrame({"code": [None]}, index=pd.Index(["S1"]))
     changes = pd.DataFrame({"code": [[1, 2]]}, index=pd.Index(["S1"]))
 
     fake_state = {}
-    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_ext_change_log("entsoeArea", changes, orig)
+        entries = state.change_log.entries(component="ext:entsoeArea")
 
-    log = fake_state.get("_ext_change_log_entsoeArea", [])
-    # The list value is non-NaN so an entry must have been created
-    assert len(log) == 1
-    assert log[0]["element_id"] == "S1"
+    assert len(entries) == 1
+    assert entries[0]["element_id"] == "S1"
 
 
 def test_add_to_ext_change_log_multiple_properties_and_elements():
@@ -222,17 +241,21 @@ def test_add_to_ext_change_log_multiple_properties_and_elements():
     )
 
     fake_state = {}
-    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_ext_change_log("activePowerControl", changes, orig)
+        entries = state.change_log.entries(component="ext:activePowerControl")
 
-    log = fake_state["_ext_change_log_activePowerControl"]
-    assert len(log) == 2
-    entries_by_id = {e["element_id"]: e for e in log}
+    assert len(entries) == 2
+    entries_by_id = {e["element_id"]: e for e in entries}
     assert entries_by_id["G1"]["after"] == 5.0
     assert entries_by_id["G2"]["after"] == 2.0
 
 
-def test_add_to_ext_change_log_separate_keys_per_extension():
+def test_add_to_ext_change_log_separate_components_per_extension():
+    """Each extension routes to its own ``"ext:<extension_name>"``
+    bucket in the shared log."""
     from iidm_viewer.extensions_explorer import _add_to_ext_change_log
 
     orig_a = pd.DataFrame({"droop": [4.0]}, index=pd.Index(["G1"]))
@@ -241,18 +264,21 @@ def test_add_to_ext_change_log_separate_keys_per_extension():
     changes_b = pd.DataFrame({"slope": [0.02]}, index=pd.Index(["SVC1"]))
 
     fake_state = {}
-    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_ext_change_log("activePowerControl", changes_a, orig_a)
         _add_to_ext_change_log("voltagePerReactivePowerControl", changes_b, orig_b)
 
-    assert "_ext_change_log_activePowerControl" in fake_state
-    assert "_ext_change_log_voltagePerReactivePowerControl" in fake_state
-    assert len(fake_state["_ext_change_log_activePowerControl"]) == 1
-    assert len(fake_state["_ext_change_log_voltagePerReactivePowerControl"]) == 1
+        apc = state.change_log.entries(component="ext:activePowerControl")
+        vrpc = state.change_log.entries(component="ext:voltagePerReactivePowerControl")
+
+    assert len(apc) == 1 and apc[0]["element_id"] == "G1"
+    assert len(vrpc) == 1 and vrpc[0]["element_id"] == "SVC1"
 
 
 # ---------------------------------------------------------------------------
-# _add_to_ext_removal_log unit tests
+# _add_to_ext_removal_log unit tests (shared-log writes)
 # ---------------------------------------------------------------------------
 
 
@@ -265,14 +291,19 @@ def test_add_to_ext_removal_log_stores_element_id_and_snapshot():
     )
 
     fake_state = {}
-    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_ext_removal_log("activePowerControl", ["G1"], snapshot)
+        removals = state.change_log.removals(component="ext:activePowerControl")
 
-    log = fake_state["_ext_removal_log_activePowerControl"]
-    assert len(log) == 1
-    assert log[0]["element_id"] == "G1"
-    assert log[0]["snapshot"]["droop"] == 4.0
-    assert log[0]["snapshot"]["participate"] is True
+    assert len(removals) == 1
+    r = removals[0]
+    assert r["element_id"] == "G1"
+    assert r["snapshot"]["droop"] == 4.0
+    assert r["snapshot"]["participate"] is True
+    # Phase C: the legacy session key is not created.
+    assert "_ext_removal_log_activePowerControl" not in fake_state
 
 
 def test_add_to_ext_removal_log_deduplicates_repeated_ids():
@@ -281,40 +312,48 @@ def test_add_to_ext_removal_log_deduplicates_repeated_ids():
     snapshot = pd.DataFrame({"droop": [4.0]}, index=pd.Index(["G1"]))
 
     fake_state = {}
-    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_ext_removal_log("activePowerControl", ["G1"], snapshot)
         _add_to_ext_removal_log("activePowerControl", ["G1"], snapshot)
+        assert len(state.change_log.removals(component="ext:activePowerControl")) == 1
 
-    assert len(fake_state["_ext_removal_log_activePowerControl"]) == 1
 
-
-def test_add_to_ext_removal_log_unknown_id_gets_empty_snapshot():
+def test_add_to_ext_removal_log_unknown_id_gets_no_snapshot_key():
+    """IDs not in the snapshot DataFrame get no ``snapshot`` key in the
+    shared log (vs the legacy list which stored ``{}``)."""
     from iidm_viewer.extensions_explorer import _add_to_ext_removal_log
 
     snapshot = pd.DataFrame({"droop": [4.0]}, index=pd.Index(["G1"]))
 
     fake_state = {}
-    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_ext_removal_log("activePowerControl", ["G1", "G_UNKNOWN"], snapshot)
+        removals = state.change_log.removals(component="ext:activePowerControl")
 
-    log = fake_state["_ext_removal_log_activePowerControl"]
-    by_id = {e["element_id"]: e for e in log}
+    by_id = {r["element_id"]: r for r in removals}
     assert by_id["G1"]["snapshot"]["droop"] == 4.0
-    assert by_id["G_UNKNOWN"]["snapshot"] == {}
+    assert "snapshot" not in by_id["G_UNKNOWN"]
 
 
-def test_add_to_ext_removal_log_separate_keys_per_extension():
+def test_add_to_ext_removal_log_separate_components_per_extension():
     from iidm_viewer.extensions_explorer import _add_to_ext_removal_log
 
     fake_state = {}
-    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_ext_removal_log("activePowerControl", ["G1"], pd.DataFrame())
         _add_to_ext_removal_log("voltagePerReactivePowerControl", ["SVC1"], pd.DataFrame())
 
-    assert "_ext_removal_log_activePowerControl" in fake_state
-    assert "_ext_removal_log_voltagePerReactivePowerControl" in fake_state
-    assert fake_state["_ext_removal_log_activePowerControl"][0]["element_id"] == "G1"
-    assert fake_state["_ext_removal_log_voltagePerReactivePowerControl"][0]["element_id"] == "SVC1"
+        apc = state.change_log.removals(component="ext:activePowerControl")
+        vrpc = state.change_log.removals(component="ext:voltagePerReactivePowerControl")
+
+    assert len(apc) == 1 and apc[0]["element_id"] == "G1"
+    assert len(vrpc) == 1 and vrpc[0]["element_id"] == "SVC1"
 
 
 # ---------------------------------------------------------------------------
@@ -371,57 +410,78 @@ class _FakeSessionState(dict):
     __delattr__ = dict.__delitem__
 
 
-def test_load_network_clears_ext_change_log(xiidm_upload):
-    from iidm_viewer.state import load_network
+def test_load_network_clears_ext_change_log_in_shared_log(xiidm_upload):
+    """After the change-log unification, extension edits live in the
+    shared :class:`ChangeLog` under ``"ext:<extension_name>"``. A
+    network load clears the whole shared log via
+    ``self.change_log.clear()`` in the base ``install_network``."""
+    from iidm_viewer.state import app_state, load_network
 
-    with patch("iidm_viewer.state.st") as mock_st:
-        mock_st.session_state = _FakeSessionState({
-            "_ext_change_log_activePowerControl": [{"element_id": "G1"}],
-            "_ext_change_log_entsoeCategory": [{"element_id": "G2"}],
-        })
+    fake = _FakeSessionState()
+    with patch("iidm_viewer.state.st") as mock_st, \
+         patch("iidm_viewer.caches.st") as caches_st:
+        mock_st.session_state = fake
+        caches_st.session_state = fake
+
+        state = app_state()
+        state.change_log.record("ext:activePowerControl", "G1", "droop", 4.0, 6.0)
+        state.change_log.record("ext:entsoeCategory", "G2", "code", 1, 2)
+        assert len(state.change_log.entries()) == 2
+
         load_network(xiidm_upload)
-        remaining = [k for k in mock_st.session_state if k.startswith("_ext_change_log_")]
-        assert remaining == []
+
+    assert state.change_log.entries() == []
 
 
-def test_load_network_clears_ext_removal_log(xiidm_upload):
-    from iidm_viewer.state import load_network
+def test_load_network_clears_ext_removal_log_in_shared_log(xiidm_upload):
+    from iidm_viewer.state import app_state, load_network
 
-    with patch("iidm_viewer.state.st") as mock_st:
-        mock_st.session_state = _FakeSessionState({
-            "_ext_removal_log_activePowerControl": [{"element_id": "G1"}],
-        })
+    fake = _FakeSessionState()
+    with patch("iidm_viewer.state.st") as mock_st, \
+         patch("iidm_viewer.caches.st") as caches_st:
+        mock_st.session_state = fake
+        caches_st.session_state = fake
+
+        state = app_state()
+        state.change_log.record_removal("ext:activePowerControl", ["G1"])
+
         load_network(xiidm_upload)
-        remaining = [k for k in mock_st.session_state if k.startswith("_ext_removal_log_")]
-        assert remaining == []
+
+    assert state.change_log.removals() == []
 
 
 def test_load_network_preserves_non_log_keys(xiidm_upload):
     """load_network must not wipe unrelated session_state keys."""
     from iidm_viewer.state import load_network
 
-    with patch("iidm_viewer.state.st") as mock_st:
-        mock_st.session_state = _FakeSessionState({
-            "_ext_change_log_activePowerControl": [{}],
-            "nad_depth": 2,
-        })
+    fake = _FakeSessionState({"nad_depth": 2})
+    with patch("iidm_viewer.state.st") as mock_st, \
+         patch("iidm_viewer.caches.st") as caches_st:
+        mock_st.session_state = fake
+        caches_st.session_state = fake
         load_network(xiidm_upload)
         assert "nad_depth" in mock_st.session_state
 
 
-def test_create_empty_network_clears_ext_logs():
-    from iidm_viewer.state import create_empty_network
+def test_create_empty_network_clears_shared_change_log():
+    """Same contract for ``create_empty_network``: the shared log is
+    cleared via the base ``install_network``."""
+    from iidm_viewer.state import app_state, create_empty_network
 
-    with patch("iidm_viewer.state.st") as mock_st:
-        mock_st.session_state = _FakeSessionState({
-            "_ext_change_log_activePowerControl": [{"element_id": "G1"}],
-            "_ext_removal_log_entsoeCategory": [{"element_id": "G2"}],
-        })
+    fake = _FakeSessionState()
+    with patch("iidm_viewer.state.st") as mock_st, \
+         patch("iidm_viewer.caches.st") as caches_st:
+        mock_st.session_state = fake
+        caches_st.session_state = fake
+
+        state = app_state()
+        state.change_log.record("ext:activePowerControl", "G1", "droop", 4.0, 6.0)
+        state.change_log.record_removal("ext:entsoeCategory", ["G2"])
+
         create_empty_network("test_net")
-        remaining_change = [k for k in mock_st.session_state if k.startswith("_ext_change_log_")]
-        remaining_removal = [k for k in mock_st.session_state if k.startswith("_ext_removal_log_")]
-        assert remaining_change == []
-        assert remaining_removal == []
+
+    assert state.change_log.entries() == []
+    assert state.change_log.removals() == []
 
 
 # ---------------------------------------------------------------------------
@@ -434,9 +494,9 @@ def test_create_empty_network_clears_ext_logs():
 
 
 def test_add_to_ext_change_log_handles_exception_in_before_after_comparison():
-    """Lines 62-63: when existing['before'] == existing['after'] raises (e.g.
-    because the value is a numpy array), the exception is swallowed and the
-    log entry is kept."""
+    """When ``existing["before"] == new_after`` raises (e.g. because
+    the value is a numpy array), the shared ``merge_entry`` swallows
+    the exception and keeps the entry."""
     import numpy as np
     from iidm_viewer.extensions_explorer import _add_to_ext_change_log
 
@@ -447,12 +507,14 @@ def test_add_to_ext_change_log_handles_exception_in_before_after_comparison():
     changes2 = pd.DataFrame({"droop": [np.array([1, 2])]}, index=pd.Index(["G1"]))
 
     fake_state = {}
-    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state):
+    with patch("iidm_viewer.extensions_explorer.st.session_state", fake_state), \
+         patch("iidm_viewer.state.st.session_state", fake_state):
+        state = _fresh_app_state(fake_state)
         _add_to_ext_change_log("myExt", changes1, orig)
         _add_to_ext_change_log("myExt", changes2, orig)
+        entries = state.change_log.entries(component="ext:myExt")
 
-    log = fake_state.get("_ext_change_log_myExt", [])
-    assert len(log) == 1  # entry stays because comparison raised
+    assert len(entries) == 1  # entry stays because comparison raised
 
 
 # ---------------------------------------------------------------------------
@@ -467,14 +529,18 @@ def _col_mocks(revert_clicked=False):
 
 
 def test_render_ext_change_log_non_empty_renders_header_and_rows():
-    """Lines 74-86: markdown header + column headers + row text rendered."""
+    """Reads from the shared ChangeLog: markdown header + column
+    headers + row text rendered."""
     from iidm_viewer.extensions_explorer import _render_ext_change_log
 
-    log = [{"element_id": "G1", "property": "droop", "before": 4.0, "after": 6.0}]
+    fake = {}
     cols = _col_mocks(revert_clicked=False)
 
-    with patch("iidm_viewer.extensions_explorer.st") as mock_st:
-        mock_st.session_state = {"_ext_change_log_myExt": log}
+    with patch("iidm_viewer.extensions_explorer.st") as mock_st, \
+         patch("iidm_viewer.state.st.session_state", fake):
+        state = _fresh_app_state(fake)
+        state.change_log.record("ext:myExt", "G1", "droop", 4.0, 6.0)
+        mock_st.session_state = fake
         mock_st.columns.return_value = cols
         _render_ext_change_log(MagicMock(), "myExt")
 
@@ -484,14 +550,17 @@ def test_render_ext_change_log_non_empty_renders_header_and_rows():
 
 
 def test_render_ext_change_log_revert_with_none_before_shows_error():
-    """Lines 87-92: before=None → st.error (cannot revert)."""
+    """before=None → st.error (cannot revert)."""
     from iidm_viewer.extensions_explorer import _render_ext_change_log
 
-    log = [{"element_id": "G1", "property": "droop", "before": None, "after": 6.0}]
+    fake = {}
     cols = _col_mocks(revert_clicked=True)
 
-    with patch("iidm_viewer.extensions_explorer.st") as mock_st:
-        mock_st.session_state = {"_ext_change_log_myExt": list(log)}
+    with patch("iidm_viewer.extensions_explorer.st") as mock_st, \
+         patch("iidm_viewer.state.st.session_state", fake):
+        state = _fresh_app_state(fake)
+        state.change_log.record("ext:myExt", "G1", "droop", None, 6.0)
+        mock_st.session_state = fake
         mock_st.columns.return_value = cols
         _render_ext_change_log(MagicMock(), "myExt")
 
@@ -499,51 +568,69 @@ def test_render_ext_change_log_revert_with_none_before_shows_error():
 
 
 def test_render_ext_change_log_revert_success_calls_update_and_rerun():
-    """Lines 93-102: valid before → update_extension called, rerun triggered."""
+    """Valid before → update_extension called, rerun triggered, and
+    the entry is dropped from the shared log."""
     from iidm_viewer.extensions_explorer import _render_ext_change_log
 
-    log = [{"element_id": "G1", "property": "droop", "before": 4.0, "after": 6.0}]
+    fake = {}
     cols = _col_mocks(revert_clicked=True)
 
     with patch("iidm_viewer.extensions_explorer.st") as mock_st, \
+         patch("iidm_viewer.state.st.session_state", fake), \
          patch("iidm_viewer.extensions_explorer.update_extension") as mock_upd:
-        mock_st.session_state = {"_ext_change_log_myExt": list(log)}
+        state = _fresh_app_state(fake)
+        state.change_log.record("ext:myExt", "G1", "droop", 4.0, 6.0)
+        mock_st.session_state = fake
         mock_st.columns.return_value = cols
         _render_ext_change_log(MagicMock(), "myExt")
+
+        # After revert the entry is dropped from the shared log.
+        assert state.change_log.entries(component="ext:myExt") == []
 
     mock_upd.assert_called_once()
     mock_st.rerun.assert_called_once()
 
 
 def test_render_ext_change_log_revert_failure_shows_error():
-    """Lines 103-104: update_extension raises → st.error displayed."""
+    """update_extension raises → st.error displayed, and the entry
+    stays in the shared log."""
     from iidm_viewer.extensions_explorer import _render_ext_change_log
 
-    log = [{"element_id": "G1", "property": "droop", "before": 4.0, "after": 6.0}]
+    fake = {}
     cols = _col_mocks(revert_clicked=True)
 
     with patch("iidm_viewer.extensions_explorer.st") as mock_st, \
+         patch("iidm_viewer.state.st.session_state", fake), \
          patch("iidm_viewer.extensions_explorer.update_extension",
                side_effect=RuntimeError("network error")):
-        mock_st.session_state = {"_ext_change_log_myExt": list(log)}
+        state = _fresh_app_state(fake)
+        state.change_log.record("ext:myExt", "G1", "droop", 4.0, 6.0)
+        mock_st.session_state = fake
         mock_st.columns.return_value = cols
         _render_ext_change_log(MagicMock(), "myExt")
+
+        # Entry preserved on failure.
+        assert len(state.change_log.entries(component="ext:myExt")) == 1
 
     mock_st.error.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
-# _render_ext_removal_log (lines 125-128, 134-135)
+# _render_ext_removal_log
 # ---------------------------------------------------------------------------
 
 
 def test_render_ext_removal_log_shows_header_and_items():
-    """Lines 125-128 and 134-135: non-empty log → markdown + captions."""
+    """Non-empty log → markdown + captions, read from the shared
+    ChangeLog removals."""
     from iidm_viewer.extensions_explorer import _render_ext_removal_log
 
-    log = [{"element_id": "G1", "snapshot": {}}, {"element_id": "G2", "snapshot": {}}]
-    with patch("iidm_viewer.extensions_explorer.st") as mock_st:
-        mock_st.session_state = {"_ext_removal_log_myExt": log}
+    fake = {}
+    with patch("iidm_viewer.extensions_explorer.st") as mock_st, \
+         patch("iidm_viewer.state.st.session_state", fake):
+        state = _fresh_app_state(fake)
+        state.change_log.record_removal("ext:myExt", ["G1", "G2"])
+        mock_st.session_state = fake
         _render_ext_removal_log("myExt")
 
     mock_st.markdown.assert_called_once()

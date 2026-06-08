@@ -68,19 +68,17 @@ def test_clear_caches_removes_cache_keys():
     assert fake["network"] == "kept"
 
 
-def test_clear_caches_clears_shared_changelog_and_ext_log_keys():
-    """Phase C of the change-log unification: the component change log
-    lives in the shared :class:`ChangeLog` on
-    ``app_state().change_log``; per-extension session-state lists keep
-    their old shape until the extensions explorer migrates. ``_clear_caches``
-    resets both."""
+def test_clear_caches_clears_shared_changelog_and_export_cache_keys():
+    """After the change-log unification both component edits and
+    extension edits (bucketed under ``"ext:<extension_name>"``) live
+    in the shared :class:`ChangeLog` on ``app_state().change_log``.
+    ``_clear_caches`` resets the shared log and pops the
+    ``_export_cache_*`` Streamlit-only keys."""
     import iidm_viewer.network_reduction as nr
     from iidm_viewer.state import app_state
 
     fake = {
         "selected_vl": "VL2",
-        "_ext_change_log_activePowerControl": [{"id": "G1"}],
-        "_ext_removal_log_activePowerControl": [{"id": "L1"}],
         "_export_cache_xiidm": b"stale",
     }
     with patch("iidm_viewer.network_reduction.st") as mock_st, \
@@ -90,19 +88,21 @@ def test_clear_caches_clears_shared_changelog_and_ext_log_keys():
         state_st.session_state = fake
         mock_caches_st.session_state = fake
 
-        # Seed the shared component change log so we can prove it's reset.
+        # Seed both component and extension edits in the shared log.
         state = app_state()
         state.change_log.record("Generators", "G1", "target_p", 10.0, 42.0)
-        assert len(state.change_log.entries()) == 1
+        state.change_log.record("ext:activePowerControl", "G2", "droop", 4.0, 6.0)
+        state.change_log.record_removal("ext:entsoeCategory", ["S1"])
+        assert len(state.change_log.entries()) == 2
+        assert len(state.change_log.removals()) == 1
 
         nr._clear_caches()
 
-        # Shared component change log cleared.
+        # Shared log cleared end-to-end (component + extension entries).
         assert state.change_log.entries() == []
+        assert state.change_log.removals() == []
 
-    # Per-extension lists and the Streamlit export cache are popped too.
-    assert "_ext_change_log_activePowerControl" not in fake
-    assert "_ext_removal_log_activePowerControl" not in fake
+    # Streamlit export cache popped.
     assert "_export_cache_xiidm" not in fake
 
 

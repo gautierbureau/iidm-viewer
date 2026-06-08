@@ -87,16 +87,15 @@ class AppState(_BaseAppState):
         * pop ``_vl_set_by_click`` so a stale post-click flag doesn't carry over;
         * pop ``_export_*`` and ``va_nom_select`` so the previous network's
           widget state doesn't leak into the new one;
-        * delete the per-extension ``_ext_change_log_*`` /
-          ``_ext_removal_log_*`` session-state keys (the Extensions
-          Explorer still uses per-extension lists; the change-log
-          unification (docs/host-sharing.md §2c) only covers the
-          component edit / removal flow so the extension path keeps
-          its current shape) and the ``_export_cache_*`` cache keys.
+        * delete the ``_export_cache_*`` cache keys.
 
-        The shared ``self.change_log`` is cleared inside
-        ``super().install_network`` together with the cache invalidation,
-        the selected-VL reset and the default-VL emission.
+        Both the component and the extension change logs live in the
+        shared ``self.change_log`` (the extensions path uses the
+        ``"ext:<extension_name>"`` component label, see
+        :mod:`iidm_viewer.extensions_explorer`) and are cleared by
+        ``self.change_log.clear()`` inside ``super().install_network``
+        together with the cache invalidation, the selected-VL reset
+        and the default-VL emission.
         """
         st.session_state["vl_selector_gen"] = (
             st.session_state.get("vl_selector_gen", 0) + 1
@@ -106,11 +105,7 @@ class AppState(_BaseAppState):
             st.session_state.pop(k, None)
         for k in [
             key for key in list(st.session_state)
-            if (
-                key.startswith("_ext_change_log_")
-                or key.startswith("_ext_removal_log_")
-                or key.startswith("_export_cache_")
-            )
+            if key.startswith("_export_cache_")
         ]:
             del st.session_state[k]
         super().install_network(network)
