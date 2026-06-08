@@ -22,60 +22,65 @@ def _extensions_information():
     return _shared_extensions_information()
 
 
+_EXT_LABEL_PREFIX = "ext:"
+
+
+def _ext_component_label(extension_name: str) -> str:
+    """Component label used by the shared :class:`ChangeLog` to bucket
+    extension edits separately from real-component edits."""
+    return f"{_EXT_LABEL_PREFIX}{extension_name}"
+
+
 def _add_to_ext_change_log(
     extension_name: str, changes_df: pd.DataFrame, original_df: pd.DataFrame
 ):
-    key = f"_ext_change_log_{extension_name}"
-    log: list[dict] = list(st.session_state.get(key, []))
+    """Record successfully-applied extension cell edits into the shared
+    :class:`iidm_viewer.change_log.ChangeLog`.
 
+    Entries are bucketed under ``"ext:<extension_name>"`` so the
+    Extensions Explorer reader filters can fetch only the extension's
+    own edits without colliding with component edits like ``Generators``.
+    The collapse + net-diff invariants are inherited from
+    :func:`change_log.merge_entry` — same rules as the component path.
+    """
+    from iidm_viewer.state import app_state
+
+    log = app_state().change_log
+    component = _ext_component_label(extension_name)
     for element_id in changes_df.index:
         for col in changes_df.columns:
             new_val = changes_df.at[element_id, col]
-            try:
-                if pd.isna(new_val):
-                    continue
-            except (TypeError, ValueError):
-                pass
-            existing = next(
-                (e for e in log if e["element_id"] == element_id and e["property"] == col),
-                None,
+            before_val = (
+                original_df.at[element_id, col]
+                if col in original_df.columns
+                else None
             )
-            if existing is None:
-                before_val = (
-                    original_df.at[element_id, col]
-                    if col in original_df.columns
-                    else None
-                )
-                log.append({
-                    "element_id": element_id,
-                    "property": col,
-                    "before": before_val,
-                    "after": new_val,
-                })
-            else:
-                existing["after"] = new_val
-                try:
-                    if existing["before"] == existing["after"]:
-                        log.remove(existing)
-                except Exception:
-                    pass
-
-    st.session_state[key] = log
+            log.record(component, element_id, col, before_val, new_val)
 
 
 def _render_ext_change_log(network, extension_name: str):
-    key = f"_ext_change_log_{extension_name}"
-    log: list[dict] = st.session_state.get(key, [])
-    if not log:
+    """Display applied extension changes with per-row Revert buttons.
+
+    Reads from the shared :class:`ChangeLog`. On revert, drops the
+    entry from the shared log directly via :meth:`drop_entry`; the
+    network mutation goes through ``update_extension`` so the
+    Streamlit cache layer is invalidated.
+    """
+    from iidm_viewer.state import app_state
+
+    state = app_state()
+    component = _ext_component_label(extension_name)
+    entries = state.change_log.entries(component=component)
+    if not entries:
         return
 
-    n = len(log)
+    n = len(entries)
     st.markdown(f"**Applied changes ({n})**")
     hdr = st.columns([3, 2, 2, 2, 1])
     for widget, label in zip(hdr, ["Element", "Property", "Before", "After", ""]):
         widget.caption(label)
 
-    for i, entry in enumerate(list(log)):
+    for i, entry in enumerate(entries):
         row = st.columns([3, 2, 2, 2, 1])
         row[0].text(str(entry["element_id"]))
         row[1].text(entry["property"])
@@ -101,8 +106,7 @@ def _render_ext_change_log(network, extension_name: str):
                         pd.DataFrame(),
                         is_revert=True,
                     )
-                    log.pop(i)
-                    st.session_state[key] = log
+                    state.change_log.drop_entry(entry)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Revert failed: {e}")
@@ -111,24 +115,33 @@ def _render_ext_change_log(network, extension_name: str):
 def _add_to_ext_removal_log(
     extension_name: str, ids: list, snapshot_df: pd.DataFrame
 ):
-    key = f"_ext_removal_log_{extension_name}"
-    log: list[dict] = list(st.session_state.get(key, []))
-    existing_ids = {e["element_id"] for e in log}
-    for eid in ids:
-        if eid not in existing_ids:
-            snapshot = snapshot_df.loc[eid].to_dict() if eid in snapshot_df.index else {}
-            log.append({"element_id": eid, "snapshot": snapshot})
-    st.session_state[key] = log
+    """Record removed extension element ids into the shared
+    :class:`ChangeLog`. ``record_removal`` already dedupes by
+    ``(component, element_id)``, so repeat calls with the same id
+    are safe.
+    """
+    from iidm_viewer.state import app_state
+
+    if not ids:
+        return
+    component = _ext_component_label(extension_name)
+    app_state().change_log.record_removal(component, list(ids), snapshot=snapshot_df)
 
 
 def _render_ext_removal_log(extension_name: str):
-    key = f"_ext_removal_log_{extension_name}"
-    log: list[dict] = st.session_state.get(key, [])
-    if not log:
+    """Display removed extension element ids in a visually distinct section.
+
+    Reads from the shared :class:`ChangeLog`.
+    """
+    from iidm_viewer.state import app_state
+
+    component = _ext_component_label(extension_name)
+    removals = app_state().change_log.removals(component=component)
+    if not removals:
         return
-    n = len(log)
+    n = len(removals)
     st.markdown(f"**:red[Removed {extension_name} extensions ({n})]**")
-    for entry in log:
+    for entry in removals:
         st.caption(f"• {entry['element_id']}")
 
 
