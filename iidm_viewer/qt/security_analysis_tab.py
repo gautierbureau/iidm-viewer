@@ -44,6 +44,7 @@ from iidm_viewer.security_analysis import (
     CONDITION_TYPES,
     CTX_TYPES,
     ELEMENT_TYPES,
+    SecurityAnalysisViewModel,
     VIOLATION_TYPES,
     action_summary,
     build_n1_contingencies,
@@ -51,18 +52,10 @@ from iidm_viewer.security_analysis import (
     get_element_ids,
     get_nominal_voltages,
     limit_reduction_summary,
-    make_action,
-    make_limit_reduction,
-    make_monitored_element,
-    make_operator_strategy,
     monitored_element_summary,
     operator_strategy_summary,
     run_security_analysis,
     summarize_security_results,
-    validate_action,
-    validate_limit_reduction,
-    validate_monitored_element,
-    validate_operator_strategy,
 )
 
 
@@ -94,13 +87,11 @@ class SecurityAnalysisTab(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
-        self._results: Optional[dict] = None
-        self._contingencies: list[dict] = []
-        self._element_ids: dict = {}
-        self._monitored: list[dict] = []
-        self._reductions: list[dict] = []
-        self._actions: list[dict] = []
-        self._strategies: list[dict] = []
+        # All five configuration lists, the cached element-ids map and
+        # the last results dict live on the shared view-model so the
+        # add / remove / validate / store flows match the Streamlit
+        # and NiceGUI tabs byte-for-byte.
+        self._vm = SecurityAnalysisViewModel()
         # Registry-driven action widgets: {field_name: (fdef, widget)}.
         self._action_field_widgets: dict = {}
 
@@ -350,12 +341,7 @@ class SecurityAnalysisTab(QWidget):
     # ------------------------------------------------------------------
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
-        self._results = None
-        self._contingencies = []
-        self._monitored = []
-        self._reductions = []
-        self._actions = []
-        self._strategies = []
+        self._vm.clear()
         if network is None:
             self._set_network_loaded(False)
             return
@@ -371,15 +357,15 @@ class SecurityAnalysisTab(QWidget):
         _fill_list(self._nominal_v_list, voltages)
         # Element-id buckets for the advanced-config selectors.
         try:
-            self._element_ids = get_element_ids(network)
+            self._vm.set_element_ids(get_element_ids(network))
         except Exception:
-            self._element_ids = {}
+            self._vm.set_element_ids({})
         _fill_list(self._mon_branches_list,
-                   self._element_ids.get("branches", []))
+                   self._vm.element_ids.get("branches", []))
         _fill_list(self._mon_vls_list,
-                   self._element_ids.get("voltage_levels", []))
+                   self._vm.element_ids.get("voltage_levels", []))
         _fill_list(self._mon_3wt_list,
-                   self._element_ids.get("three_windings_transformers", []))
+                   self._vm.element_ids.get("three_windings_transformers", []))
         self._rebuild_action_fields()
         self._sync_contingency_dependents()
         self._refresh_all_entry_lists()
@@ -406,13 +392,13 @@ class SecurityAnalysisTab(QWidget):
         )
         self._contingency_count_lbl.setText("Building contingencies…")
         try:
-            self._contingencies = builder(
+            self._vm.set_contingencies(builder(
                 self._network, element_type, nominal_v_set,
-            )
+            ))
         except Exception as exc:
             self._contingency_count_lbl.setText(f"Build failed: {exc}")
             return
-        n = len(self._contingencies)
+        n = len(self._vm.contingencies)
         self._contingency_count_lbl.setText(
             f"{n} contingenc{'y' if n == 1 else 'ies'} ready.",
         )
@@ -420,23 +406,23 @@ class SecurityAnalysisTab(QWidget):
         self._sync_contingency_dependents()
 
     def _on_run(self) -> None:
-        if self._network is None or not self._contingencies:
+        if self._network is None or not self._vm.contingencies:
             self._status_lbl.setText("Build a contingency list first.")
             return
-        n = len(self._contingencies)
+        n = len(self._vm.contingencies)
         self._status_lbl.setText(
             f"Running AC security analysis on {n} "
             f"contingenc{'y' if n == 1 else 'ies'}…",
         )
         try:
-            self._results = run_security_analysis(
+            self._vm.store_results(run_security_analysis(
                 self._network,
-                self._contingencies,
-                monitored_elements=self._monitored,
-                limit_reductions=self._reductions,
-                actions=self._actions,
-                operator_strategies=self._strategies,
-            )
+                self._vm.contingencies,
+                monitored_elements=self._vm.monitored,
+                limit_reductions=self._vm.reductions,
+                actions=self._vm.actions,
+                operator_strategies=self._vm.strategies,
+            ))
         except Exception as exc:
             self._status_lbl.setText(f"Security analysis failed: {exc}")
             return
@@ -451,7 +437,7 @@ class SecurityAnalysisTab(QWidget):
     def _sync_contingency_dependents(self) -> None:
         """Feed the built contingency ids into the monitored + strategy
         pickers."""
-        cids = [c["id"] for c in self._contingencies]
+        cids = self._vm.contingency_ids()
         _fill_list(self._mon_cids_list, cids)
         self._strat_cid_combo.clear()
         self._strat_cid_combo.addItems(cids)
@@ -467,7 +453,7 @@ class SecurityAnalysisTab(QWidget):
         spec = ACTION_FIELDS.get(self._act_type_combo.currentText())
         if spec is None:
             return
-        ids = self._element_ids.get(spec["id_key"]) or []
+        ids = self._vm.element_ids.get(spec["id_key"]) or []
         for fdef in spec["fields"]:
             kind = fdef["kind"]
             if kind == "id":
@@ -508,52 +494,44 @@ class SecurityAnalysisTab(QWidget):
         return out
 
     def _on_add_monitored(self) -> None:
-        ctx = self._mon_ctx_combo.currentText()
-        cids = _selected_texts(self._mon_cids_list)
-        branches = _selected_texts(self._mon_branches_list)
-        vls = _selected_texts(self._mon_vls_list)
-        t3w = _selected_texts(self._mon_3wt_list)
-        errors = validate_monitored_element(ctx, cids, branches, vls, t3w)
+        errors = self._vm.add_monitored(
+            self._mon_ctx_combo.currentText(),
+            contingency_ids=_selected_texts(self._mon_cids_list),
+            branch_ids=_selected_texts(self._mon_branches_list),
+            voltage_level_ids=_selected_texts(self._mon_vls_list),
+            three_windings_transformer_ids=_selected_texts(self._mon_3wt_list),
+        )
         if errors:
             self._status_lbl.setText("; ".join(errors))
             return
-        self._monitored.append(
-            make_monitored_element(ctx, cids, branches, vls, t3w),
-        )
         self._refresh_all_entry_lists()
 
     def _on_remove_monitored(self) -> None:
-        self._remove_selected(self._mon_entries_list, self._monitored)
+        self._remove_selected_via_vm(self._mon_entries_list, self._vm.remove_monitored)
 
     def _on_add_reduction(self) -> None:
-        errors = validate_limit_reduction(
+        errors = self._vm.add_reduction(
             self._lr_value.value(),
-            self._lr_perm.isChecked(),
-            self._lr_temp.isChecked(),
+            permanent=self._lr_perm.isChecked(),
+            temporary=self._lr_temp.isChecked(),
         )
         if errors:
             self._status_lbl.setText("; ".join(errors))
             return
-        self._reductions.append(make_limit_reduction(
-            self._lr_value.value(),
-            self._lr_perm.isChecked(),
-            self._lr_temp.isChecked(),
-        ))
         self._refresh_all_entry_lists()
 
     def _on_remove_reduction(self) -> None:
-        self._remove_selected(self._lr_entries_list, self._reductions)
+        self._remove_selected_via_vm(self._lr_entries_list, self._vm.remove_reduction)
 
     def _on_add_action(self) -> None:
-        atype = self._act_type_combo.currentText()
-        aid = self._act_id_edit.text()
-        fields = self._read_action_fields()
-        existing = [a["action_id"] for a in self._actions]
-        errors = validate_action(atype, aid, fields, existing)
+        errors = self._vm.add_action(
+            self._act_type_combo.currentText(),
+            self._act_id_edit.text(),
+            self._read_action_fields(),
+        )
         if errors:
             self._status_lbl.setText("; ".join(errors))
             return
-        self._actions.append(make_action(atype, aid, fields))
         self._act_id_edit.clear()
         self._refresh_all_entry_lists()
 
@@ -564,43 +542,49 @@ class SecurityAnalysisTab(QWidget):
             reverse=True,
         )
         for r in rows:
-            removed = self._actions.pop(r)
-            for s in self._strategies:
-                s["action_ids"] = [
-                    a for a in s["action_ids"]
-                    if a != removed["action_id"]
-                ]
+            # Cascade: drop the removed action id from every strategy
+            # so the run helper doesn't see a dangling reference. The
+            # view-model exposes the action / strategy lists by
+            # reference, so mutating them here is intentional.
+            removed_id = self._vm.actions[r].get("action_id")
+            self._vm.remove_action(r)
+            if removed_id:
+                for s in self._vm.strategies:
+                    s["action_ids"] = [
+                        a for a in s["action_ids"] if a != removed_id
+                    ]
         self._refresh_all_entry_lists()
 
     def _on_add_strategy(self) -> None:
-        sid = self._strat_id_edit.text()
-        actions = _selected_texts(self._strat_actions_list)
-        existing = [s["operator_strategy_id"] for s in self._strategies]
-        errors = validate_operator_strategy(sid, actions, existing)
         cid = self._strat_cid_combo.currentText()
+        errors = self._vm.add_strategy(
+            self._strat_id_edit.text(),
+            cid,
+            _selected_texts(self._strat_actions_list),
+            condition_type=self._strat_condition_combo.currentText(),
+            violation_subject_ids=[],
+            violation_types=_selected_texts(self._strat_vtypes_list),
+        )
         if not cid:
-            errors = errors + ["Pick a triggering contingency."]
+            errors = list(errors) + ["Pick a triggering contingency."]
         if errors:
             self._status_lbl.setText("; ".join(errors))
             return
-        self._strategies.append(make_operator_strategy(
-            sid, cid, actions,
-            self._strat_condition_combo.currentText(),
-            [], _selected_texts(self._strat_vtypes_list),
-        ))
         self._strat_id_edit.clear()
         self._refresh_all_entry_lists()
 
     def _on_remove_strategy(self) -> None:
-        self._remove_selected(self._strat_entries_list, self._strategies)
+        self._remove_selected_via_vm(self._strat_entries_list, self._vm.remove_strategy)
 
-    def _remove_selected(self, list_widget: QListWidget, entries: list) -> None:
+    def _remove_selected_via_vm(
+        self, list_widget: QListWidget, vm_remove,
+    ) -> None:
         rows = sorted(
             (list_widget.row(i) for i in list_widget.selectedItems()),
             reverse=True,
         )
         for r in rows:
-            entries.pop(r)
+            vm_remove(r)
         self._refresh_all_entry_lists()
 
     def _refresh_all_entry_lists(self) -> None:
@@ -608,22 +592,22 @@ class SecurityAnalysisTab(QWidget):
         action picker (which depends on the action list)."""
         _fill_list(
             self._mon_entries_list,
-            [monitored_element_summary(e) for e in self._monitored],
+            [monitored_element_summary(e) for e in self._vm.monitored],
         )
         _fill_list(
             self._lr_entries_list,
-            [limit_reduction_summary(e) for e in self._reductions],
+            [limit_reduction_summary(e) for e in self._vm.reductions],
         )
         _fill_list(
             self._act_entries_list,
-            [action_summary(e) for e in self._actions],
+            [action_summary(e) for e in self._vm.actions],
         )
         _fill_list(
             self._strat_entries_list,
-            [operator_strategy_summary(e) for e in self._strategies],
+            [operator_strategy_summary(e) for e in self._vm.strategies],
         )
         # The strategy action picker mirrors the current action list.
-        action_ids = [a["action_id"] for a in self._actions]
+        action_ids = self._vm.action_ids()
         previously = set(_selected_texts(self._strat_actions_list))
         _fill_list(self._strat_actions_list, action_ids)
         for i in range(self._strat_actions_list.count()):
@@ -639,10 +623,10 @@ class SecurityAnalysisTab(QWidget):
         self._config_group.setVisible(loaded)
         self._advanced_group.setVisible(loaded)
         self._run_row_widget.setVisible(loaded)
-        self._results_group.setVisible(loaded and self._results is not None)
+        self._results_group.setVisible(loaded and self._vm.has_results())
 
     def _render_results(self) -> None:
-        results = self._results
+        results = self._vm.results
         if results is None:
             self._results_group.setVisible(False)
             self._summary_model.set_dataframe(pd.DataFrame())
