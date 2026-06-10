@@ -83,12 +83,10 @@ from iidm_viewer.data_view import (
     apply_and_log_bulk_disconnect,
     apply_and_log_bulk_edit,
     apply_filter_specs,
+    build_data_explorer_view_model,
     compute_filter_widget_spec,
     dataframe_to_csv,
     delete_and_log_elements,
-    filter_by_voltage_level,
-    get_enriched_dataframe,
-    reorder_columns,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy
 
@@ -723,48 +721,45 @@ class DataExplorerTab(QWidget):
     def _refresh(self, label: str) -> None:
         if self._network is None:
             return
+        # The host-agnostic ``build_data_explorer_view_model`` runs the
+        # whole "fetch enriched → reorder → optional VL filter →
+        # structured per-column filters → editable-cols intersection"
+        # pipeline in one call so the Streamlit, PySide6 and NiceGUI
+        # tabs stay in lockstep. ``filter_specs`` carries this tab's
+        # structured filter state; the VL toggle / selected_vl come
+        # from the local widget state.
         try:
-            # ``get_enriched_dataframe`` joins voltage-level /
-            # substation columns onto the raw frame so the FILTERS
-            # whitelist can target country / nominal_v / nominal_v1
-            # / nominal_v2.
-            df_full = get_enriched_dataframe(self._network, label)
+            vm = build_data_explorer_view_model(
+                self._network,
+                label,
+                selected_vl=self._selected_vl,
+                filter_by_vl=(
+                    self._vl_filter.isChecked() and label in VL_FILTERABLE
+                ),
+                filter_specs=self._filter_specs,
+            )
         except Exception as exc:
             self._model.set_dataframe(pd.DataFrame(), editable_cols=[])
             self._summary.setText(f"{label}: failed — {exc}")
             return
-        df = reorder_columns(df_full, label)
-        original_rows = df.shape[0]
 
-        # Filter by selected VL (when applicable and toggled).
-        if (
-            self._vl_filter.isChecked()
-            and label in VL_FILTERABLE
-            and self._selected_vl
-        ):
-            df = filter_by_voltage_level(df, self._selected_vl)
-
-        # Structured per-column filters.
-        df = apply_filter_specs(df, self._filter_specs)
-
-        cols = editable_attributes(label)
-        # Keep only the columns the DataFrame actually has — some
-        # editable attributes may be absent on networks that don't
-        # carry their extensions (e.g. regulated_element_id).
-        cols = [c for c in cols if c in df.columns]
+        df = vm.rows_df
+        original_rows = vm.total_count
+        cols = list(vm.editable_cols)
         self._model.set_dataframe(df, editable_cols=cols)
-        if df.empty and original_rows == 0:
+        if vm.is_empty and original_rows == 0:
             self._summary.setText(f"{label}: empty (no rows in this network)")
         else:
             editable_msg = " · editable: " + ", ".join(cols) if cols else ""
-            if df.shape[0] < original_rows:
+            if vm.filtered_count < original_rows:
                 self._summary.setText(
-                    f"{label}: {df.shape[0]} / {original_rows} rows · "
+                    f"{label}: {vm.filtered_count} / {original_rows} rows · "
                     f"{df.shape[1]} columns{editable_msg}"
                 )
             else:
                 self._summary.setText(
-                    f"{label}: {df.shape[0]} rows · {df.shape[1]} columns{editable_msg}"
+                    f"{label}: {vm.filtered_count} rows · "
+                    f"{df.shape[1]} columns{editable_msg}"
                 )
         if not df.empty:
             self._table.resizeColumnsToContents()
