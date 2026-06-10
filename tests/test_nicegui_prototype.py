@@ -1286,7 +1286,7 @@ def test_injection_map_builder_uses_shared_helpers():
     assert "build_injection_map_html" in src
     assert "injection_map_caption" in src
     assert "_extract_injection_data" in src
-    assert "_suggest_full_scale" in src
+    assert "InjectionMapViewModel" in src
     assert "_METRIC_OPTIONS" in src
     assert "_VIEW_OPTIONS" in src
     # The HTML lands in a sandboxed iframe via srcdoc.
