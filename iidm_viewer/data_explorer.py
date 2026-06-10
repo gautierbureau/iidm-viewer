@@ -41,9 +41,9 @@ from iidm_viewer.state import (
     add_to_change_log,
     update_components,
 )
-from iidm_viewer.caches import get_enriched_component
 from iidm_viewer.filters import (
     FILTERS,
+    collect_filter_specs,
     render_filters,
 )
 from iidm_viewer import script_recorder
@@ -1202,55 +1202,71 @@ def render_data_explorer(network, selected_vl):
 
     with st.spinner(f"Loading {component}..."):
         try:
-            # Fetch the enriched DataFrame upfront so the Streamlit
-            # ``render_filters`` widget pass (which mutates the frame +
-            # owns its own widget state) can run as before. The
-            # framework-agnostic ``build_data_explorer_view_model``
-            # handles the VL + ID-substring filters and the editable
-            # / removable derivation in one place; the streamlit-only
-            # column-filter widget chain stays in this file.
-            df = get_enriched_component(network, method_name)
-            if df.empty:
+            # Two-phase build so the filter expander can render against
+            # the already-enriched + VL-filtered frame (its widgets
+            # depend on the column values for range / multiselect
+            # shapes). Phase 1: build the view-model with only the
+            # VL toggle applied so we know which columns / values the
+            # filter widgets should adapt to. Phase 2: collect the
+            # widget specs and rebuild with them + the id substring.
+            vl_vm = _build_view_model(
+                network,
+                component,
+                selected_vl=selected_vl,
+                filter_by_vl=filter_by_vl,
+            )
+            if vl_vm.total_count == 0:
                 st.info(f"No {component.lower()} found in this network.")
                 return
+            if vl_vm.is_empty:
+                st.info(f"No {component.lower()} in this voltage level.")
+                return
 
-            if filter_by_vl and selected_vl and "voltage_level_id" in df.columns:
-                df = df[df["voltage_level_id"].astype(str) == str(selected_vl)]
-                if df.empty:
-                    st.info(f"No {component.lower()} in this voltage level.")
-                    return
-
-            df = _reorder_columns(df, component)
-            total = len(df)
-
-            df = render_filters(
-                df, FILTERS.get(component, []), key_prefix=f"flt_{method_name}"
+            specs = collect_filter_specs(
+                vl_vm.rows_df,
+                FILTERS.get(component, []),
+                key_prefix=f"flt_{method_name}",
             )
 
-            if id_filter:
-                mask = df.index.astype(str).str.contains(
-                    id_filter, case=False, na=False, regex=False
-                )
-                df = df[mask]
+            vm = _build_view_model(
+                network,
+                component,
+                selected_vl=selected_vl,
+                filter_by_vl=filter_by_vl,
+                filter_specs=specs,
+                id_filter_substring=id_filter,
+            )
+            df = vm.rows_df
+            # ``data_view`` returns the DataFrame with the element id
+            # surfaced as an ``id`` column (the Qt / NiceGUI hosts
+            # consume it that way). Streamlit's downstream code -
+            # ``st.data_editor``, ``update_components`` (pypowsybl
+            # expects the update frame indexed by element id),
+            # ``_compute_changes`` - relies on the id-indexed shape
+            # the legacy ``caches.get_enriched_component`` produced,
+            # so restore it here. No-op when the column isn't present.
+            if "id" in df.columns:
+                df = df.set_index("id")
 
             if df.empty:
                 st.info(f"No {component.lower()} match the current filters.")
                 return
 
+            # The "X of Y" caption denominator is the VL-filtered count
+            # (matches the original Streamlit semantics: "narrowed
+            # within the visible VL slice" rather than "narrowed within
+            # the whole network"). Qt/NiceGUI display the whole-network
+            # total here — both shapes are valid; Streamlit keeps its
+            # historical one so the visible UI is byte-identical to
+            # before this refactor.
+            total = vl_vm.filtered_count
             if len(df) < total:
                 st.caption(f"{len(df)} of {total} {component.lower()}")
             else:
                 st.caption(f"{len(df)} {component.lower()}")
 
-            # Editable / removable derivation now lives in the shared
-            # view-model contract; reuse those rules here so the
-            # Streamlit path and the prototype hosts stay in lockstep.
-            editable_cols: list[str] = []
-            if component in EDITABLE_COMPONENTS:
-                _, all_editable = EDITABLE_COMPONENTS[component]
-                editable_cols = [c for c in all_editable if c in df.columns]
-
-            is_removable = component in REMOVABLE_COMPONENTS
+            editable_cols = list(vm.editable_cols)
+            is_removable = vm.is_removable
 
             if editable_cols:
                 st.info(f"Editable properties: {', '.join(editable_cols)}")

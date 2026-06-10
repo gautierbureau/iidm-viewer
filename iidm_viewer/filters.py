@@ -22,20 +22,25 @@ def build_vl_lookup(network) -> pd.DataFrame:
     return get_vl_lookup(network)
 
 
-def render_filters(df: pd.DataFrame, columns: list[str], key_prefix: str, label: str = "Filters") -> pd.DataFrame:
-    """Render one Streamlit widget per whitelisted column and return the
-    narrowed dataframe.
+def collect_filter_specs(
+    df: pd.DataFrame, columns: list[str], key_prefix: str, label: str = "Filters",
+) -> dict:
+    """Render the Streamlit filter widgets and return the structured
+    spec dict — the same shape :func:`apply_filter_specs` and
+    :func:`build_data_explorer_view_model` consume.
 
-    Widget shape per column is decided by
-    :func:`iidm_viewer.data_view.compute_filter_widget_spec`; the
-    filtering itself runs through
-    :func:`iidm_viewer.data_view.apply_filter_specs` so the rules
-    stay byte-identical with the PySide6 + NiceGUI prototypes' own
-    filter UIs.
+    Splitting the spec collection from the filter application lets the
+    Streamlit ``render_data_explorer`` build the host-agnostic
+    :class:`~iidm_viewer.data_view.DataExplorerViewModel` directly:
+    render widgets here, hand the specs to
+    ``build_data_explorer_view_model`` and let the view-model run the
+    full filter pipeline in one place. The legacy
+    :func:`render_filters` keeps working as a one-call wrapper that
+    collects specs + applies them.
     """
     available = [c for c in columns if c in df.columns]
     if not available:
-        return df
+        return {}
 
     specs: dict = {}
     with st.expander(label, expanded=False):
@@ -74,4 +79,17 @@ def render_filters(df: pd.DataFrame, columns: list[str], key_prefix: str, label:
                     specs[col] = sel
             # ``skip`` (high-cardinality) -> no widget.
 
+    return specs
+
+
+def render_filters(df: pd.DataFrame, columns: list[str], key_prefix: str, label: str = "Filters") -> pd.DataFrame:
+    """Render one Streamlit widget per whitelisted column and return the
+    narrowed dataframe.
+
+    Thin wrapper around :func:`collect_filter_specs` +
+    :func:`~iidm_viewer.data_view.apply_filter_specs`. Kept for
+    backward compatibility with extension callers that don't yet
+    consume the structured specs.
+    """
+    specs = collect_filter_specs(df, columns, key_prefix, label)
     return apply_filter_specs(df, specs)

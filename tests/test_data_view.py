@@ -351,11 +351,13 @@ def test_build_data_explorer_view_model_with_vl_filter(ieee14):
 
 
 def test_build_data_explorer_view_model_with_id_substring(ieee14):
-    """Case-insensitive id substring filter."""
+    """Case-insensitive id substring filter — matches against the
+    ``id`` column ``component_registry.get_dataframe`` produces."""
     from iidm_viewer.data_view import build_data_explorer_view_model
 
     full = build_data_explorer_view_model(ieee14, "Generators")
-    target_id = str(full.rows_df.index[0])
+    assert "id" in full.rows_df.columns
+    target_id = str(full.rows_df["id"].iloc[0])
     # Lower-case half the id so we exercise case-insensitivity too.
     fragment = target_id[: max(1, len(target_id) // 2)].lower()
 
@@ -367,7 +369,7 @@ def test_build_data_explorer_view_model_with_id_substring(ieee14):
     assert vm.total_count == full.total_count
     assert all(
         fragment.lower() in str(idx).lower()
-        for idx in vm.rows_df.index
+        for idx in vm.rows_df["id"]
     )
 
 
