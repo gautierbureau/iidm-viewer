@@ -6,6 +6,7 @@ import pytest
 
 from iidm_viewer.injection_map import (
     TRANSPORT_NOMINAL_V_THRESHOLD,
+    InjectionMapViewModel,
     _extract_injection_data,
     _filter_transport,
     _grid_inj_series,
@@ -373,6 +374,131 @@ def test_injection_map_caption_reactive_metric_unit_changes():
     ]
     caption = injection_map_caption(records, "Q")
     assert "MVAr" in caption
+
+
+# ── InjectionMapViewModel ────────────────────────────────────────────────────
+
+
+def _vm_with_data(records=None, *, has_lf_p=True, has_lf_q=True):
+    vm = InjectionMapViewModel()
+    vm.set_data({
+        "records": records if records is not None else [],
+        "has_lf_p": has_lf_p,
+        "has_lf_q": has_lf_q,
+    })
+    return vm
+
+
+def test_view_model_defaults_are_empty():
+    vm = InjectionMapViewModel()
+    assert vm.data is None
+    assert vm.scale_by_metric == {}
+    assert vm.is_empty() is True
+    assert vm.records() == []
+    assert vm.records(transport_only=True) == []
+    assert vm.has_lf("P") is False
+    assert vm.has_lf("Q") is False
+
+
+def test_view_model_clear_resets_state():
+    vm = _vm_with_data([{"max_nominal_v": 400.0, "inj_p_mw": 1.0,
+                         "inj_q_mvar": 0.0}])
+    vm.set_scale("P", 1200.0)
+    vm.clear()
+    assert vm.data is None
+    assert vm.scale_by_metric == {}
+    assert vm.is_empty() is True
+
+
+def test_view_model_set_data_clears_scale_memory():
+    vm = InjectionMapViewModel()
+    vm.set_scale("P", 1200.0)
+    assert vm.scale_by_metric == {"P": 1200.0}
+    vm.set_data({"records": [], "has_lf_p": False, "has_lf_q": False})
+    # Distribution may have changed — wipe the per-metric memory.
+    assert vm.scale_by_metric == {}
+
+
+def test_view_model_is_empty_when_data_has_no_records():
+    vm = _vm_with_data([])
+    assert vm.is_empty() is True
+
+
+def test_view_model_is_empty_false_with_records():
+    vm = _vm_with_data([{"max_nominal_v": 400.0, "inj_p_mw": 1.0,
+                         "inj_q_mvar": 0.0}])
+    assert vm.is_empty() is False
+
+
+def test_view_model_records_returns_full_list():
+    records = [
+        {"substation_id": "S1", "max_nominal_v": 400.0,
+         "inj_p_mw": 10.0, "inj_q_mvar": 0.0},
+        {"substation_id": "S2", "max_nominal_v": 20.0,
+         "inj_p_mw": -5.0, "inj_q_mvar": 0.0},
+    ]
+    vm = _vm_with_data(records)
+    assert vm.records() == records
+
+
+def test_view_model_records_transport_only_filters():
+    records = [
+        {"substation_id": "S1", "max_nominal_v": 400.0,
+         "inj_p_mw": 10.0, "inj_q_mvar": 0.0},
+        {"substation_id": "S2", "max_nominal_v": 20.0,
+         "inj_p_mw": -5.0, "inj_q_mvar": 0.0},
+    ]
+    vm = _vm_with_data(records)
+    out = vm.records(transport_only=True)
+    assert [r["substation_id"] for r in out] == ["S1"]
+
+
+def test_view_model_has_lf_mirrors_bundle_flags():
+    vm = _vm_with_data([], has_lf_p=True, has_lf_q=False)
+    assert vm.has_lf("P") is True
+    assert vm.has_lf("Q") is False
+    vm2 = _vm_with_data([], has_lf_p=False, has_lf_q=True)
+    assert vm2.has_lf("P") is False
+    assert vm2.has_lf("Q") is True
+
+
+def test_view_model_has_lf_unknown_metric_is_false():
+    vm = _vm_with_data([], has_lf_p=True, has_lf_q=True)
+    assert vm.has_lf("X") is False
+
+
+def test_view_model_get_scale_returns_cached_when_set():
+    vm = _vm_with_data([{"max_nominal_v": 400.0, "inj_p_mw": 800.0,
+                         "inj_q_mvar": 0.0}])
+    vm.set_scale("P", 1234.0)
+    assert vm.get_scale("P") == 1234.0
+
+
+def test_view_model_get_scale_falls_back_to_suggested():
+    records = [{"max_nominal_v": 400.0, "inj_p_mw": 800.0,
+                "inj_q_mvar": 0.0}]
+    vm = _vm_with_data(records)
+    # No cached scale — should compute via _suggest_full_scale (= 1000 for 800).
+    assert vm.get_scale("P") == pytest.approx(1000.0)
+
+
+def test_view_model_get_scale_uses_explicit_records_arg():
+    """When the caller passes an explicit ``records`` list (e.g.
+    transport-filtered), the suggested scale must derive from that list,
+    not the full view-model data."""
+    vm = _vm_with_data([
+        {"max_nominal_v": 400.0, "inj_p_mw": 800.0, "inj_q_mvar": 0.0},
+        {"max_nominal_v": 20.0, "inj_p_mw": 5.0, "inj_q_mvar": 0.0},
+    ])
+    transport = vm.records(transport_only=True)
+    assert vm.get_scale("P", records=transport) == pytest.approx(1000.0)
+
+
+def test_view_model_set_scale_coerces_to_float():
+    vm = InjectionMapViewModel()
+    vm.set_scale("P", 250)
+    assert vm.scale_by_metric == {"P": 250.0}
+    assert isinstance(vm.scale_by_metric["P"], float)
 
 
 # ── AppTest smoke: app still renders with the Injection Map tab wired ────────
