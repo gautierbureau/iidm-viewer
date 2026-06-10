@@ -2736,7 +2736,10 @@ def test_security_analysis_tab_renders_run_results(qapp, loaded_window):
     # Build the contingency list (real shared builder against IEEE14).
     tab._on_build()
     qapp.processEvents()
-    assert tab._contingencies and tab._contingencies[0]["id"].startswith("N1_")
+    assert (
+        tab._vm.contingencies
+        and tab._vm.contingencies[0]["id"].startswith("N1_")
+    )
     assert tab._run_btn.isEnabled() is True
 
     fake_result = {
@@ -2767,7 +2770,7 @@ def test_security_analysis_tab_renders_run_results(qapp, loaded_window):
     assert mock_run.call_args.kwargs["monitored_elements"] == []
     assert mock_run.call_args.kwargs["operator_strategies"] == []
     # Results rendered: pre-status line + 2-row summary + 1 violation row.
-    assert tab._results is fake_result
+    assert tab._vm.results is fake_result
     assert "CONVERGED" in tab._pre_status_lbl.text()
     assert tab._summary_model.rowCount() == 2
     assert tab._violations_model.rowCount() == 1
@@ -2785,12 +2788,12 @@ def test_security_analysis_tab_advanced_config_builds_entries(qapp, loaded_windo
     tab._lr_perm.setChecked(False)
     tab._lr_temp.setChecked(False)
     tab._on_add_reduction()
-    assert tab._reductions == []
+    assert tab._vm.reductions == []
     assert "Permanent" in tab._status_lbl.text()
     # Re-check one → accepted.
     tab._lr_perm.setChecked(True)
     tab._on_add_reduction()
-    assert len(tab._reductions) == 1
+    assert len(tab._vm.reductions) == 1
     assert tab._lr_entries_list.count() == 1
 
     # Remedial action — IEEE14 carries generators, so a
@@ -2800,11 +2803,11 @@ def test_security_analysis_tab_advanced_config_builds_entries(qapp, loaded_windo
     qapp.processEvents()
     tab._act_id_edit.setText("")
     tab._on_add_action()
-    assert tab._actions == []
+    assert tab._vm.actions == []
     tab._act_id_edit.setText("gen_down")
     tab._on_add_action()
-    assert len(tab._actions) == 1
-    assert tab._actions[0]["type"] == "GENERATOR_ACTIVE_POWER"
+    assert len(tab._vm.actions) == 1
+    assert tab._vm.actions[0]["type"] == "GENERATOR_ACTIVE_POWER"
     # The new action shows up in the strategy action picker.
     picker = [
         tab._strat_actions_list.item(i).text()
@@ -2828,9 +2831,9 @@ def test_security_analysis_tab_empty_network_shows_placeholder(qapp):
     tab._on_build()
     qapp.processEvents()
     # No lines → builder returns [] → Run stays disabled, no results.
-    assert tab._contingencies == []
+    assert tab._vm.contingencies == []
     assert tab._run_btn.isEnabled() is False
-    assert tab._results is None
+    assert tab._vm.results is None
 
 
 def test_main_window_carries_a_short_circuit_analysis_tab(qapp):
