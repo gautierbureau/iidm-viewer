@@ -410,13 +410,13 @@ def test_view_model_clear_resets_state():
     assert vm.is_empty() is True
 
 
-def test_view_model_set_data_clears_scale_memory():
+def test_view_model_set_data_preserves_scale_memory():
+    """Same-network refreshes (post-LF, tab switch) should keep the
+    user's scale picks. Only ``clear()`` (network swap) resets memory."""
     vm = InjectionMapViewModel()
     vm.set_scale("P", 1200.0)
-    assert vm.scale_by_metric == {"P": 1200.0}
     vm.set_data({"records": [], "has_lf_p": False, "has_lf_q": False})
-    # Distribution may have changed — wipe the per-metric memory.
-    assert vm.scale_by_metric == {}
+    assert vm.scale_by_metric == {"P": 1200.0}
 
 
 def test_view_model_is_empty_when_data_has_no_records():

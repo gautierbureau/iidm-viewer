@@ -3178,8 +3178,8 @@ def test_injection_map_tab_renders_for_loaded_network(qapp, loaded_window):
     the controls + writes a non-empty caption."""
     tab = loaded_window.injection_map_tab
     qapp.processEvents()
-    assert tab._data is not None
-    assert tab._data.get("records")
+    assert tab._vm.data is not None
+    assert tab._vm.records()
     assert tab._controls.isHidden() is False
     assert tab._status_lbl.isHidden() is True
     # Default-scale seeded by ``_suggest_full_scale``.
@@ -3191,7 +3191,7 @@ def test_injection_map_metric_switch_updates_scale_label(qapp, loaded_window):
     """Flipping P↔Q changes the unit label + the LF-note copy."""
     tab = loaded_window.injection_map_tab
     qapp.processEvents()
-    if tab._data is None:
+    if tab._vm.data is None:
         return
     # Pick the reactive-power entry.
     for i in range(tab._metric_combo.count()):
@@ -3210,7 +3210,7 @@ def test_injection_map_per_metric_scale_memory(qapp, loaded_window):
     """Setting a scale for P + flipping to Q + back must restore P's."""
     tab = loaded_window.injection_map_tab
     qapp.processEvents()
-    if tab._data is None:
+    if tab._vm.data is None:
         return
     # Force a known value for P, switch to Q, back to P, expect P's value.
     tab._scale_spin.setValue(1234.0)
@@ -3255,18 +3255,18 @@ def test_injection_map_set_network_none_clears(qapp):
     tab = InjectionMapTab()
     tab.set_network(None)
     qapp.processEvents()
-    assert tab._data is None
+    assert tab._vm.data is None
     assert "Load a network" in tab._status_lbl.text()
     assert tab._controls.isHidden() is True
 
 
 def test_injection_map_render_map_no_op_when_data_is_none(qapp):
-    """``_render_map`` short-circuits when ``_data`` is ``None`` — the
-    map view + caption stay untouched."""
+    """``_render_map`` short-circuits when the view-model has no data —
+    the map view + caption stay untouched."""
     from iidm_viewer.qt.injection_map_tab import InjectionMapTab
 
     tab = InjectionMapTab()
-    tab._data = None
+    tab._vm.clear()
     # Should not raise.
     tab._render_map()
     tab._on_metric_changed()
@@ -3279,9 +3279,9 @@ def test_injection_map_lf_note_hides_when_terminal_p_populated(qapp, loaded_wind
     must hide; force the flag and re-render to exercise the branch."""
     tab = loaded_window.injection_map_tab
     qapp.processEvents()
-    if tab._data is None:
+    if tab._vm.data is None:
         return
-    tab._data["has_lf_p"] = True
+    tab._vm.data["has_lf_p"] = True
     # Make sure the metric combo is on P.
     for i in range(tab._metric_combo.count()):
         if tab._metric_combo.itemData(i) == "P":
@@ -3298,11 +3298,11 @@ def test_injection_map_render_caption_when_filter_excludes_all(qapp, loaded_wind
     the "no matches" copy."""
     tab = loaded_window.injection_map_tab
     qapp.processEvents()
-    if tab._data is None:
+    if tab._vm.data is None:
         return
     # Force every record below the transport threshold so the filter
     # excludes them all.
-    for r in tab._data.get("records") or []:
+    for r in tab._vm.records():
         r["max_nominal_v"] = 1.0
     tab._render_map()
     qapp.processEvents()
