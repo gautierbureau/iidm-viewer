@@ -27,6 +27,8 @@ Substations with no VL at or above ``TRANSPORT_NOMINAL_V_THRESHOLD``
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass, field
+from typing import Optional
 
 import pandas as pd
 
@@ -482,3 +484,92 @@ def _suggest_full_scale(records, metric: str) -> float:
         if candidate >= p90:
             return float(candidate)
     return float(10 * magnitude)
+
+
+# ---------------------------------------------------------------------------
+# View-model — host-agnostic state container for the Injection Map tab
+# ---------------------------------------------------------------------------
+@dataclass
+class InjectionMapViewModel:
+    """Mutable state container for the Injection Map tab.
+
+    The PySide6 + NiceGUI hosts both carry exactly two state items:
+
+    * ``data`` — the worker-fetched bundle ``{"records": [...],
+      "has_lf_p": bool, "has_lf_q": bool}`` (``None`` when the
+      network has no ``substationPosition`` extension), and
+    * ``scale_by_metric`` — per-metric full-scale memory so flipping
+      P ↔ Q restores the value the user last set for the new metric.
+
+    This dataclass captures both and exposes the derived
+    ``records`` / ``has_lf`` / ``get_scale`` helpers so each host
+    renders the same data without re-implementing the same gates.
+    """
+
+    data: Optional[dict] = None
+    scale_by_metric: dict[str, float] = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+    def clear(self) -> None:
+        """Reset data + per-metric scale memory. Call on network swap."""
+        self.data = None
+        self.scale_by_metric.clear()
+
+    def set_data(self, data: Optional[dict]) -> None:
+        """Store a freshly fetched bundle. Clears the per-metric scale
+        memory because the underlying distribution changed."""
+        self.data = data
+        self.scale_by_metric.clear()
+
+    # ------------------------------------------------------------------
+    # Read accessors
+    # ------------------------------------------------------------------
+    def is_empty(self) -> bool:
+        """``True`` when there's no data to render — either no
+        ``substationPosition`` extension or zero injection records."""
+        if self.data is None:
+            return True
+        records = self.data.get("records") or []
+        return not records
+
+    def records(self, transport_only: bool = False) -> list[dict]:
+        """Return the injection records, optionally narrowed to
+        transport-grid substations (``max_nominal_v ≥``
+        :data:`TRANSPORT_NOMINAL_V_THRESHOLD`)."""
+        if self.data is None:
+            return []
+        records = self.data.get("records") or []
+        if transport_only:
+            return _filter_transport(records)
+        return records
+
+    def has_lf(self, metric: str) -> bool:
+        """``True`` iff the bundle carries load-flow-populated values
+        for ``metric`` (``"P"`` or ``"Q"``). Used by hosts to surface
+        the "(scheduled values shown)" caption when ``False``."""
+        if self.data is None:
+            return False
+        if metric == "P":
+            return bool(self.data.get("has_lf_p", False))
+        if metric == "Q":
+            return bool(self.data.get("has_lf_q", False))
+        return False
+
+    def get_scale(
+        self, metric: str, records: Optional[list[dict]] = None,
+    ) -> float:
+        """Return the cached scale for ``metric``, or a suggested
+        default computed from ``records`` (defaults to the current
+        record set)."""
+        if metric in self.scale_by_metric:
+            return self.scale_by_metric[metric]
+        if records is None:
+            records = self.records()
+        return _suggest_full_scale(records, metric)
+
+    def set_scale(self, metric: str, value: float) -> None:
+        """Remember the user's full-scale choice for ``metric``
+        so flipping back later restores it."""
+        self.scale_by_metric[metric] = float(value)
