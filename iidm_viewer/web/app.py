@@ -5271,24 +5271,19 @@ def _build_short_circuit_analysis():
     from iidm_viewer.short_circuit_analysis import (
         FAULT_TYPES,
         STUDY_TYPES,
+        ShortCircuitViewModel,
         build_bus_faults,
-        build_summary_dataframe,
-        count_failures,
-        count_with_violations,
         default_hv_preselect,
         format_fault_type,
         get_nominal_voltages,
         make_sc_params,
-        max_fault_power_mva,
         run_short_circuit_analysis,
     )
 
-    state: dict = {
-        "faults": [],
-        "results": None,
-        "summary_df": pd.DataFrame(),
-        "fault_options": [],
-    }
+    # Faults list, results dict and derived summary / fault_options
+    # all live on the shared view-model so PySide6 + Streamlit see the
+    # same state machine.
+    vm = ShortCircuitViewModel()
 
     placeholder = ui.label(
         "Load a network to run a short circuit analysis."
@@ -5407,7 +5402,7 @@ def _build_short_circuit_analysis():
         grid.update()
 
     def _apply_pwr_filter() -> None:
-        df = state["summary_df"]
+        df = vm.summary_df()
         if df.empty:
             _set_grid_from_df(summary_grid, df)
             return
@@ -5425,14 +5420,14 @@ def _build_short_circuit_analysis():
     )
 
     def _render_fault_detail(fid):
-        if not fid or state["results"] is None:
+        if not fid or not vm.has_results():
             detail_status_lbl.set_text("")
             detail_power_lbl.set_text("Fault power: —")
             detail_current_lbl.set_text("Fault current: —")
             _set_grid_from_df(feeder_grid, pd.DataFrame())
             _set_grid_from_df(violations_grid, pd.DataFrame())
             return
-        fr = state["results"].get("fault_results", {}).get(fid, {})
+        fr = vm.results.get("fault_results", {}).get(fid, {})
         status = fr.get("status", "UNKNOWN")
         detail_status_lbl.set_text(f"Status: {status}")
         pwr = fr.get("short_circuit_power_mva")
@@ -5449,11 +5444,14 @@ def _build_short_circuit_analysis():
         _set_grid_from_df(violations_grid, fr.get("limit_violations", pd.DataFrame()))
 
     def _refresh_fault_options() -> None:
+        # Master list comes from the view-model's summary (only the
+        # faults the runner actually analysed).
+        master = vm.fault_options()
         sub = (fault_filter_input.value or "").strip().lower()
         if sub:
-            opts = [fid for fid in state["fault_options"] if sub in fid.lower()]
+            opts = [fid for fid in master if sub in fid.lower()]
         else:
-            opts = list(state["fault_options"])
+            opts = list(master)
         fault_select.options = opts
         if opts:
             new_value = (
@@ -5473,28 +5471,22 @@ def _build_short_circuit_analysis():
     )
 
     def _render_results() -> None:
-        results = state["results"]
-        if results is None:
+        if not vm.has_results():
             results_card.visible = False
-            state["summary_df"] = pd.DataFrame()
-            state["fault_options"] = []
             return
         results_card.visible = True
-        summary_df = build_summary_dataframe(results)
-        state["summary_df"] = summary_df
-        faults = results.get("faults", [])
+        faults = vm.results.get("faults", [])
         metric_simulated.set_text(f"Faults simulated: {len(faults)}")
-        metric_failed.set_text(f"Failed: {count_failures(summary_df)}")
+        metric_failed.set_text(f"Failed: {vm.failure_count()}")
         metric_violations.set_text(
-            f"With violations: {count_with_violations(summary_df)}"
+            f"With violations: {vm.with_violations_count()}"
         )
-        max_pwr = int(round(max_fault_power_mva(summary_df)))
+        max_pwr = int(round(vm.max_fault_power_mva()))
         slider_row.visible = max_pwr > 0
         pwr_slider.max = max(max_pwr, 1)
         pwr_slider.value = 0
         pwr_slider.update()
         _apply_pwr_filter()
-        state["fault_options"] = [f["id"] for f in faults]
         _refresh_fault_options()
 
     async def _on_build() -> None:
@@ -5511,8 +5503,8 @@ def _build_short_circuit_analysis():
         except Exception as exc:
             fault_count_lbl.set_text(f"Build failed: {exc}")
             return
-        state["faults"] = faults
-        n = len(faults)
+        vm.set_faults(faults)
+        n = len(vm.faults)
         fault_count_lbl.set_text(
             f"{n} bus fault{'' if n == 1 else 's'} ready."
         )
@@ -5521,7 +5513,7 @@ def _build_short_circuit_analysis():
     build_btn.on_click(_on_build)
 
     async def _on_run() -> None:
-        if _state.network is None or not state["faults"]:
+        if _state.network is None or not vm.faults:
             run_status.set_text("Build a fault list first.")
             return
         sc_params = make_sc_params(
@@ -5530,7 +5522,7 @@ def _build_short_circuit_analysis():
             with_limit_violations=violations_chk.value,
             min_voltage_drop_percent=float(min_drop_input.value or 0),
         )
-        n = len(state["faults"])
+        n = len(vm.faults)
         run_status.set_text(
             f"Running short circuit analysis on {n} fault"
             f"{'' if n == 1 else 's'}…"
@@ -5538,12 +5530,12 @@ def _build_short_circuit_analysis():
         try:
             results = await asyncio.to_thread(
                 run_short_circuit_analysis,
-                _state.network, state["faults"], sc_params,
+                _state.network, vm.faults, sc_params,
             )
         except Exception as exc:
             run_status.set_text(f"Short circuit analysis failed: {exc}")
             return
-        state["results"] = results
+        vm.store_results(results)
         run_status.set_text(
             f"Done — {n} fault{'' if n == 1 else 's'} analysed."
         )
@@ -5558,8 +5550,7 @@ def _build_short_circuit_analysis():
             params_card.visible = False
             run_row.visible = False
             results_card.visible = False
-            state["results"] = None
-            state["faults"] = []
+            vm.clear()
             return
         placeholder.visible = False
         config_card.visible = True
@@ -5576,8 +5567,7 @@ def _build_short_circuit_analysis():
         fault_count_lbl.set_text("")
         run_status.set_text("")
         run_btn.set_enabled(False)
-        state["faults"] = []
-        state["results"] = None
+        vm.clear()
         _render_results()
 
     refresh()

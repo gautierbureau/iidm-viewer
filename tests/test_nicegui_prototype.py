@@ -1181,16 +1181,19 @@ def test_short_circuit_analysis_tab_registered_in_main_page():
 
 def test_short_circuit_analysis_builder_uses_shared_core():
     """The NiceGUI builder must compose the shared bus-fault builder +
-    runner + summary helpers so PySide6 + Streamlit stay in sync."""
+    runner + view-model so PySide6 + Streamlit stay in sync. After the
+    Step 5 view-model extraction the summary / metric calls go through
+    ``ShortCircuitViewModel`` rather than the bare helper functions."""
     import inspect
     from iidm_viewer.web import app
 
     src = inspect.getsource(app._build_short_circuit_analysis)
     assert "build_bus_faults" in src
     assert "run_short_circuit_analysis" in src
-    assert "build_summary_dataframe" in src
-    assert "count_failures" in src
-    assert "count_with_violations" in src
+    assert "ShortCircuitViewModel" in src
+    assert "vm.summary_df" in src
+    assert "vm.failure_count" in src
+    assert "vm.with_violations_count" in src
     assert "make_sc_params" in src
 
 
