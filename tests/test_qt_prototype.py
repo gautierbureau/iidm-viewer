@@ -2869,13 +2869,13 @@ def test_short_circuit_tab_builds_faults_and_renders_results(qapp, loaded_window
     # Build the fault list against the real IEEE14 network.
     tab._on_build()
     qapp.processEvents()
-    assert tab._faults and tab._faults[0]["id"].startswith("SC_")
+    assert tab._vm.faults and tab._vm.faults[0]["id"].startswith("SC_")
     assert tab._run_btn.isEnabled() is True
 
-    fid = tab._faults[0]["id"]
-    bus = tab._faults[0]["element_id"]
+    fid = tab._vm.faults[0]["id"]
+    bus = tab._vm.faults[0]["element_id"]
     fake_result = {
-        "faults": tab._faults[:2],
+        "faults": tab._vm.faults[:2],
         "fault_results": {
             fid: {
                 "status": "CONVERGED",
@@ -2890,7 +2890,7 @@ def test_short_circuit_tab_builds_faults_and_renders_results(qapp, loaded_window
                     "value": [15000.0],
                 }),
             },
-            tab._faults[1]["id"]: {
+            tab._vm.faults[1]["id"]: {
                 "status": "FAILED",
                 "short_circuit_power_mva": None,
                 "current_kA": None,
@@ -2911,7 +2911,7 @@ def test_short_circuit_tab_builds_faults_and_renders_results(qapp, loaded_window
     assert sc_params["study_type"] == "SUB_TRANSIENT"
     assert sc_params["with_feeder_result"] is True
     # Results card became visible + the summary model has 2 rows.
-    assert tab._results is fake_result
+    assert tab._vm.results is fake_result
     assert tab._results_group.isHidden() is False
     assert tab._summary_model.rowCount() == 2
     assert "Faults simulated: 2" in tab._metric_simulated.text()
@@ -2940,9 +2940,9 @@ def test_short_circuit_tab_empty_network_disables_run(qapp):
     assert tab._placeholder.isHidden() is True  # config form still visible
     tab._on_build()
     qapp.processEvents()
-    assert tab._faults == []
+    assert tab._vm.faults == []
     assert tab._run_btn.isEnabled() is False
-    assert tab._results is None
+    assert tab._vm.results is None
 
 
 def test_short_circuit_tab_voltage_filter_narrows_faults(qapp, loaded_window):
@@ -2956,7 +2956,7 @@ def test_short_circuit_tab_voltage_filter_narrows_faults(qapp, loaded_window):
         tab._nominal_v_list.item(i).setSelected(False)
     tab._on_build()
     qapp.processEvents()
-    total = len(tab._faults)
+    total = len(tab._vm.faults)
     assert total > 0
 
     # Select only the first voltage entry → strict subset.
@@ -2967,7 +2967,7 @@ def test_short_circuit_tab_voltage_filter_narrows_faults(qapp, loaded_window):
     qapp.processEvents()
     tab._on_build()
     qapp.processEvents()
-    assert 0 < len(tab._faults) < total
+    assert 0 < len(tab._vm.faults) < total
 
 
 def test_main_window_carries_a_pmax_visualization_tab(qapp):

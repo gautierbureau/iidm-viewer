@@ -41,15 +41,12 @@ from iidm_viewer.qt.data_explorer_tab import PandasTableModel
 from iidm_viewer.short_circuit_analysis import (
     FAULT_TYPES,
     STUDY_TYPES,
+    ShortCircuitViewModel,
     build_bus_faults,
-    build_summary_dataframe,
-    count_failures,
-    count_with_violations,
     default_hv_preselect,
     format_fault_type,
     get_nominal_voltages,
     make_sc_params,
-    max_fault_power_mva,
     run_short_circuit_analysis,
 )
 
@@ -137,10 +134,11 @@ class ShortCircuitAnalysisTab(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
-        self._faults: list[dict] = []
-        self._results: Optional[dict] = None
-        self._fault_options: list[str] = []
-        self._summary_df: pd.DataFrame = pd.DataFrame()
+        # The fault list, results dict, derived summary frame and the
+        # drill-down combo's fault-id options all live on the shared
+        # view-model so the Streamlit + NiceGUI tabs see the same
+        # state-machine.
+        self._vm = ShortCircuitViewModel()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -338,9 +336,7 @@ class ShortCircuitAnalysisTab(QWidget):
     # ------------------------------------------------------------------
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
-        self._results = None
-        self._faults = []
-        self._summary_df = pd.DataFrame()
+        self._vm.clear()
         if network is None:
             self._set_network_loaded(False)
             return
@@ -367,20 +363,20 @@ class ShortCircuitAnalysisTab(QWidget):
         nominal_v_set = chosen or None
         self._fault_count_lbl.setText("Building fault list…")
         try:
-            self._faults = build_bus_faults(
+            self._vm.set_faults(build_bus_faults(
                 self._network, nominal_v_set, fault_type,
-            )
+            ))
         except Exception as exc:
             self._fault_count_lbl.setText(f"Build failed: {exc}")
             return
-        n = len(self._faults)
+        n = len(self._vm.faults)
         self._fault_count_lbl.setText(
             f"{n} bus fault{'' if n == 1 else 's'} ready.",
         )
         self._run_btn.setEnabled(n > 0)
 
     def _on_run(self) -> None:
-        if self._network is None or not self._faults:
+        if self._network is None or not self._vm.faults:
             self._status_lbl.setText("Build a fault list first.")
             return
         sc_params = make_sc_params(
@@ -389,15 +385,15 @@ class ShortCircuitAnalysisTab(QWidget):
             with_limit_violations=self._violations_chk.isChecked(),
             min_voltage_drop_percent=self._min_drop_spin.value(),
         )
-        n = len(self._faults)
+        n = len(self._vm.faults)
         self._status_lbl.setText(
             f"Running short circuit analysis on {n} fault"
             f"{'' if n == 1 else 's'}…",
         )
         try:
-            self._results = run_short_circuit_analysis(
-                self._network, self._faults, sc_params,
-            )
+            self._vm.store_results(run_short_circuit_analysis(
+                self._network, self._vm.faults, sc_params,
+            ))
         except Exception as exc:
             self._status_lbl.setText(f"Short circuit analysis failed: {exc}")
             return
@@ -414,30 +410,29 @@ class ShortCircuitAnalysisTab(QWidget):
         self._config_group.setVisible(loaded)
         self._params_group.setVisible(loaded)
         self._run_row_widget.setVisible(loaded)
-        self._results_group.setVisible(loaded and self._results is not None)
+        self._results_group.setVisible(loaded and self._vm.has_results())
 
     def _render_results(self) -> None:
-        results = self._results
-        if results is None:
+        if not self._vm.has_results():
             self._results_group.setVisible(False)
             self._summary_model.set_dataframe(pd.DataFrame())
             self._feeder_model.set_dataframe(pd.DataFrame())
             self._violations_model.set_dataframe(pd.DataFrame())
             self._fault_combo.clear()
-            self._fault_options = []
             return
         self._results_group.setVisible(True)
-        self._summary_df = build_summary_dataframe(results)
+        results = self._vm.results
+        summary_df = self._vm.summary_df()
         faults: list[dict] = results.get("faults", [])
         self._metric_simulated.setText(f"Faults simulated: {len(faults)}")
         self._metric_failed.setText(
-            f"Failed: {count_failures(self._summary_df)}",
+            f"Failed: {self._vm.failure_count()}",
         )
         self._metric_violations.setText(
-            f"With violations: {count_with_violations(self._summary_df)}",
+            f"With violations: {self._vm.with_violations_count()}",
         )
         # Power slider range — int MVA, since QSlider only takes ints.
-        max_pwr = int(round(max_fault_power_mva(self._summary_df)))
+        max_pwr = int(round(self._vm.max_fault_power_mva()))
         self._pwr_slider.blockSignals(True)
         self._pwr_slider.setRange(0, max(max_pwr, 1))
         self._pwr_slider.setValue(0)
@@ -446,9 +441,7 @@ class ShortCircuitAnalysisTab(QWidget):
         self._pwr_slider_value_lbl.setText("0 MVA")
         self._apply_pwr_filter()
         self._summary_view.resizeColumnsToContents()
-        # Drill-down combo — populated from the canonical fault list so
-        # the order matches the configuration tab.
-        self._fault_options = [f["id"] for f in faults]
+        # Drill-down combo refreshes from the view-model's fault list.
         self._refresh_fault_combo()
 
     def _on_pwr_slider_changed(self, value: int) -> None:
@@ -456,14 +449,15 @@ class ShortCircuitAnalysisTab(QWidget):
         self._apply_pwr_filter()
 
     def _apply_pwr_filter(self) -> None:
-        if self._summary_df.empty:
+        summary_df = self._vm.summary_df()
+        if summary_df.empty:
             self._summary_model.set_dataframe(pd.DataFrame())
             return
         threshold = float(self._pwr_slider.value())
         if threshold <= 0:
-            self._summary_model.set_dataframe(self._summary_df)
+            self._summary_model.set_dataframe(summary_df)
             return
-        df = self._summary_df
+        df = summary_df
         mask = df["Fault power (MVA)"].isna() | (
             df["Fault power (MVA)"] >= threshold
         )
@@ -473,11 +467,16 @@ class ShortCircuitAnalysisTab(QWidget):
         self._refresh_fault_combo()
 
     def _refresh_fault_combo(self) -> None:
+        # The drill-down combo lists only the faults the runner actually
+        # analysed -- comes from the summary's Fault column. When no
+        # results are stored yet, the list is empty and the combo
+        # clears itself.
+        fault_options = self._vm.fault_options()
         sub = self._fault_filter_edit.text().strip().lower()
         if sub:
-            opts = [fid for fid in self._fault_options if sub in fid.lower()]
+            opts = [fid for fid in fault_options if sub in fid.lower()]
         else:
-            opts = list(self._fault_options)
+            opts = list(fault_options)
         self._fault_combo.blockSignals(True)
         self._fault_combo.clear()
         self._fault_combo.addItems(opts)
@@ -494,14 +493,14 @@ class ShortCircuitAnalysisTab(QWidget):
         self._render_fault_detail(fid)
 
     def _render_fault_detail(self, fid: Optional[str]) -> None:
-        if not fid or self._results is None:
+        if not fid or not self._vm.has_results():
             self._detail_status_lbl.setText("")
             self._detail_power_lbl.setText("Fault power: —")
             self._detail_current_lbl.setText("Fault current: —")
             self._feeder_model.set_dataframe(pd.DataFrame())
             self._violations_model.set_dataframe(pd.DataFrame())
             return
-        fr = self._results.get("fault_results", {}).get(fid, {})
+        fr = self._vm.results.get("fault_results", {}).get(fid, {})
         status = fr.get("status", "UNKNOWN")
         self._detail_status_lbl.setText(f"Status: {status}")
         self._detail_status_lbl.setStyleSheet(
