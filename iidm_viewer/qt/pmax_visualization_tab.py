@@ -42,10 +42,9 @@ from PySide6.QtWidgets import (
 
 from iidm_viewer.pmax_visualization import (
     DISPLAY_COLUMNS,
-    build_display_dataframe,
+    PmaxViewModel,
     build_pangle_chart,
     compute_pmax_data,
-    filter_by_vl,
     margin_color,
     ratio_color,
 )
@@ -115,9 +114,10 @@ class PmaxVisualizationTab(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
-        self._selected_vl: Optional[str] = None
-        self._df: pd.DataFrame = pd.DataFrame()
-        self._unfiltered: pd.DataFrame = pd.DataFrame()
+        # Raw + VL-filtered DataFrame and the only-VL toggle all live
+        # on the shared view-model so NiceGUI + Streamlit see the same
+        # filter pipeline.
+        self._vm = PmaxViewModel()
         self._plot_tmp: Optional[str] = None
 
         layout = QVBoxLayout(self)
@@ -213,7 +213,7 @@ class PmaxVisualizationTab(QWidget):
         self.refresh()
 
     def set_selected_vl(self, vl_id: Optional[str]) -> None:
-        self._selected_vl = vl_id or None
+        self._vm.set_selected_vl(vl_id)
         if vl_id:
             self._only_vl_checkbox.setText(
                 f"Only lines connected to VL {vl_id}",
@@ -224,22 +224,20 @@ class PmaxVisualizationTab(QWidget):
     def refresh(self) -> None:
         """Recompute the Pmax DataFrame + redraw everything."""
         if self._network is None:
-            self._unfiltered = pd.DataFrame()
-            self._df = pd.DataFrame()
+            self._vm.clear()
             self._placeholder.setText(
                 "Load a network to see Pmax visualization.",
             )
             self._set_data_visible(False)
             return
         try:
-            self._unfiltered = compute_pmax_data(self._network)
+            self._vm.set_data(compute_pmax_data(self._network))
         except Exception as exc:
-            self._unfiltered = pd.DataFrame()
+            self._vm.set_data(None)
             self._placeholder.setText(f"Pmax visualization failed: {exc}")
             self._set_data_visible(False)
             return
-        if self._unfiltered.empty:
-            self._df = pd.DataFrame()
+        if self._vm.is_empty():
             self._placeholder.setText(
                 "No data available. Make sure a load flow has been run "
                 "and the network contains transmission lines.",
@@ -256,11 +254,12 @@ class PmaxVisualizationTab(QWidget):
         self._apply_vl_filter()
 
     def _on_line_changed(self, line_id: str) -> None:
-        if not line_id or self._df.empty or line_id not in self._df.index:
+        rows_df = self._vm.rows_df()
+        if not line_id or rows_df.empty or line_id not in rows_df.index:
             self._reset_metrics()
             self._plot_view.setHtml("")
             return
-        row = self._df.loc[line_id]
+        row = rows_df.loc[line_id]
         self._update_metrics(row)
         self._load_plot_html(
             build_pangle_chart(line_id, row).to_html(
@@ -269,40 +268,33 @@ class PmaxVisualizationTab(QWidget):
         )
 
     def _update_vl_checkbox_visibility(self) -> None:
-        if (
-            self._selected_vl
-            and not self._unfiltered.empty
-            and not filter_by_vl(
-                self._unfiltered, self._selected_vl,
-            ).empty
-        ):
+        if self._vm.has_vl_subset():
             self._only_vl_checkbox.setVisible(True)
         else:
             self._only_vl_checkbox.setVisible(False)
             self._only_vl_checkbox.setChecked(False)
 
     def _apply_vl_filter(self) -> None:
-        if self._unfiltered.empty:
-            self._df = pd.DataFrame()
+        # Mirror the checkbox state into the view-model before reading
+        # back the filtered frame.
+        self._vm.set_only_vl(self._only_vl_checkbox.isChecked())
+        if self._vm.is_empty():
             self._set_data_visible(False)
             return
-        if self._only_vl_checkbox.isChecked() and self._selected_vl:
-            self._df = filter_by_vl(self._unfiltered, self._selected_vl)
-        else:
-            self._df = self._unfiltered
-        if self._df.empty:
+        rows_df = self._vm.rows_df()
+        if rows_df.empty:
             self._placeholder.setText(
                 "No lines match the current filter.",
             )
             self._set_data_visible(False)
             return
         self._set_data_visible(True)
-        self._summary_model.set_dataframe(build_display_dataframe(self._df))
+        self._summary_model.set_dataframe(self._vm.display_df())
         self._summary_view.resizeColumnsToContents()
         self._refresh_line_combo()
 
     def _refresh_line_combo(self) -> None:
-        line_ids = [str(x) for x in self._df.index.tolist()]
+        line_ids = self._vm.line_ids()
         previous = self._line_combo.currentText()
         self._line_combo.blockSignals(True)
         self._line_combo.clear()

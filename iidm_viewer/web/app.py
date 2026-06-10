@@ -5852,18 +5852,17 @@ def _build_pmax_visualization():
 
     from iidm_viewer.pmax_visualization import (
         DISPLAY_COLUMNS,
-        build_display_dataframe,
+        PmaxViewModel,
         build_pangle_chart,
         compute_pmax_data,
-        filter_by_vl,
         margin_color,
         ratio_color,
     )
 
-    state: dict = {
-        "unfiltered": pd.DataFrame(),
-        "df": pd.DataFrame(),
-    }
+    # The unfiltered DataFrame + VL-filter toggle state live on the
+    # shared view-model so PySide6 + Streamlit consume the same
+    # rows_df / display_df / line_ids surface.
+    vm = PmaxViewModel()
 
     ui.label(
         "For each line: Pmax = V₁ × V₂ / X  (V in kV, X in Ω, "
@@ -5952,14 +5951,15 @@ def _build_pmax_visualization():
         summary_grid.update()
 
     def _render_detail(line_id) -> None:
-        if not line_id or state["df"].empty or line_id not in state["df"].index:
+        rows_df = vm.rows_df()
+        if not line_id or rows_df.empty or line_id not in rows_df.index:
             pmax_lbl.set_text("Pmax: —")
             pactual_lbl.set_text("P: —")
             ratio_lbl.set_text("P/Pmax: —")
             delta_lbl.set_text("δ: —")
             plot.update_figure(go.Figure())
             return
-        row = state["df"].loc[line_id]
+        row = rows_df.loc[line_id]
         pmax_lbl.set_text(f"Pmax: {row['pmax_mw']:.1f} MW")
         pactual_lbl.set_text(f"P: {row['p_actual_mw']:.1f} MW")
         ratio_val = row["p_pmax_ratio"]
@@ -5978,7 +5978,7 @@ def _build_pmax_visualization():
         plot.update_figure(build_pangle_chart(line_id, row))
 
     def _refresh_line_select() -> None:
-        line_ids = [str(x) for x in state["df"].index.tolist()]
+        line_ids = vm.line_ids()
         line_select.options = line_ids
         if line_select.value not in line_ids:
             line_select.value = line_ids[0] if line_ids else None
@@ -5991,20 +5991,17 @@ def _build_pmax_visualization():
     )
 
     def _apply_vl_filter() -> None:
-        """Read the current `_state.selected_vl` + the checkbox value
+        """Read the current ``_state.selected_vl`` + the checkbox value
         and recompute the display frame."""
-        if state["unfiltered"].empty:
-            state["df"] = pd.DataFrame()
+        vm.set_selected_vl(_state.selected_vl)
+        vm.set_only_vl(bool(only_vl_checkbox.value))
+        if vm.is_empty():
             summary_card.visible = False
             detail_card.visible = False
             placeholder.visible = True
             return
-        vl_id = _state.selected_vl
-        if only_vl_checkbox.value and vl_id:
-            state["df"] = filter_by_vl(state["unfiltered"], vl_id)
-        else:
-            state["df"] = state["unfiltered"]
-        if state["df"].empty:
+        rows_df = vm.rows_df()
+        if rows_df.empty:
             placeholder.set_text("No lines match the current filter.")
             placeholder.visible = True
             summary_card.visible = False
@@ -6013,7 +6010,7 @@ def _build_pmax_visualization():
         placeholder.visible = False
         summary_card.visible = True
         detail_card.visible = True
-        _set_summary_grid(build_display_dataframe(state["df"]))
+        _set_summary_grid(vm.display_df())
         _refresh_line_select()
 
     only_vl_checkbox.on(
@@ -6021,15 +6018,13 @@ def _build_pmax_visualization():
     )
 
     def _update_vl_visibility() -> None:
-        """Show / hide the 'Only lines connected to VL X' checkbox based
-        on the current ``_state.selected_vl`` and the unfiltered frame."""
-        vl_id = _state.selected_vl
-        if (
-            vl_id
-            and not state["unfiltered"].empty
-            and not filter_by_vl(state["unfiltered"], vl_id).empty
-        ):
-            only_vl_checkbox.text = f"Only lines connected to VL {vl_id}"
+        """Show / hide the 'Only lines connected to VL X' checkbox
+        based on the view-model's VL subset state."""
+        vm.set_selected_vl(_state.selected_vl)
+        if vm.has_vl_subset():
+            only_vl_checkbox.text = (
+                f"Only lines connected to VL {_state.selected_vl}"
+            )
             only_vl_row.visible = True
             only_vl_checkbox.update()
         else:
@@ -6039,8 +6034,7 @@ def _build_pmax_visualization():
 
     async def refresh() -> None:
         if _state.network is None:
-            state["unfiltered"] = pd.DataFrame()
-            state["df"] = pd.DataFrame()
+            vm.clear()
             placeholder.set_text(
                 "Load a network and run a load flow to see "
                 "Pmax visualization.",
@@ -6059,11 +6053,10 @@ def _build_pmax_visualization():
             placeholder.visible = True
             summary_card.visible = False
             detail_card.visible = False
-            state["unfiltered"] = pd.DataFrame()
-            state["df"] = pd.DataFrame()
+            vm.set_data(None)
             return
-        state["unfiltered"] = df
-        if df.empty:
+        vm.set_data(df)
+        if vm.is_empty():
             placeholder.set_text(
                 "No data available. Make sure a load flow has been "
                 "run and the network contains transmission lines.",
