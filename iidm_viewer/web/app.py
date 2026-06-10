@@ -3907,9 +3907,7 @@ def _build_extensions_explorer():
     import pandas as pd
 
     from iidm_viewer.extensions_data import (
-        EDITABLE_EXTENSIONS,
-        READONLY_EXTENSIONS,
-        filter_by_id_substring,
+        ExtensionsExplorerViewModel,
         get_extension_df,
         get_extensions_information,
         list_extension_names,
@@ -3917,12 +3915,7 @@ def _build_extensions_explorer():
         update_extension,
     )
 
-    state: dict = {
-        "info_df": None,
-        "current_df": pd.DataFrame(),
-        "pending_edits": {},   # {element_id: {col: new_value}}
-        "pending_removals": set(),
-    }
+    vm = ExtensionsExplorerViewModel()
 
     with ui.row().classes("items-center w-full q-pa-sm"):
         ui.label("Extension:")
@@ -3949,18 +3942,15 @@ def _build_extensions_explorer():
     def _current_ext() -> Optional[str]:
         return ext_select.value or None
 
-    def _editable_cols_for(ext: str, df: pd.DataFrame) -> list[str]:
-        return [c for c in EDITABLE_EXTENSIONS.get(ext, []) if c in df.columns]
-
-    def _aggrid_options(view: pd.DataFrame, ext: str) -> dict:
+    def _aggrid_options(view: pd.DataFrame) -> dict:
         if view.empty:
             return {
                 "columnDefs": [], "rowData": [],
                 "defaultColDef": _DEFAULT_COL_DEF,
                 "rowSelection": "multiple",
             }
-        readonly = ext in READONLY_EXTENSIONS
-        editable_cols = set(_editable_cols_for(ext, view))
+        readonly = vm.is_readonly()
+        editable_cols = set(vm.editable_cols(view))
         column_defs: list[dict] = []
         if not readonly:
             column_defs.append({
@@ -3989,18 +3979,16 @@ def _build_extensions_explorer():
             })
 
         rows: list[dict] = []
-        pending_edits = state["pending_edits"]
-        pending_removals = state["pending_removals"]
         for idx, row in view.iterrows():
             eid = str(idx)
             r: dict = {"id": eid}
             if not readonly:
-                r["_remove"] = eid in pending_removals
-            edits = pending_edits.get(eid, {})
+                r["_remove"] = vm.is_ticked(eid)
             for col in view.columns:
                 c = str(col)
-                if c in edits:
-                    r[c] = edits[c]
+                edit = vm.get_edit(eid, c)
+                if edit is not None:
+                    r[c] = edit
                 else:
                     v = row[col]
                     try:
@@ -4018,15 +4006,18 @@ def _build_extensions_explorer():
             "rowSelection": "multiple",
         }
 
+    def _empty_grid_options() -> dict:
+        return {
+            "columnDefs": [], "rowData": [],
+            "defaultColDef": _DEFAULT_COL_DEF,
+            "rowSelection": "multiple",
+        }
+
     def refresh() -> None:
         ext = _current_ext()
         status_lbl.set_text("")
         if _state.network is None or not ext:
-            grid.options.update({
-                "columnDefs": [], "rowData": [],
-                "defaultColDef": _DEFAULT_COL_DEF,
-                "rowSelection": "multiple",
-            })
+            grid.options.update(_empty_grid_options())
             grid.update()
             summary_lbl.set_text("No network loaded." if _state.network is None else "Pick an extension.")
             detail_lbl.set_text("")
@@ -4037,48 +4028,28 @@ def _build_extensions_explorer():
             df = get_extension_df(_state.network, ext)
         except Exception as exc:
             summary_lbl.set_text(f"Failed to load {ext!r}: {exc}")
-            grid.options.update({
-                "columnDefs": [], "rowData": [],
-                "defaultColDef": _DEFAULT_COL_DEF,
-                "rowSelection": "multiple",
-            })
+            grid.options.update(_empty_grid_options())
             grid.update()
             return
-        # Detail caption.
-        info_df = state.get("info_df")
-        detail = ""
-        if info_df is not None and not info_df.empty and ext in info_df.index:
-            try:
-                detail = str(info_df.loc[ext].get("detail") or "")
-            except Exception:
-                detail = ""
-        detail_lbl.set_text(detail)
-        state["current_df"] = df if df is not None else pd.DataFrame()
-        if state["current_df"].empty:
+        vm.set_data(ext, df if df is not None else pd.DataFrame())
+        detail_lbl.set_text(vm.detail())
+        if vm.current_df.empty:
             summary_lbl.set_text(f"No {ext!r} extensions found.")
-            grid.options.update({
-                "columnDefs": [], "rowData": [],
-                "defaultColDef": _DEFAULT_COL_DEF,
-                "rowSelection": "multiple",
-            })
+            grid.options.update(_empty_grid_options())
             grid.update()
             apply_btn.set_enabled(False)
             remove_btn.set_enabled(False)
             return
-        total = len(state["current_df"])
-        view = filter_by_id_substring(state["current_df"], filter_input.value or "")
+        total = len(vm.current_df)
+        view = vm.filtered_view(filter_input.value or "")
         if view.empty:
             summary_lbl.set_text(f"No {ext!r} extensions match the filter.")
-            grid.options.update({
-                "columnDefs": [], "rowData": [],
-                "defaultColDef": _DEFAULT_COL_DEF,
-                "rowSelection": "multiple",
-            })
+            grid.options.update(_empty_grid_options())
             grid.update()
             return
-        readonly = ext in READONLY_EXTENSIONS
-        editable_cols = _editable_cols_for(ext, view)
-        grid.options.update(_aggrid_options(view, ext))
+        readonly = vm.is_readonly()
+        editable_cols = vm.editable_cols(view)
+        grid.options.update(_aggrid_options(view))
         grid.update()
         if len(view) == total:
             summary_lbl.set_text(f"{total} {ext!r} extension(s)")
@@ -4092,23 +4063,22 @@ def _build_extensions_explorer():
             ext_select.options = []
             ext_select.value = None
             ext_select.update()
-            state["info_df"] = pd.DataFrame()
+            vm.clear()
             return
         try:
             names = list_extension_names()
         except Exception:
             names = []
         try:
-            state["info_df"] = get_extensions_information()
+            vm.set_info(get_extensions_information())
         except Exception:
-            state["info_df"] = pd.DataFrame()
+            vm.set_info(pd.DataFrame())
         ext_select.options = list(names)
         ext_select.value = names[0] if names else None
         ext_select.update()
 
     def _on_extension_changed(_e=None) -> None:
-        state["pending_edits"] = {}
-        state["pending_removals"] = set()
+        vm.reset_pending()
         refresh()
 
     def _on_filter_changed(_e=None) -> None:
@@ -4130,17 +4100,14 @@ def _build_extensions_explorer():
         if not ext:
             return
         if col_id == "_remove":
-            if bool(new_value):
-                state["pending_removals"].add(element_id)
-            else:
-                state["pending_removals"].discard(element_id)
+            vm.tick_remove(element_id, bool(new_value))
             return
         # Cast based on the source DataFrame's column dtype.
-        df = state["current_df"]
+        df = vm.current_df
         if element_id not in df.index or col_id not in df.columns:
             return
         casted = _cast_value_for_col(df[col_id], new_value)
-        state["pending_edits"].setdefault(element_id, {})[col_id] = casted
+        vm.add_edit(element_id, col_id, casted)
 
     grid.on("cellValueChanged", _on_cell_value_changed)
 
@@ -4148,18 +4115,17 @@ def _build_extensions_explorer():
         ext = _current_ext()
         if not ext or _state.network is None:
             return
-        pending = state["pending_edits"]
-        if not pending:
+        if not vm.has_edits():
             status_lbl.set_text("No pending changes.")
             return
-        changes_df = pd.DataFrame.from_dict(pending, orient="index")
+        changes_df = vm.edits_changes_df()
         try:
             update_extension(_state.network, ext, changes_df)
         except Exception as exc:
             ui.notify(f"Update failed: {exc}", type="negative")
             return
-        n = len(pending)
-        state["pending_edits"] = {}
+        n = len(changes_df)
+        vm.clear_edits()
         ui.notify(
             f"Applied {n} change(s) to {ext!r}.",
             type="positive", timeout=1500,
@@ -4171,7 +4137,7 @@ def _build_extensions_explorer():
         ext = _current_ext()
         if not ext or _state.network is None:
             return
-        ids = sorted(state["pending_removals"])
+        ids = vm.removals_list()
         if not ids:
             status_lbl.set_text("Tick at least one row to remove.")
             return
@@ -4180,10 +4146,9 @@ def _build_extensions_explorer():
         except Exception as exc:
             ui.notify(f"Remove failed: {exc}", type="negative")
             return
-        state["pending_removals"] = set()
+        vm.clear_removals()
         # Drop any cached edits for the just-removed rows.
-        for eid in list(ids):
-            state["pending_edits"].pop(eid, None)
+        vm.drop_edits_for(ids)
         ui.notify(
             f"Removed {len(ids)} {ext!r} extension row(s).",
             type="positive", timeout=1500,
@@ -4200,8 +4165,7 @@ def _build_extensions_explorer():
     # listener so post-LF extension columns surface.
     def _on_network_changed(network) -> None:
         _populate_extensions(network)
-        state["pending_edits"] = {}
-        state["pending_removals"] = set()
+        vm.reset_pending()
         refresh()
 
     _state.on_network_changed(_on_network_changed)
