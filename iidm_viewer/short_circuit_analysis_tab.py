@@ -15,16 +15,29 @@ from iidm_viewer.caches import get_vl_nominal_v
 from iidm_viewer.short_circuit_analysis import (
     FAULT_TYPES,
     STUDY_TYPES,
+    ShortCircuitViewModel,
     build_bus_faults,
-    build_summary_dataframe,
-    count_failures,
-    count_with_violations,
     default_hv_preselect,
     format_fault_type,
     make_sc_params,
-    max_fault_power_mva,
     run_short_circuit_analysis,
 )
+
+
+def _get_sc_vm() -> ShortCircuitViewModel:
+    """Return the per-session :class:`ShortCircuitViewModel` singleton.
+
+    Lazy-created and stashed in ``st.session_state["_sc_vm"]`` so the
+    results dict survives across Streamlit reruns the same way the
+    legacy ``_sc_results`` session key did. PySide6 + NiceGUI hold the
+    view-model as a tab field; Streamlit threads it through session
+    state so every rerun sees the same data.
+    """
+    vm = st.session_state.get("_sc_vm")
+    if vm is None:
+        vm = ShortCircuitViewModel()
+        st.session_state["_sc_vm"] = vm
+    return vm
 
 
 def _get_nominal_voltages(network) -> list[float]:
@@ -131,7 +144,7 @@ def _render_config_tab(network):
             ):
                 try:
                     results = run_short_circuit_analysis(network, faults, sc_params)
-                    st.session_state["_sc_results"] = results
+                    _get_sc_vm().store_results(results)
                     st.success(
                         f"Short circuit analysis complete — "
                         f"{len(faults)} faults evaluated."
@@ -155,14 +168,15 @@ def _style_violations(val: int) -> str:
 
 
 def _render_results_tab():
-    results = st.session_state.get("_sc_results")
-    if results is None:
+    vm = _get_sc_vm()
+    if not vm.has_results():
         st.info(
             "No results yet. Configure and run a short circuit analysis "
             "in the Configuration tab."
         )
         return
 
+    results = vm.results
     faults: list[dict] = results.get("faults", [])
     fault_results: dict = results.get("fault_results", {})
 
@@ -170,15 +184,15 @@ def _render_results_tab():
         st.info("No fault results available.")
         return
 
-    summary_df = build_summary_dataframe(results)
+    summary_df = vm.summary_df()
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Faults simulated", len(faults))
-    c2.metric("Failed / not converged", count_failures(summary_df))
-    c3.metric("With limit violations", count_with_violations(summary_df))
+    c2.metric("Failed / not converged", vm.failure_count())
+    c3.metric("With limit violations", vm.with_violations_count())
 
     # Power filter slider (only when data is available)
-    max_pwr = max_fault_power_mva(summary_df)
+    max_pwr = vm.max_fault_power_mva()
     if max_pwr > 0.0:
         pwr_threshold = st.slider(
             "Show faults with fault power ≥ (MVA)",
