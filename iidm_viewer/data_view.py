@@ -401,7 +401,17 @@ def build_data_explorer_view_model(
         if filter_specs:
             df = apply_filter_specs(df, filter_specs)
         if id_filter_substring:
-            mask = df.index.astype(str).str.contains(
+            # ``component_registry.get_dataframe`` resets pypowsybl's
+            # natural index so the element id ends up as an ``id``
+            # column. Match against it when present; otherwise fall
+            # back to the index (the Streamlit cache helper
+            # ``caches.get_enriched_component`` keeps the id-indexed
+            # shape, and other callers may too).
+            if "id" in df.columns:
+                target = df["id"].astype(str)
+            else:
+                target = df.index.astype(str)
+            mask = target.str.contains(
                 id_filter_substring, case=False, na=False, regex=False,
             )
             df = df[mask]
