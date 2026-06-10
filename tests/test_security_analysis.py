@@ -10,7 +10,10 @@ from iidm_viewer.state import (
     load_network,
     run_security_analysis,
 )
-from iidm_viewer.security_analysis import _action_summary
+from iidm_viewer.security_analysis import (
+    SecurityAnalysisViewModel,
+    _action_summary,
+)
 from iidm_viewer.security_analysis_tab import (
     _get_filterable_df,
     _render_actions_subtab,
@@ -333,7 +336,7 @@ def test_render_results_tab_empty_post_shows_info():
         "post": {},
     }
     with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sa_results": results}
+        mock_st.session_state = {"_sa_vm": _vm_with_results(results)}
         mock_st.columns.side_effect = _mock_columns
         _render_results_tab()
     mock_st.info.assert_called()
@@ -341,7 +344,7 @@ def test_render_results_tab_empty_post_shows_info():
 
 def test_render_results_tab_converged_no_violations_calls_success():
     with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sa_results": _converged_results()}
+        mock_st.session_state = {"_sa_vm": _vm_with_results(_converged_results())}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0
         mock_st.text_input.return_value = ""
@@ -352,7 +355,7 @@ def test_render_results_tab_converged_no_violations_calls_success():
 
 def test_render_results_tab_renders_summary_dataframe():
     with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sa_results": _converged_results()}
+        mock_st.session_state = {"_sa_vm": _vm_with_results(_converged_results())}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0
         mock_st.text_input.return_value = ""
@@ -363,7 +366,7 @@ def test_render_results_tab_renders_summary_dataframe():
 
 def test_render_results_tab_with_violations_renders_violation_dataframe():
     with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sa_results": _converged_results(violations=True)}
+        mock_st.session_state = {"_sa_vm": _vm_with_results(_converged_results(violations=True))}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0
         mock_st.text_input.return_value = ""
@@ -375,13 +378,23 @@ def test_render_results_tab_with_violations_renders_violation_dataframe():
 
 def test_render_results_tab_id_filter_no_match_shows_info():
     with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sa_results": _converged_results()}
+        mock_st.session_state = {"_sa_vm": _vm_with_results(_converged_results())}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0
         mock_st.text_input.return_value = "ZZZZ"  # matches nothing
         _render_results_tab()
     mock_st.info.assert_called()
 
+
+
+def _vm_with_results(results):
+    """Build a fresh SecurityAnalysisViewModel and seed its results
+    slot — drop-in replacement for the legacy ``{"_sa_results": …}``
+    session_state seeding used before the view-model migration."""
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+    vm = SecurityAnalysisViewModel()
+    vm.store_results(results)
+    return vm
 
 def _cm():
     cm = MagicMock()
@@ -425,7 +438,7 @@ def test_render_contingencies_subtab_stores_in_session():
         mock_st.form_submit_button.return_value = False
         mock_st.expander.return_value = _cm()
         _render_contingencies_subtab(net)
-    assert mock_st.session_state["_sa_contingencies"] == contingencies
+    assert mock_st.session_state["_sa_vm"].contingencies == contingencies
     mock_st.caption.assert_called()
 
 
@@ -450,7 +463,7 @@ def test_render_contingencies_subtab_n2_mode_uses_n2_builder():
         mock_st.expander.return_value = _cm()
         _render_contingencies_subtab(net)
     mock_n2.assert_called_once()
-    assert mock_st.session_state["_sa_contingencies"] == n2
+    assert mock_st.session_state["_sa_vm"].contingencies == n2
 
 
 def test_render_contingencies_subtab_manual_n1_per_element():
@@ -477,7 +490,7 @@ def test_render_contingencies_subtab_manual_n1_per_element():
     assert state["_sa_manual_contingencies"] == [
         {"id": "N1_L1", "element_id": "L1", "element_ids": ["L1"]},
     ]
-    assert state["_sa_contingencies"] == state["_sa_manual_contingencies"]
+    assert state["_sa_vm"].contingencies == state["_sa_manual_contingencies"]
 
 
 def test_render_contingencies_subtab_manual_grouped_nk():
@@ -641,7 +654,7 @@ def test_render_monitored_subtab_form_submit_appends_entry():
         mock_st.form_submit_button.return_value = True
         mock_st.button.return_value = False  # avoid Remove-click in render loop
         _render_monitored_subtab(net)
-    assert state["_sa_monitored"] == [{
+    assert state["_sa_vm"].monitored == [{
         "contingency_context_type": "ALL",
         "contingency_ids": None,
         "branch_ids": ["L1"],
@@ -669,7 +682,7 @@ def test_render_monitored_subtab_specific_requires_contingencies():
         mock_st.multiselect.side_effect = [[], ["L2"], [], []]
         mock_st.form_submit_button.return_value = True
         _render_monitored_subtab(net)
-    assert state.get("_sa_monitored") == []
+    assert state["_sa_vm"].monitored == []
     mock_st.warning.assert_called()
 
 
@@ -701,7 +714,7 @@ def test_render_limit_reductions_subtab_submit_appends_entry():
         mock_st.form_submit_button.return_value = True
         mock_st.button.return_value = False  # avoid Remove-click in render loop
         _render_limit_reductions_subtab()
-    assert state["_sa_limit_reductions"] == [{
+    assert state["_sa_vm"].reductions == [{
         "limit_type": "CURRENT",
         "permanent": True,
         "temporary": False,
@@ -723,7 +736,7 @@ def test_render_limit_reductions_subtab_none_selected_warns():
         mock_st.text_input.return_value = ""
         mock_st.form_submit_button.return_value = True
         _render_limit_reductions_subtab()
-    assert state.get("_sa_limit_reductions") == []
+    assert state["_sa_vm"].reductions == []
     mock_st.warning.assert_called()
 
 
@@ -763,13 +776,13 @@ def test_render_config_tab_run_button_passes_all_inputs():
         "contingencies": contingencies,
     }
     net = MagicMock()
-    state = {
-        "_sa_contingencies": contingencies,
-        "_sa_monitored": monitored,
-        "_sa_limit_reductions": reductions,
-        "_sa_actions": actions,
-        "_sa_operator_strategies": strategies,
-    }
+    seeded = SecurityAnalysisViewModel()
+    seeded.set_contingencies(contingencies)
+    seeded.monitored.extend(monitored)
+    seeded.reductions.extend(reductions)
+    seeded.actions.extend(actions)
+    seeded.strategies.extend(strategies)
+    state = {"_sa_vm": seeded}
     with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
          patch("iidm_viewer.security_analysis_tab._render_contingencies_subtab"), \
          patch("iidm_viewer.security_analysis_tab._render_monitored_subtab"), \
@@ -787,7 +800,7 @@ def test_render_config_tab_run_button_passes_all_inputs():
         mock_st.spinner.return_value = _cm()
         _render_config_tab(net)
 
-    assert state.get("_sa_results") == sa_results
+    assert state["_sa_vm"].results == sa_results
     mock_run.assert_called_once()
     _, kwargs = mock_run.call_args
     assert kwargs["monitored_elements"] == monitored
@@ -903,17 +916,20 @@ def test_render_actions_subtab_submit_appends_switch_action():
         mock_st.form_submit_button.return_value = True
         mock_st.button.return_value = False
         _render_actions_subtab(net)
-    assert state["_sa_actions"] == [
+    assert state["_sa_vm"].actions == [
         {"action_id": "open_sw1", "type": "SWITCH", "switch_id": "SW1", "open": True},
     ]
     mock_st.rerun.assert_called()
 
 
 def test_render_actions_subtab_duplicate_id_warns():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
     net = MagicMock()
-    state = {"_sa_actions": [
+    seeded = SecurityAnalysisViewModel()
+    seeded.actions.append(
         {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
-    ]}
+    )
+    state = {"_sa_vm": seeded}
     with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
          patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()):
         mock_st.session_state = state
@@ -926,7 +942,7 @@ def test_render_actions_subtab_duplicate_id_warns():
         mock_st.form_submit_button.return_value = True
         mock_st.button.return_value = False
         _render_actions_subtab(net)
-    assert len(state["_sa_actions"]) == 1
+    assert len(state["_sa_vm"].actions) == 1
     mock_st.warning.assert_called()
 
 
@@ -943,7 +959,7 @@ def test_render_actions_subtab_blank_id_warns():
         mock_st.checkbox.return_value = True
         mock_st.form_submit_button.return_value = True
         _render_actions_subtab(net)
-    assert state.get("_sa_actions") == []
+    assert state["_sa_vm"].actions == []
     mock_st.warning.assert_called()
 
 
@@ -960,12 +976,13 @@ def test_render_operator_strategies_subtab_no_inputs_shows_info():
 
 
 def test_render_operator_strategies_subtab_submit_appends():
-    state = {
-        "_sa_contingencies": [{"id": "N1_L1", "element_id": "L1"}],
-        "_sa_actions": [
-            {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
-        ],
-    }
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+    seeded = SecurityAnalysisViewModel()
+    seeded.contingencies.append({"id": "N1_L1", "element_id": "L1"})
+    seeded.actions.append(
+        {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
+    )
+    state = {"_sa_vm": seeded}
     with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
@@ -978,7 +995,7 @@ def test_render_operator_strategies_subtab_submit_appends():
         mock_st.form_submit_button.return_value = True
         mock_st.button.return_value = False
         _render_operator_strategies_subtab()
-    assert state["_sa_operator_strategies"] == [{
+    assert state["_sa_vm"].strategies == [{
         "operator_strategy_id": "strat1",
         "contingency_id": "N1_L1",
         "action_ids": ["a1"],
@@ -990,12 +1007,13 @@ def test_render_operator_strategies_subtab_submit_appends():
 
 
 def test_render_operator_strategies_subtab_violation_condition_captures_filters():
-    state = {
-        "_sa_contingencies": [{"id": "N1_L1", "element_id": "L1"}],
-        "_sa_actions": [
-            {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
-        ],
-    }
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+    seeded = SecurityAnalysisViewModel()
+    seeded.contingencies.append({"id": "N1_L1", "element_id": "L1"})
+    seeded.actions.append(
+        {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
+    )
+    state = {"_sa_vm": seeded}
     with patch("iidm_viewer.security_analysis_tab.st") as mock_st, \
          patch("iidm_viewer.security_analysis_tab._get_ids", return_value=_ids_fixture()):
         mock_st.session_state = state
@@ -1009,19 +1027,20 @@ def test_render_operator_strategies_subtab_violation_condition_captures_filters(
         mock_st.form_submit_button.return_value = True
         mock_st.button.return_value = False
         _render_operator_strategies_subtab(network=MagicMock())
-    s = state["_sa_operator_strategies"][0]
+    s = state["_sa_vm"].strategies[0]
     assert s["condition_type"] == "ANY_VIOLATION_CONDITION"
     assert s["violation_subject_ids"] == ["L1"]
     assert s["violation_types"] == ["CURRENT"]
 
 
 def test_render_operator_strategies_subtab_no_actions_warns():
-    state = {
-        "_sa_contingencies": [{"id": "N1_L1", "element_id": "L1"}],
-        "_sa_actions": [
-            {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
-        ],
-    }
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+    seeded = SecurityAnalysisViewModel()
+    seeded.contingencies.append({"id": "N1_L1", "element_id": "L1"})
+    seeded.actions.append(
+        {"action_id": "a1", "type": "SWITCH", "switch_id": "SW1", "open": True},
+    )
+    state = {"_sa_vm": seeded}
     with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
         mock_st.session_state = state
         mock_st.form.return_value = _cm()
@@ -1030,7 +1049,7 @@ def test_render_operator_strategies_subtab_no_actions_warns():
         mock_st.multiselect.return_value = []
         mock_st.form_submit_button.return_value = True
         _render_operator_strategies_subtab()
-    assert state.get("_sa_operator_strategies") == []
+    assert state["_sa_vm"].strategies == []
     mock_st.warning.assert_called()
 
 
@@ -1304,8 +1323,10 @@ def test_render_config_tab_forwards_json_paths_to_run():
         "contingencies": contingencies,
     }
     net = MagicMock()
+    seeded = SecurityAnalysisViewModel()
+    seeded.set_contingencies(contingencies)
     state = {
-        "_sa_contingencies": contingencies,
+        "_sa_vm": seeded,
         "_sa_contingencies_json_files": [
             {"name": "c.json", "path": "/tmp/c.json"},
         ],
@@ -1373,7 +1394,7 @@ def test_render_results_tab_renders_download_when_json_export_present():
     results = _converged_results()
     results["json_export"] = b'{"pre":"CONVERGED"}'
     with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sa_results": results}
+        mock_st.session_state = {"_sa_vm": _vm_with_results(results)}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0
         mock_st.text_input.return_value = ""
@@ -1386,7 +1407,7 @@ def test_render_results_tab_renders_download_when_json_export_present():
 
 def test_render_results_tab_no_download_when_json_export_missing():
     with patch("iidm_viewer.security_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sa_results": _converged_results()}
+        mock_st.session_state = {"_sa_vm": _vm_with_results(_converged_results())}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0
         mock_st.text_input.return_value = ""

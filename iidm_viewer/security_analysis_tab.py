@@ -41,6 +41,7 @@ from iidm_viewer.security_analysis import (
     MANUAL_TYPE_IDS_KEY as _MANUAL_TYPE_IDS_KEY,
     MANUAL_TYPES as _MANUAL_TYPES,
     SIDES as _SIDES,
+    SecurityAnalysisViewModel,
     VIOLATION_TYPES as _VIOLATION_TYPES,
     action_summary as _action_summary,
     build_n1_contingencies,
@@ -48,6 +49,23 @@ from iidm_viewer.security_analysis import (
     get_element_ids,
     run_security_analysis,
 )
+
+
+def _get_sa_vm() -> SecurityAnalysisViewModel:
+    """Return the per-session :class:`SecurityAnalysisViewModel` singleton.
+
+    Created lazily on first access and stashed in
+    ``st.session_state["_sa_vm"]`` so the five configuration lists
+    and the last results survive across Streamlit reruns the same
+    way the legacy ``_sa_*`` session keys used to. PySide6 + NiceGUI
+    hold the view-model instance as a tab field; Streamlit threads
+    it through session state so every rerun sees the same lists.
+    """
+    vm = st.session_state.get("_sa_vm")
+    if vm is None:
+        vm = SecurityAnalysisViewModel()
+        st.session_state["_sa_vm"] = vm
+    return vm
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +137,7 @@ def _get_filterable_df(network, manual_type: str) -> pd.DataFrame:
 
 
 def _contingencies_list() -> list[dict]:
-    return st.session_state.get("_sa_contingencies", [])
+    return _get_sa_vm().contingencies
 
 
 # --- JSON file upload helpers ---
@@ -369,7 +387,7 @@ def _render_contingencies_subtab(network):
 
     # --- Section D: composed list --------------------------------------
     contingencies = list(auto) + list(manual)
-    st.session_state["_sa_contingencies"] = contingencies
+    _get_sa_vm().set_contingencies(contingencies)
 
     auto_label = "N-1" if mode == "N-1" else "N-2"
     if contingencies or json_files:
@@ -413,7 +431,8 @@ def _render_monitored_subtab(network):
         "call to `add_monitored_elements`."
     )
 
-    entries: list[dict] = st.session_state.setdefault("_sa_monitored", [])
+    vm = _get_sa_vm()
+    entries = vm.monitored
     ids = _get_ids(network)
     contingency_ids = [c["id"] for c in _contingencies_list()]
 
@@ -454,18 +473,17 @@ def _render_monitored_subtab(network):
         submitted = st.form_submit_button("Add monitored elements")
 
     if submitted:
-        if not (branch_ids or vl_ids or t3w_ids):
-            st.warning("Pick at least one branch, voltage level or 3WT.")
-        elif ctx_type == "SPECIFIC" and not specific_cids:
-            st.warning("Pick at least one contingency for SPECIFIC context.")
+        errors = vm.add_monitored(
+            ctx_type,
+            contingency_ids=specific_cids,
+            branch_ids=branch_ids,
+            voltage_level_ids=vl_ids,
+            three_windings_transformer_ids=t3w_ids,
+        )
+        if errors:
+            for msg in errors:
+                st.warning(msg)
         else:
-            entries.append({
-                "contingency_context_type": ctx_type,
-                "contingency_ids": specific_cids if ctx_type == "SPECIFIC" else None,
-                "branch_ids": branch_ids or None,
-                "voltage_level_ids": vl_ids or None,
-                "three_windings_transformer_ids": t3w_ids or None,
-            })
             st.rerun()
 
     if not entries:
@@ -489,7 +507,7 @@ def _render_monitored_subtab(network):
                 st.markdown("  \n".join(lines))
             with col2:
                 if st.button("Remove", key=f"sa_mon_rm_{i}"):
-                    entries.pop(i)
+                    vm.remove_monitored(i)
                     st.rerun()
 
 
@@ -502,7 +520,8 @@ def _render_limit_reductions_subtab():
         "currently supports `limit_type=CURRENT` and `contingency_context=ALL`."
     )
 
-    entries: list[dict] = st.session_state.setdefault("_sa_limit_reductions", [])
+    vm = _get_sa_vm()
+    entries = vm.reductions
 
     with st.form("sa_lr_form", clear_on_submit=True):
         col1, col2, col3 = st.columns(3)
@@ -563,27 +582,20 @@ def _render_limit_reductions_subtab():
         submitted = st.form_submit_button("Add limit reduction")
 
     if submitted:
-        if not (permanent or temporary):
-            st.warning("Pick at least one of 'Permanent' or 'Temporary'.")
+        errors = vm.add_reduction(
+            float(value),
+            permanent=bool(permanent),
+            temporary=bool(temporary),
+            min_temporary_duration=int(min_dur),
+            max_temporary_duration=int(max_dur),
+            country=country,
+            min_voltage=float(min_v),
+            max_voltage=float(max_v),
+        )
+        if errors:
+            for msg in errors:
+                st.warning(msg)
         else:
-            entry: dict = {
-                "limit_type": "CURRENT",
-                "permanent": bool(permanent),
-                "temporary": bool(temporary),
-                "value": float(value),
-                "contingency_context": "ALL",
-            }
-            if temporary and min_dur > 0:
-                entry["min_temporary_duration"] = int(min_dur)
-            if temporary and max_dur > 0:
-                entry["max_temporary_duration"] = int(max_dur)
-            if country.strip():
-                entry["country"] = country.strip().upper()
-            if min_v > 0:
-                entry["min_voltage"] = float(min_v)
-            if max_v > 0:
-                entry["max_voltage"] = float(max_v)
-            entries.append(entry)
             st.rerun()
 
     if not entries:
@@ -616,7 +628,7 @@ def _render_limit_reductions_subtab():
                     remove_idx = i
 
     if remove_idx is not None:
-        entries.pop(remove_idx)
+        vm.remove_reduction(remove_idx)
         st.rerun()
 
     with st.expander("Preview DataFrame passed to pypowsybl", expanded=False):
@@ -780,7 +792,8 @@ def _render_actions_subtab(network):
         "strategy. Each action gets a unique id."
     )
 
-    entries: list[dict] = st.session_state.setdefault("_sa_actions", [])
+    vm = _get_sa_vm()
+    entries = vm.actions
     ids = _get_ids(network)
 
     # Action-type selectbox is outside the form so type-specific fields
@@ -801,16 +814,15 @@ def _render_actions_subtab(network):
         submitted = st.form_submit_button("Add action")
 
     if submitted:
-        existing_ids = {a["action_id"] for a in entries}
         if extra is None:
             st.warning("Cannot build this action — no matching element in the network.")
-        elif not action_id.strip():
-            st.warning("Action ID is required.")
-        elif action_id in existing_ids:
-            st.warning(f"Action ID '{action_id}' already exists.")
         else:
-            entries.append({"action_id": action_id.strip(), "type": atype, **extra})
-            st.rerun()
+            errors = vm.add_action(atype, action_id, extra)
+            if errors:
+                for msg in errors:
+                    st.warning(msg)
+            else:
+                st.rerun()
 
     _render_json_upload_section(
         label="Upload action JSON file(s)",
@@ -835,14 +847,16 @@ def _render_actions_subtab(network):
                 st.markdown(_action_summary(e))
             with col2:
                 if st.button("Remove", key=f"sa_act_rm_{i}"):
-                    entries.pop(i)
-                    # Also drop the action from any strategies that reference it
-                    for strat in st.session_state.get("_sa_operator_strategies", []):
-                        if e["action_id"] in strat.get("action_ids", []):
-                            strat["action_ids"] = [
-                                a for a in strat["action_ids"]
-                                if a != e["action_id"]
-                            ]
+                    removed_id = e["action_id"]
+                    vm.remove_action(i)
+                    # Also drop the action from any strategies that
+                    # reference it -- same cross-list invariant as
+                    # the PySide6 + NiceGUI tabs.
+                    for strat in vm.strategies:
+                        strat["action_ids"] = [
+                            a for a in strat.get("action_ids", [])
+                            if a != removed_id
+                        ]
                     st.rerun()
 
 
@@ -856,10 +870,10 @@ def _render_operator_strategies_subtab(network=None):
         "its condition is met."
     )
 
-    entries: list[dict] = st.session_state.setdefault("_sa_operator_strategies", [])
+    vm = _get_sa_vm()
+    entries = vm.strategies
     contingencies = _contingencies_list()
-    actions = st.session_state.get("_sa_actions", [])
-    action_ids = [a["action_id"] for a in actions]
+    action_ids = vm.action_ids()
     contingency_ids = [c["id"] for c in contingencies]
 
     if not contingency_ids or not action_ids:
@@ -923,22 +937,18 @@ def _render_operator_strategies_subtab(network=None):
             submitted = st.form_submit_button("Add operator strategy")
 
         if submitted:
-            existing_ids = {s["operator_strategy_id"] for s in entries}
-            if not strat_id.strip():
-                st.warning("Strategy ID is required.")
-            elif strat_id in existing_ids:
-                st.warning(f"Strategy ID '{strat_id}' already exists.")
-            elif not selected_actions:
-                st.warning("Pick at least one action.")
+            errors = vm.add_strategy(
+                strat_id,
+                contingency_id,
+                selected_actions,
+                condition_type=condition_type,
+                violation_subject_ids=list(violation_subject_ids),
+                violation_types=list(violation_types),
+            )
+            if errors:
+                for msg in errors:
+                    st.warning(msg)
             else:
-                entries.append({
-                    "operator_strategy_id": strat_id.strip(),
-                    "contingency_id": contingency_id,
-                    "action_ids": selected_actions,
-                    "condition_type": condition_type,
-                    "violation_subject_ids": list(violation_subject_ids),
-                    "violation_types": list(violation_types),
-                })
                 st.rerun()
 
     _render_json_upload_section(
@@ -980,7 +990,7 @@ def _render_operator_strategies_subtab(network=None):
                 st.markdown("  \n".join(lines))
             with col2:
                 if st.button("Remove", key=f"sa_strat_rm_{i}"):
-                    entries.pop(i)
+                    vm.remove_strategy(i)
                     st.rerun()
 
 
@@ -1015,11 +1025,12 @@ def _render_config_tab(network):
         _render_operator_strategies_subtab(network)
 
     st.divider()
-    contingencies = _contingencies_list()
-    monitored = st.session_state.get("_sa_monitored", [])
-    reductions = st.session_state.get("_sa_limit_reductions", [])
-    actions = st.session_state.get("_sa_actions", [])
-    strategies = st.session_state.get("_sa_operator_strategies", [])
+    vm = _get_sa_vm()
+    contingencies = vm.contingencies
+    monitored = vm.monitored
+    reductions = vm.reductions
+    actions = vm.actions
+    strategies = vm.strategies
     contingencies_json_paths = _json_paths("_sa_contingencies_json_files")
     actions_json_paths = _json_paths("_sa_actions_json_files")
     strategies_json_paths = _json_paths("_sa_operator_strategies_json_files")
@@ -1069,7 +1080,7 @@ def _render_config_tab(network):
                         actions_json_paths=actions_json_paths,
                         operator_strategies_json_paths=strategies_json_paths,
                     )
-                    st.session_state["_sa_results"] = results
+                    vm.store_results(results)
                     st.success("Security analysis complete.")
                 except Exception as exc:
                     st.error(f"Security analysis failed: {exc}")
@@ -1142,7 +1153,7 @@ def _render_operator_strategy_block(sid: str, sr: dict):
 
 
 def _render_results_tab():
-    results = st.session_state.get("_sa_results")
+    results = _get_sa_vm().results
     if results is None:
         st.info(
             "No results yet. Configure and run a security analysis "
