@@ -113,3 +113,157 @@ def test_build_pangle_chart_returns_figure(xiidm_upload):
     fig = _build_pangle_chart(line_id, df.loc[line_id])
     # Plotly figure has data traces
     assert len(fig.data) >= 1
+
+
+# ---------------------------------------------------------------------------
+# PmaxViewModel
+# ---------------------------------------------------------------------------
+
+
+def test_pmax_view_model_defaults_are_empty():
+    from iidm_viewer.pmax_visualization import PmaxViewModel
+
+    vm = PmaxViewModel()
+    assert vm.unfiltered_df.empty
+    assert vm.only_vl is False
+    assert vm.selected_vl is None
+    assert vm.is_empty() is True
+    assert vm.has_vl_subset() is False
+    assert vm.rows_df().empty
+    assert vm.line_ids() == []
+    assert vm.display_df().empty
+
+
+def test_pmax_view_model_clear_resets_data_and_filter():
+    import pandas as pd
+    from iidm_viewer.pmax_visualization import PmaxViewModel
+
+    vm = PmaxViewModel()
+    vm.set_data(pd.DataFrame({
+        "voltage_level1_id": ["VL1"],
+        "voltage_level2_id": ["VL2"],
+        "x_ohm": [1.0],
+    }, index=pd.Index(["L1"], name="line_id")))
+    vm.set_only_vl(True)
+    vm.set_selected_vl("VL1")
+
+    vm.clear()
+    assert vm.unfiltered_df.empty
+    assert vm.only_vl is False
+    # selected_vl survives clear -- the caller controls it.
+    assert vm.selected_vl == "VL1"
+
+
+def test_pmax_view_model_set_data_handles_none():
+    from iidm_viewer.pmax_visualization import PmaxViewModel
+
+    vm = PmaxViewModel()
+    vm.set_data(None)
+    assert vm.unfiltered_df.empty
+    assert vm.is_empty() is True
+
+
+def test_pmax_view_model_has_vl_subset_returns_false_without_vl():
+    import pandas as pd
+    from iidm_viewer.pmax_visualization import PmaxViewModel
+
+    vm = PmaxViewModel()
+    vm.set_data(pd.DataFrame({
+        "voltage_level1_id": ["VL1"],
+        "voltage_level2_id": ["VL2"],
+    }, index=pd.Index(["L1"], name="line_id")))
+    # No selected_vl -- no subset.
+    assert vm.has_vl_subset() is False
+
+
+def test_pmax_view_model_has_vl_subset_returns_false_when_empty():
+    from iidm_viewer.pmax_visualization import PmaxViewModel
+
+    vm = PmaxViewModel()
+    vm.set_selected_vl("VL1")
+    assert vm.has_vl_subset() is False
+
+
+def test_pmax_view_model_has_vl_subset_returns_true_when_vl_present():
+    import pandas as pd
+    from iidm_viewer.pmax_visualization import PmaxViewModel
+
+    df = pd.DataFrame({
+        "voltage_level1_id": ["VL1", "VL3"],
+        "voltage_level2_id": ["VL2", "VL4"],
+    }, index=pd.Index(["L1", "L2"], name="line_id"))
+    vm = PmaxViewModel()
+    vm.set_data(df)
+    vm.set_selected_vl("VL1")
+    assert vm.has_vl_subset() is True
+    vm.set_selected_vl("VL_NOT_PRESENT")
+    assert vm.has_vl_subset() is False
+
+
+def test_pmax_view_model_rows_df_returns_unfiltered_when_only_vl_false():
+    import pandas as pd
+    from iidm_viewer.pmax_visualization import PmaxViewModel
+
+    df = pd.DataFrame({
+        "voltage_level1_id": ["VL1", "VL3"],
+        "voltage_level2_id": ["VL2", "VL4"],
+    }, index=pd.Index(["L1", "L2"], name="line_id"))
+    vm = PmaxViewModel()
+    vm.set_data(df)
+    vm.set_selected_vl("VL1")
+    # only_vl=False -> rows_df returns the whole frame.
+    pd.testing.assert_frame_equal(vm.rows_df(), df)
+
+
+def test_pmax_view_model_rows_df_returns_vl_subset_when_toggle_on():
+    import pandas as pd
+    from iidm_viewer.pmax_visualization import (
+        PmaxViewModel,
+        filter_by_vl,
+    )
+
+    df = pd.DataFrame({
+        "voltage_level1_id": ["VL1", "VL3"],
+        "voltage_level2_id": ["VL2", "VL4"],
+    }, index=pd.Index(["L1", "L2"], name="line_id"))
+    vm = PmaxViewModel()
+    vm.set_data(df)
+    vm.set_selected_vl("VL1")
+    vm.set_only_vl(True)
+
+    pd.testing.assert_frame_equal(vm.rows_df(), filter_by_vl(df, "VL1"))
+
+
+def test_pmax_view_model_line_ids_reflect_rows_df():
+    import pandas as pd
+    from iidm_viewer.pmax_visualization import PmaxViewModel
+
+    df = pd.DataFrame({
+        "voltage_level1_id": ["VL1", "VL3"],
+        "voltage_level2_id": ["VL2", "VL4"],
+    }, index=pd.Index(["L1", "L2"], name="line_id"))
+    vm = PmaxViewModel()
+    vm.set_data(df)
+    assert vm.line_ids() == ["L1", "L2"]
+
+    vm.set_selected_vl("VL1")
+    vm.set_only_vl(True)
+    assert vm.line_ids() == ["L1"]
+
+
+def test_pmax_view_model_rows_df_falls_back_when_subset_empty():
+    """When ``only_vl`` is on but the VL slice is empty (e.g. the
+    user selected an unrelated VL), ``rows_df`` returns the
+    unfiltered frame so the table still shows something."""
+    import pandas as pd
+    from iidm_viewer.pmax_visualization import PmaxViewModel
+
+    df = pd.DataFrame({
+        "voltage_level1_id": ["VL1"],
+        "voltage_level2_id": ["VL2"],
+    }, index=pd.Index(["L1"], name="line_id"))
+    vm = PmaxViewModel()
+    vm.set_data(df)
+    vm.set_selected_vl("VL_NOT_IN_NETWORK")
+    vm.set_only_vl(True)
+    pd.testing.assert_frame_equal(vm.rows_df(), df)

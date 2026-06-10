@@ -25,6 +25,7 @@ Public API:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -309,3 +310,85 @@ def build_pangle_chart(line_id: str, row: pd.Series) -> go.Figure:
 # ---------------------------------------------------------------------------
 _compute_pmax_data = compute_pmax_data
 _build_pangle_chart = build_pangle_chart
+
+
+# ---------------------------------------------------------------------------
+# View-model — host-agnostic state container for the Pmax Visualization tab
+# ---------------------------------------------------------------------------
+@dataclass
+class PmaxViewModel:
+    """Mutable state container for the Pmax Visualization tab.
+
+    PySide6 + NiceGUI both keep two DataFrames (the raw ``compute_pmax_data``
+    result and the optional VL-filtered subset) plus the
+    ``selected_vl`` / ``only_vl`` toggle pair; this dataclass captures
+    them in one shape and exposes the VL-filter pipeline as a method
+    so every host renders the same rows.
+
+    Streamlit's tab is rerun-driven and doesn't need a persistent
+    view-model (its compute is cheap per rerun); a transient
+    ``PmaxViewModel`` instance is still useful for the same display
+    selectors when the rendering glue wants to share the helper
+    surface.
+    """
+
+    unfiltered_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    only_vl: bool = False
+    selected_vl: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+    def clear(self) -> None:
+        """Reset the computed DataFrame + filter toggle. Call on
+        network swap / load-flow change."""
+        self.unfiltered_df = pd.DataFrame()
+        self.only_vl = False
+
+    def set_data(self, df: Optional[pd.DataFrame]) -> None:
+        """Store a freshly computed DataFrame (typically from
+        :func:`compute_pmax_data`). Pass ``None`` to clear."""
+        self.unfiltered_df = df if df is not None else pd.DataFrame()
+
+    def set_selected_vl(self, vl_id: Optional[str]) -> None:
+        """Update the VL the filter would target."""
+        self.selected_vl = vl_id or None
+
+    def set_only_vl(self, value: bool) -> None:
+        """Toggle the "only lines connected to the selected VL" filter."""
+        self.only_vl = bool(value)
+
+    # ------------------------------------------------------------------
+    # Read accessors
+    # ------------------------------------------------------------------
+    def is_empty(self) -> bool:
+        return self.unfiltered_df.empty
+
+    def has_vl_subset(self) -> bool:
+        """Whether filtering by ``selected_vl`` would yield any rows.
+        Hosts use this to decide the VL-filter checkbox's visibility."""
+        if not self.selected_vl or self.unfiltered_df.empty:
+            return False
+        return not filter_by_vl(self.unfiltered_df, self.selected_vl).empty
+
+    def rows_df(self) -> pd.DataFrame:
+        """Filtered DataFrame the host renders. Either the
+        VL-narrowed subset (when ``only_vl`` is True and the VL slice
+        has rows) or the full ``unfiltered_df``."""
+        if (
+            self.only_vl
+            and self.selected_vl
+            and not self.unfiltered_df.empty
+        ):
+            subset = filter_by_vl(self.unfiltered_df, self.selected_vl)
+            if not subset.empty:
+                return subset
+        return self.unfiltered_df
+
+    def line_ids(self) -> list[str]:
+        """Index of :meth:`rows_df` — the per-line picker's source list."""
+        return [str(x) for x in self.rows_df().index]
+
+    def display_df(self) -> pd.DataFrame:
+        """Pretty / sorted display DataFrame for the summary table."""
+        return build_display_dataframe(self.rows_df())
