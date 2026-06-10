@@ -20,6 +20,14 @@ from iidm_viewer.short_circuit_analysis_tab import (
 # ---------------------------------------------------------------------------
 
 
+
+def _vm_with_sc_results(results):
+    """Build a fresh ShortCircuitViewModel and seed its results slot."""
+    from iidm_viewer.short_circuit_analysis import ShortCircuitViewModel
+    vm = ShortCircuitViewModel()
+    vm.store_results(results)
+    return vm
+
 def test_ieee14_fixture_has_generator_short_circuit_extension(xiidm_upload):
     """The short-circuit analysis provider requires a transient or
     subtransient reactance on at least one generator. Guard against
@@ -265,14 +273,14 @@ def test_render_results_tab_no_results_shows_info():
 def test_render_results_tab_empty_fault_results_shows_info():
     results = {"faults": [], "fault_results": {}}
     with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sc_results": results}
+        mock_st.session_state = {"_sc_vm": _vm_with_sc_results(results)}
         _render_results_tab()
     mock_st.info.assert_called()
 
 
 def test_render_results_tab_renders_summary_dataframe():
     with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sc_results": _fault_results_fixture()}
+        mock_st.session_state = {"_sc_vm": _vm_with_sc_results(_fault_results_fixture())}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0.0
         mock_st.text_input.return_value = ""
@@ -283,7 +291,7 @@ def test_render_results_tab_renders_summary_dataframe():
 
 def test_render_results_tab_shows_fault_metrics():
     with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sc_results": _fault_results_fixture()}
+        mock_st.session_state = {"_sc_vm": _vm_with_sc_results(_fault_results_fixture())}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0.0
         mock_st.text_input.return_value = ""
@@ -300,7 +308,7 @@ def test_render_results_tab_shows_fault_metrics():
 
 def test_render_results_tab_with_violations_renders_violation_dataframe():
     with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sc_results": _fault_results_fixture(with_violations=True)}
+        mock_st.session_state = {"_sc_vm": _vm_with_sc_results(_fault_results_fixture(with_violations=True))}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0.0
         mock_st.text_input.return_value = ""
@@ -312,7 +320,7 @@ def test_render_results_tab_with_violations_renders_violation_dataframe():
 
 def test_render_results_tab_no_violations_calls_success():
     with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sc_results": _fault_results_fixture()}
+        mock_st.session_state = {"_sc_vm": _vm_with_sc_results(_fault_results_fixture())}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0.0
         mock_st.text_input.return_value = ""
@@ -323,7 +331,7 @@ def test_render_results_tab_no_violations_calls_success():
 
 def test_render_results_tab_id_filter_no_match_shows_info():
     with patch("iidm_viewer.short_circuit_analysis_tab.st") as mock_st:
-        mock_st.session_state = {"_sc_results": _fault_results_fixture()}
+        mock_st.session_state = {"_sc_vm": _vm_with_sc_results(_fault_results_fixture())}
         mock_st.columns.side_effect = _mock_columns
         mock_st.slider.return_value = 0.0
         mock_st.text_input.return_value = "ZZZZ"  # matches nothing
@@ -386,7 +394,7 @@ def test_render_config_tab_run_button_triggers_analysis():
         mock_st.expander.return_value = cm
         mock_st.spinner.return_value = cm
         _render_config_tab(net)
-    assert mock_st.session_state.get("_sc_results") == sc_results
+    assert mock_st.session_state["_sc_vm"].results == sc_results
 
 
 # ---------------------------------------------------------------------------
