@@ -36,9 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from iidm_viewer.extensions_data import (
-    EDITABLE_EXTENSIONS,
-    READONLY_EXTENSIONS,
-    filter_by_id_substring,
+    ExtensionsExplorerViewModel,
     get_extension_df,
     get_extensions_information,
     list_extension_names,
@@ -56,15 +54,11 @@ class ExtensionsExplorerTab(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
-        self._current_df: pd.DataFrame = pd.DataFrame()
-        self._editable_cols: list[str] = []
+        self._vm = ExtensionsExplorerViewModel()
         # Map column index → column name for the current extension's table
         # (so cell edits can resolve back to a column name without index
         # arithmetic spread across the file).
         self._col_names: list[str] = []
-        # Cached descriptions DataFrame from pypowsybl — looked up once
-        # per network change so the picker's caption fires fast.
-        self._info_df: pd.DataFrame = pd.DataFrame()
 
         # Top row — picker + filter + counts.
         self._ext_combo = QComboBox()
@@ -118,24 +112,15 @@ class ExtensionsExplorerTab(QWidget):
         layout.addWidget(self._table, 1)
         layout.addLayout(action_row)
 
-        # Tracks per-extension pending edits keyed by (ext_name, element_id).
-        # Each value is ``{column: new_value}``. Edits land in here on
-        # ``itemChanged`` and get flushed to pypowsybl on Apply.
-        self._pending_edits: dict[tuple[str, str], dict[str, object]] = {}
-        # IDs ticked for removal — flushed on the Remove click.
-        self._pending_removals: set[str] = set()
-
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
-        self._pending_edits.clear()
-        self._pending_removals.clear()
+        self._vm.clear()
         if network is None:
             self._populate_ext_combo([])
             self._set_table_empty("No network loaded.")
-            self._info_df = pd.DataFrame()
             return
         try:
             names = list_extension_names()
@@ -143,9 +128,9 @@ class ExtensionsExplorerTab(QWidget):
             names = []
         self._populate_ext_combo(names)
         try:
-            self._info_df = get_extensions_information()
+            self._vm.set_info(get_extensions_information())
         except Exception:
-            self._info_df = pd.DataFrame()
+            self._vm.set_info(pd.DataFrame())
         self._refresh_table()
 
     # ------------------------------------------------------------------
@@ -164,8 +149,7 @@ class ExtensionsExplorerTab(QWidget):
     def _on_extension_changed(self, _txt: str) -> None:
         # Drop pending edits / removals tied to the previously-shown
         # extension — they don't apply to the new one anyway.
-        self._pending_edits.clear()
-        self._pending_removals.clear()
+        self._vm.reset_pending()
         self._refresh_table()
 
     def _on_filter_changed(self, _txt: str) -> None:
@@ -198,37 +182,21 @@ class ExtensionsExplorerTab(QWidget):
         except Exception as exc:
             self._set_table_empty(f"Failed to load {ext!r}: {exc}")
             return
-        # Description caption.
-        detail = ""
-        if (
-            self._info_df is not None
-            and not self._info_df.empty
-            and ext in self._info_df.index
-        ):
-            try:
-                detail = str(self._info_df.loc[ext].get("detail") or "")
-            except Exception:
-                detail = ""
-        self._detail_lbl.setText(detail)
-        self._current_df = df if df is not None else pd.DataFrame()
-        if self._current_df.empty:
+        self._vm.set_data(ext, df if df is not None else pd.DataFrame())
+        self._detail_lbl.setText(self._vm.detail())
+        if self._vm.current_df.empty:
             self._set_table_empty(f"No {ext!r} extensions found.")
             return
-        total = len(self._current_df)
-        view = filter_by_id_substring(
-            self._current_df, self._filter_edit.text() or "",
-        )
+        total = len(self._vm.current_df)
+        view = self._vm.filtered_view(self._filter_edit.text() or "")
         if view.empty:
             self._set_table_empty(
                 f"No {ext!r} extensions match the filter.",
             )
             return
-        editable_cols = [
-            c for c in EDITABLE_EXTENSIONS.get(ext, []) if c in view.columns
-        ]
-        self._editable_cols = editable_cols
+        editable_cols = self._vm.editable_cols(view)
         self._col_names = ["id"] + list(view.columns)
-        readonly = ext in READONLY_EXTENSIONS
+        readonly = self._vm.is_readonly()
         # Layout: leading "Remove" checkbox column + "id" column +
         # one column per DataFrame column.
         n_cols = 2 + len(view.columns)
@@ -256,7 +224,7 @@ class ExtensionsExplorerTab(QWidget):
                     Qt.ItemIsEnabled | Qt.ItemIsUserCheckable,
                 )
                 cb_item.setCheckState(
-                    Qt.Checked if element_id in self._pending_removals
+                    Qt.Checked if self._vm.is_ticked(element_id)
                     else Qt.Unchecked,
                 )
                 self._table.setItem(r, 0, cb_item)
@@ -267,7 +235,7 @@ class ExtensionsExplorerTab(QWidget):
             # Data columns.
             for c, col in enumerate(view.columns):
                 value = row[col]
-                pending = self._pending_edits.get((ext, element_id), {}).get(col)
+                pending = self._vm.get_edit(element_id, col)
                 cell_value = pending if pending is not None else value
                 display = self._format_cell(cell_value)
                 cell_item = QTableWidgetItem(display)
@@ -311,7 +279,7 @@ class ExtensionsExplorerTab(QWidget):
         ext = self._current_extension()
         if not ext:
             return
-        readonly = ext in READONLY_EXTENSIONS
+        readonly = self._vm.is_readonly()
         col = item.column()
         row = item.row()
         # Remove-checkbox column.
@@ -319,37 +287,33 @@ class ExtensionsExplorerTab(QWidget):
             id_item = self._table.item(row, 1)
             if id_item is None:
                 return
-            element_id = id_item.text()
-            if item.checkState() == Qt.Checked:
-                self._pending_removals.add(element_id)
-            else:
-                self._pending_removals.discard(element_id)
+            self._vm.tick_remove(
+                id_item.text(), item.checkState() == Qt.Checked,
+            )
             return
         offset = 1 if readonly else 2
         if col < offset:
             return
         col_idx = col - offset
-        if col_idx >= len(self._current_df.columns):
+        if col_idx >= len(self._vm.current_df.columns):
             return
-        col_name = str(self._current_df.columns[col_idx])
-        if col_name not in self._editable_cols:
+        col_name = str(self._vm.current_df.columns[col_idx])
+        if col_name not in self._vm.editable_cols():
             return
         id_item = self._table.item(row, offset - 1)
         if id_item is None:
             return
         element_id = id_item.text()
-        text = item.text()
-        parsed = self._parse_for_column(col_name, text)
-        key = (ext, element_id)
-        self._pending_edits.setdefault(key, {})
-        self._pending_edits[key][col_name] = parsed
+        parsed = self._parse_for_column(col_name, item.text())
+        self._vm.add_edit(element_id, col_name, parsed)
 
     def _parse_for_column(self, col_name: str, text: str):
         """Best-effort cast for the user's input — pypowsybl wants the
         column's native dtype."""
-        if col_name not in self._current_df.columns:
+        df = self._vm.current_df
+        if col_name not in df.columns:
             return text
-        series = self._current_df[col_name]
+        series = df[col_name]
         # Use the first non-null value's type as a hint.
         sample = None
         for v in series:
@@ -374,16 +338,11 @@ class ExtensionsExplorerTab(QWidget):
         ext = self._current_extension()
         if not ext or self._network is None:
             return
-        pending = {
-            element_id: cols
-            for (e, element_id), cols in self._pending_edits.items()
-            if e == ext
-        }
-        if not pending:
+        if not self._vm.has_edits():
             self._status_lbl.setText("No pending changes.")
             self._status_lbl.setStyleSheet("color: #555;")
             return
-        df = pd.DataFrame.from_dict(pending, orient="index")
+        df = self._vm.edits_changes_df()
         try:
             update_extension(self._network, ext, df)
         except Exception as exc:
@@ -391,10 +350,9 @@ class ExtensionsExplorerTab(QWidget):
                 self, "Update failed", f"Failed to update {ext}: {exc}",
             )
             return
-        self._pending_edits = {
-            k: v for k, v in self._pending_edits.items() if k[0] != ext
-        }
-        self._status_lbl.setText(f"Applied {len(pending)} change(s).")
+        n = len(df)
+        self._vm.clear_edits()
+        self._status_lbl.setText(f"Applied {n} change(s).")
         self._status_lbl.setStyleSheet("color: #0a7e2a;")
         self._refresh_table(preserve_pending=False)
         self.extensions_changed.emit()
@@ -403,7 +361,7 @@ class ExtensionsExplorerTab(QWidget):
         ext = self._current_extension()
         if not ext or self._network is None:
             return
-        ids = sorted(self._pending_removals)
+        ids = self._vm.removals_list()
         if not ids:
             self._status_lbl.setText("Tick at least one row to remove.")
             self._status_lbl.setStyleSheet("color: #555;")
@@ -415,12 +373,9 @@ class ExtensionsExplorerTab(QWidget):
                 self, "Remove failed", f"Failed to remove {ext}: {exc}",
             )
             return
-        self._pending_removals.clear()
+        self._vm.clear_removals()
         # Drop any cached edits for the just-removed rows.
-        self._pending_edits = {
-            k: v for k, v in self._pending_edits.items()
-            if not (k[0] == ext and k[1] in ids)
-        }
+        self._vm.drop_edits_for(ids)
         self._status_lbl.setText(f"Removed {len(ids)} extension row(s).")
         self._status_lbl.setStyleSheet("color: #0a7e2a;")
         self._refresh_table(preserve_pending=False)
