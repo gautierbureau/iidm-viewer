@@ -678,9 +678,7 @@ def test_extensions_explorer_helper_uses_shared_module():
         "get_extension_df",
         "remove_extension",
         "update_extension",
-        "filter_by_id_substring",
-        "EDITABLE_EXTENSIONS",
-        "READONLY_EXTENSIONS",
+        "ExtensionsExplorerViewModel",
     ):
         assert token in src, f"NiceGUI extensions tab should reference {token}"
 
