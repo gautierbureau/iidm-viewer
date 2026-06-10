@@ -4790,6 +4790,7 @@ def _build_security_analysis():
         CONDITION_TYPES,
         CTX_TYPES,
         ELEMENT_TYPES,
+        SecurityAnalysisViewModel,
         VIOLATION_TYPES,
         action_summary,
         build_n1_contingencies,
@@ -4797,29 +4798,16 @@ def _build_security_analysis():
         get_element_ids,
         get_nominal_voltages,
         limit_reduction_summary,
-        make_action,
-        make_limit_reduction,
-        make_monitored_element,
-        make_operator_strategy,
         monitored_element_summary,
         operator_strategy_summary,
         run_security_analysis,
         summarize_security_results,
-        validate_action,
-        validate_limit_reduction,
-        validate_monitored_element,
-        validate_operator_strategy,
     )
 
-    state: dict = {
-        "results": None,
-        "contingencies": [],          # built contingency dicts
-        "element_ids": {},            # get_element_ids() result
-        "monitored": [],
-        "reductions": [],
-        "actions": [],
-        "strategies": [],
-    }
+    # Five configuration lists, results dict and element-ids cache all
+    # live on the shared view-model so the add / remove / validate /
+    # store flow matches the PySide6 + Streamlit tabs byte-for-byte.
+    vm = SecurityAnalysisViewModel()
 
     placeholder = ui.label(
         "Load a network to run a security analysis."
@@ -4923,7 +4911,7 @@ def _build_security_analysis():
         spec = ACTION_FIELDS.get(act_type.value)
         if spec is None:
             return
-        ids = state["element_ids"].get(spec["id_key"]) or []
+        ids = vm.element_ids.get(spec["id_key"]) or []
         with act_fields_row:
             with ui.row().classes("items-center w-full"):
                 for fdef in spec["fields"]:
@@ -4967,47 +4955,49 @@ def _build_security_analysis():
                         on_click=lambda _e=None, idx=i: remover(idx),
                     ).props("flat dense")
 
-    def _add_monitored() -> None:
-        errors = validate_monitored_element(
-            mon_ctx.value, mon_cids.value,
-            mon_branches.value, mon_vls.value, mon_3wt.value,
-        )
-        if errors:
-            ui.notify("; ".join(errors), type="warning")
-            return
-        state["monitored"].append(make_monitored_element(
-            mon_ctx.value, mon_cids.value,
-            mon_branches.value, mon_vls.value, mon_3wt.value,
-        ))
-        _render_entry_list(
-            mon_list, state["monitored"], monitored_element_summary,
-            lambda i: (state["monitored"].pop(i), _render_entry_list(
-                mon_list, state["monitored"], monitored_element_summary,
-                _remove_monitored)),
-        )
-
-    def _remove_monitored(i):
-        state["monitored"].pop(i)
-        _render_entry_list(mon_list, state["monitored"],
+    def _re_render_monitored() -> None:
+        _render_entry_list(mon_list, vm.monitored,
                            monitored_element_summary, _remove_monitored)
 
-    def _add_reduction() -> None:
-        errors = validate_limit_reduction(
-            float(lr_value.value or 0), lr_perm.value, lr_temp.value,
+    def _re_render_reductions() -> None:
+        _render_entry_list(lr_list, vm.reductions,
+                           limit_reduction_summary, _remove_reduction)
+
+    def _re_render_strategies() -> None:
+        _render_entry_list(strat_list, vm.strategies,
+                           operator_strategy_summary, _remove_strategy)
+
+    def _add_monitored() -> None:
+        errors = vm.add_monitored(
+            mon_ctx.value,
+            contingency_ids=mon_cids.value,
+            branch_ids=mon_branches.value,
+            voltage_level_ids=mon_vls.value,
+            three_windings_transformer_ids=mon_3wt.value,
         )
         if errors:
             ui.notify("; ".join(errors), type="warning")
             return
-        state["reductions"].append(make_limit_reduction(
-            float(lr_value.value or 0), lr_perm.value, lr_temp.value,
-        ))
-        _render_entry_list(lr_list, state["reductions"],
-                           limit_reduction_summary, _remove_reduction)
+        _re_render_monitored()
+
+    def _remove_monitored(i):
+        vm.remove_monitored(i)
+        _re_render_monitored()
+
+    def _add_reduction() -> None:
+        errors = vm.add_reduction(
+            float(lr_value.value or 0),
+            permanent=lr_perm.value,
+            temporary=lr_temp.value,
+        )
+        if errors:
+            ui.notify("; ".join(errors), type="warning")
+            return
+        _re_render_reductions()
 
     def _remove_reduction(i):
-        state["reductions"].pop(i)
-        _render_entry_list(lr_list, state["reductions"],
-                           limit_reduction_summary, _remove_reduction)
+        vm.remove_reduction(i)
+        _re_render_reductions()
 
     def _add_action() -> None:
         fields = {}
@@ -5020,56 +5010,56 @@ def _build_security_analysis():
             elif fdef["kind"] == "bool":
                 val = bool(val)
             fields[name] = val
-        existing = [a["action_id"] for a in state["actions"]]
-        errors = validate_action(act_type.value, act_id.value, fields, existing)
+        errors = vm.add_action(act_type.value, act_id.value, fields)
         if errors:
             ui.notify("; ".join(errors), type="warning")
             return
-        state["actions"].append(
-            make_action(act_type.value, act_id.value, fields),
-        )
         act_id.value = ""
         act_id.update()
         _refresh_action_dependents()
 
     def _remove_action(i):
-        removed = state["actions"].pop(i)
-        # Drop the action from any strategy that referenced it.
-        for s in state["strategies"]:
-            s["action_ids"] = [
-                a for a in s["action_ids"] if a != removed["action_id"]
-            ]
+        # Cascade: drop the removed action id from every strategy so
+        # the run helper doesn't see a dangling reference. The
+        # view-model exposes the lists by reference, so this mutates
+        # them in place.
+        if 0 <= i < len(vm.actions):
+            removed_id = vm.actions[i].get("action_id")
+            vm.remove_action(i)
+            if removed_id:
+                for s in vm.strategies:
+                    s["action_ids"] = [
+                        a for a in s["action_ids"] if a != removed_id
+                    ]
         _refresh_action_dependents()
 
     def _add_strategy() -> None:
-        existing = [s["operator_strategy_id"] for s in state["strategies"]]
-        errors = validate_operator_strategy(
-            strat_id.value, strat_actions.value, existing,
+        errors = vm.add_strategy(
+            strat_id.value,
+            strat_cid.value,
+            strat_actions.value,
+            condition_type=strat_condition.value,
+            violation_subject_ids=[],
+            violation_types=strat_vtypes.value,
         )
         if not strat_cid.value:
-            errors = errors + ["Pick a triggering contingency."]
+            errors = list(errors) + ["Pick a triggering contingency."]
         if errors:
             ui.notify("; ".join(errors), type="warning")
             return
-        state["strategies"].append(make_operator_strategy(
-            strat_id.value, strat_cid.value, strat_actions.value,
-            strat_condition.value, [], strat_vtypes.value,
-        ))
         strat_id.value = ""
         strat_id.update()
-        _render_entry_list(strat_list, state["strategies"],
-                           operator_strategy_summary, _remove_strategy)
+        _re_render_strategies()
 
     def _remove_strategy(i):
-        state["strategies"].pop(i)
-        _render_entry_list(strat_list, state["strategies"],
-                           operator_strategy_summary, _remove_strategy)
+        vm.remove_strategy(i)
+        _re_render_strategies()
 
     def _refresh_action_dependents() -> None:
         """Re-render the action list + the strategy action picker."""
-        _render_entry_list(act_list, state["actions"],
+        _render_entry_list(act_list, vm.actions,
                            action_summary, _remove_action)
-        action_ids = [a["action_id"] for a in state["actions"]]
+        action_ids = vm.action_ids()
         strat_actions.options = action_ids
         strat_actions.value = [
             a for a in (strat_actions.value or []) if a in action_ids
@@ -5093,14 +5083,14 @@ def _build_security_analysis():
     results_card.visible = False
 
     def _render_results() -> None:
-        results = state["results"]
+        results = vm.results
         if results is None:
             results_card.visible = False
             return
         results_card.visible = True
         pre = results.get("pre_status", "?")
         pre_status_lbl.set_text(f"Pre-contingency load flow: {pre}")
-        summary = summarize_security_results(results)
+        summary = vm.results_summary()
         summary_grid.options.update({
             "columnDefs": [{"field": c, "headerName": c}
                            for c in summary.columns],
@@ -5132,7 +5122,7 @@ def _build_security_analysis():
     def _sync_contingency_dependents() -> None:
         """Feed the built contingency ids into the monitored + strategy
         pickers."""
-        cids = [c["id"] for c in state["contingencies"]]
+        cids = vm.contingency_ids()
         mon_cids.options = cids
         mon_cids.value = [c for c in (mon_cids.value or []) if c in cids]
         mon_cids.update()
@@ -5159,12 +5149,12 @@ def _build_security_analysis():
         except Exception as exc:
             contingency_count_lbl.set_text(f"Build failed: {exc}")
             return
-        state["contingencies"] = contingencies
+        vm.set_contingencies(contingencies)
+        n = len(vm.contingencies)
         contingency_count_lbl.set_text(
-            f"{len(contingencies)} contingenc"
-            f"{'y' if len(contingencies) == 1 else 'ies'} ready."
+            f"{n} contingenc{'y' if n == 1 else 'ies'} ready."
         )
-        run_btn.set_enabled(bool(contingencies))
+        run_btn.set_enabled(n > 0)
         _sync_contingency_dependents()
 
     build_btn.on_click(_on_build)
@@ -5172,11 +5162,10 @@ def _build_security_analysis():
     async def _on_run() -> None:
         if _state.network is None:
             return
-        contingencies = state["contingencies"]
-        if not contingencies:
+        if not vm.contingencies:
             run_status.set_text("Build a contingency list first.")
             return
-        n = len(contingencies)
+        n = len(vm.contingencies)
         run_status.set_text(
             f"Running AC security analysis on {n} "
             f"contingenc{'y' if n == 1 else 'ies'}…"
@@ -5185,17 +5174,17 @@ def _build_security_analysis():
             results = await asyncio.to_thread(
                 lambda: run_security_analysis(
                     _state.network,
-                    contingencies,
-                    monitored_elements=state["monitored"],
-                    limit_reductions=state["reductions"],
-                    actions=state["actions"],
-                    operator_strategies=state["strategies"],
+                    vm.contingencies,
+                    monitored_elements=vm.monitored,
+                    limit_reductions=vm.reductions,
+                    actions=vm.actions,
+                    operator_strategies=vm.strategies,
                 ),
             )
         except Exception as exc:
             run_status.set_text(f"Security analysis failed: {exc}")
             return
-        state["results"] = results
+        vm.store_results(results)
         run_status.set_text(
             f"Done — {n} contingenc{'y' if n == 1 else 'ies'} analysed."
         )
@@ -5211,7 +5200,7 @@ def _build_security_analysis():
             adv_expansion.visible = False
             run_row.visible = False
             results_card.visible = False
-            state["results"] = None
+            vm.clear()
             return
         placeholder.visible = False
         config_card.visible = True
@@ -5227,24 +5216,27 @@ def _build_security_analysis():
         nominal_v_select.update()
         # Fetch element-id buckets for the advanced-config selectors.
         try:
-            ids = get_element_ids(_state.network)
+            vm.set_element_ids(get_element_ids(_state.network))
         except Exception:
-            ids = {}
-        state["element_ids"] = ids
-        mon_branches.options = list(ids.get("branches", []))
-        mon_vls.options = list(ids.get("voltage_levels", []))
-        mon_3wt.options = list(ids.get("three_windings_transformers", []))
+            vm.set_element_ids({})
+        mon_branches.options = list(vm.element_ids.get("branches", []))
+        mon_vls.options = list(vm.element_ids.get("voltage_levels", []))
+        mon_3wt.options = list(vm.element_ids.get("three_windings_transformers", []))
         for w in (mon_branches, mon_vls, mon_3wt):
             w.value = []
             w.update()
-        # Reset the per-network config state.
-        for key in ("contingencies", "monitored", "reductions",
-                    "actions", "strategies"):
-            state[key] = []
+        # Reset the per-network configuration lists + results (the
+        # element-ids cache was just refilled above, so we use
+        # ``clear`` + re-set rather than a clear after).
+        vm.contingencies.clear()
+        vm.monitored.clear()
+        vm.reductions.clear()
+        vm.actions.clear()
+        vm.strategies.clear()
+        vm.clear_results()
         contingency_count_lbl.set_text("")
         run_btn.set_enabled(False)
         run_status.set_text("")
-        state["results"] = None
         _render_results()
         _rebuild_action_fields()
         _sync_contingency_dependents()
