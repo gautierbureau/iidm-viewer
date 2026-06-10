@@ -2994,7 +2994,7 @@ def test_pmax_tab_renders_for_loaded_network(qapp, loaded_window):
     tab = loaded_window.pmax_visualization_tab
     qapp.processEvents()
     # The shared core produced rows for non-zero-reactance lines.
-    assert not tab._unfiltered.empty
+    assert not tab._vm.unfiltered_df.empty
     assert tab._summary_model.rowCount() > 0
     # Line combo is populated and the first line drove the metrics row.
     assert tab._line_combo.count() > 0
@@ -3008,7 +3008,7 @@ def test_pmax_tab_vl_toggle_narrows_lines(qapp, loaded_window):
     shared :func:`filter_by_vl` helper."""
     tab = loaded_window.pmax_visualization_tab
     qapp.processEvents()
-    if tab._unfiltered.empty:
+    if tab._vm.unfiltered_df.empty:
         return  # nothing to filter
     vl_id = loaded_window.state.selected_vl
     assert vl_id is not None
@@ -3020,10 +3020,10 @@ def test_pmax_tab_vl_toggle_narrows_lines(qapp, loaded_window):
     tab._only_vl_checkbox.setChecked(True)
     qapp.processEvents()
     assert tab._summary_model.rowCount() <= total
-    if not tab._df.empty:
+    if not tab._vm.rows_df().empty:
         assert (
-            (tab._df["voltage_level1_id"] == vl_id).any()
-            or (tab._df["voltage_level2_id"] == vl_id).any()
+            (tab._vm.rows_df()["voltage_level1_id"] == vl_id).any()
+            or (tab._vm.rows_df()["voltage_level2_id"] == vl_id).any()
         )
 
 
@@ -3038,7 +3038,7 @@ def test_pmax_tab_empty_network_shows_placeholder(qapp):
     network = NetworkProxy(run(pn.create_empty))
     tab.set_network(network)
     qapp.processEvents()
-    assert tab._df.empty
+    assert tab._vm.rows_df().empty
     assert tab._placeholder.isHidden() is False
     assert tab._summary_group.isHidden() is True
 

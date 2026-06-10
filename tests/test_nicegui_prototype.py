@@ -1214,15 +1214,17 @@ def test_pmax_visualization_tab_registered_in_main_page():
 
 def test_pmax_visualization_builder_uses_shared_core():
     """The NiceGUI builder must compose the shared compute + chart +
-    filter helpers so PySide6 + Streamlit stay in sync."""
+    view-model so PySide6 + Streamlit stay in sync. After Step 6 the
+    summary + filter calls go through ``PmaxViewModel``."""
     import inspect
     from iidm_viewer.web import app
 
     src = inspect.getsource(app._build_pmax_visualization)
     assert "compute_pmax_data" in src
     assert "build_pangle_chart" in src
-    assert "build_display_dataframe" in src
-    assert "filter_by_vl" in src
+    assert "PmaxViewModel" in src
+    assert "vm.display_df" in src
+    assert "vm.rows_df" in src
 
 
 def test_voltage_analysis_tab_registered_in_main_page():
