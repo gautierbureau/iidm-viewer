@@ -37,9 +37,8 @@ from iidm_viewer.injection_map import (
     TRANSPORT_NOMINAL_V_THRESHOLD,
     _METRIC_OPTIONS,
     _VIEW_OPTIONS,
+    InjectionMapViewModel,
     _extract_injection_data,
-    _filter_transport,
-    _suggest_full_scale,
     build_injection_map_html,
     injection_map_caption,
     metric_unit,
@@ -53,12 +52,7 @@ class InjectionMapTab(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._network: Optional[NetworkProxy] = None
-        # Worker-fetched data: ``{"records": [...], "has_lf_p": bool,
-        # "has_lf_q": bool}`` or ``None`` for "no substationPosition".
-        self._data: Optional[dict] = None
-        # Per-metric full-scale memory so flipping P↔Q restores the
-        # value the user last set for the new metric.
-        self._scale_by_metric: dict[str, float] = {}
+        self._vm = InjectionMapViewModel()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -134,28 +128,28 @@ class InjectionMapTab(QWidget):
     # ------------------------------------------------------------------
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
-        # Wipe the per-metric scale memory whenever the network changes —
-        # the network's typical injection magnitudes change with it.
-        self._scale_by_metric.clear()
+        # The network's typical injection magnitudes change with it.
+        self._vm.clear()
         self.refresh()
 
     def refresh(self) -> None:
         """Refetch + redraw."""
         if self._network is None:
-            self._data = None
+            self._vm.clear()
             self._status_lbl.setText(
                 "Load a network to see the injection map.",
             )
             self._set_map_visible(False)
             return
         try:
-            self._data = _extract_injection_data(self._network)
+            data = _extract_injection_data(self._network)
         except Exception as exc:
-            self._data = None
+            self._vm.clear()
             self._status_lbl.setText(f"Injection map failed: {exc}")
             self._set_map_visible(False)
             return
-        if self._data is None:
+        self._vm.set_data(data)
+        if self._vm.data is None:
             self._status_lbl.setText(
                 "No geographical data available. The network needs a "
                 "'substationPosition' extension with latitude/longitude "
@@ -163,7 +157,7 @@ class InjectionMapTab(QWidget):
             )
             self._set_map_visible(False)
             return
-        records = _filter_transport(self._data.get("records") or [])
+        records = self._vm.records(transport_only=True)
         if not records:
             self._status_lbl.setText(
                 f"No substations with a voltage level at or above "
@@ -194,15 +188,11 @@ class InjectionMapTab(QWidget):
             self._lf_note.setVisible(False)
 
     def _seed_default_scale(self, records) -> None:
-        """Pre-fill the scale spin from
-        :func:`_suggest_full_scale` if the user hasn't touched it yet
-        for the active metric."""
+        """Pre-fill the scale spin from the view-model's per-metric
+        memory (defaults to the suggested full-scale)."""
         metric = self._current_metric()
-        if metric in self._scale_by_metric:
-            target = self._scale_by_metric[metric]
-        else:
-            target = float(_suggest_full_scale(records, metric))
-            self._scale_by_metric[metric] = target
+        target = self._vm.get_scale(metric, records=records)
+        self._vm.set_scale(metric, target)
         # Update the spin without triggering a re-render mid-refresh.
         self._scale_spin.blockSignals(True)
         self._scale_spin.setValue(target)
@@ -210,15 +200,11 @@ class InjectionMapTab(QWidget):
         self._scale_label.setText(f"Full-scale ± {metric_unit(metric)}:")
 
     def _update_lf_note(self) -> None:
-        if self._data is None:
+        if self._vm.data is None:
             self._lf_note.setVisible(False)
             return
         metric = self._current_metric()
-        has_lf = (
-            self._data.get("has_lf_p") if metric == "P"
-            else self._data.get("has_lf_q")
-        )
-        if has_lf:
+        if self._vm.has_lf(metric):
             self._lf_note.setVisible(False)
             return
         fallback = "p0" if metric == "P" else "q0"
@@ -230,16 +216,15 @@ class InjectionMapTab(QWidget):
         self._lf_note.setVisible(True)
 
     def _render_map(self) -> None:
-        if self._data is None:
+        if self._vm.data is None:
             return
         metric = self._current_metric()
         mode = self._current_mode()
         full_scale = float(self._scale_spin.value())
         # Persist the user's pick so flipping metrics restores it.
-        self._scale_by_metric[metric] = full_scale
-        records = self._data.get("records") or []
+        self._vm.set_scale(metric, full_scale)
         html, transport = build_injection_map_html(
-            records,
+            self._vm.records(),
             metric=metric, mode=mode, full_scale=full_scale,
         )
         self._update_lf_note()
@@ -256,10 +241,9 @@ class InjectionMapTab(QWidget):
     def _on_metric_changed(self, *_args) -> None:
         # Flipping P↔Q changes the unit label + restores the per-metric
         # scale memory.
-        if self._data is None:
+        if self._vm.data is None:
             return
-        records = _filter_transport(self._data.get("records") or [])
-        self._seed_default_scale(records)
+        self._seed_default_scale(self._vm.records(transport_only=True))
         self._render_map()
 
     def _on_view_changed(self, *_args) -> None:

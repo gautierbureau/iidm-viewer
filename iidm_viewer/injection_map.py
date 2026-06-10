@@ -518,10 +518,10 @@ class InjectionMapViewModel:
         self.scale_by_metric.clear()
 
     def set_data(self, data: Optional[dict]) -> None:
-        """Store a freshly fetched bundle. Clears the per-metric scale
-        memory because the underlying distribution changed."""
+        """Store a freshly fetched bundle. The per-metric scale memory
+        is preserved — callers wanting a hard reset (e.g. on network
+        swap) should :meth:`clear` first."""
         self.data = data
-        self.scale_by_metric.clear()
 
     # ------------------------------------------------------------------
     # Read accessors
