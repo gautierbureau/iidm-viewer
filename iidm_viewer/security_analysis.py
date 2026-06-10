@@ -25,6 +25,7 @@ Public API:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from itertools import combinations
 from typing import Optional
 
@@ -909,6 +910,203 @@ def summarize_security_results(results: dict) -> pd.DataFrame:
     return pd.DataFrame(
         rows, columns=["contingency_id", "status", "violations"],
     )
+
+
+# ---------------------------------------------------------------------------
+# View-model — host-agnostic state container for the Security Analysis tab
+# ---------------------------------------------------------------------------
+@dataclass
+class SecurityAnalysisViewModel:
+    """Mutable state container for the Security Analysis configuration.
+
+    All three hosts (Streamlit, PySide6, NiceGUI) maintain the same
+    five lists + results + element_ids; this dataclass captures them
+    in one shape and exposes the add / remove / clear flows so the
+    state machine lives in one place. Each host wires its widgets to
+    these methods and reads back ``results`` to render the Results
+    sub-tab.
+
+    The dict shapes inside the lists come from :func:`make_monitored_element`,
+    :func:`make_limit_reduction`, :func:`make_action` and
+    :func:`make_operator_strategy`, so any consumer of the run helpers
+    (Streamlit ``run_security_analysis`` callers, the prototype tabs)
+    can pass the lists straight through.
+
+    The add helpers (``add_monitored``, ``add_reduction``, ``add_action``,
+    ``add_strategy``) return a list of validation error strings; an
+    empty list signals "appended". Hosts surface the list in their
+    native error widget. ``set_contingencies`` and ``set_strategies``
+    accept a pre-built dict (so the auto-builders and manual UIs can
+    feed in already-validated entries) and replace / append as
+    requested.
+    """
+
+    contingencies: list[dict] = field(default_factory=list)
+    monitored: list[dict] = field(default_factory=list)
+    reductions: list[dict] = field(default_factory=list)
+    actions: list[dict] = field(default_factory=list)
+    strategies: list[dict] = field(default_factory=list)
+    results: Optional[dict] = None
+    element_ids: dict[str, list[str]] = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+    def clear(self) -> None:
+        """Reset every list + results — call on network swap / reduction."""
+        self.contingencies.clear()
+        self.monitored.clear()
+        self.reductions.clear()
+        self.actions.clear()
+        self.strategies.clear()
+        self.results = None
+        self.element_ids.clear()
+
+    def clear_results(self) -> None:
+        """Reset only the results (e.g. when the user reconfigures
+        before re-running)."""
+        self.results = None
+
+    # ------------------------------------------------------------------
+    # Element-id cache (the host fills it from ``get_element_ids``)
+    # ------------------------------------------------------------------
+    def set_element_ids(self, ids: dict[str, list[str]]) -> None:
+        self.element_ids = dict(ids or {})
+
+    # ------------------------------------------------------------------
+    # Contingencies
+    # ------------------------------------------------------------------
+    def set_contingencies(self, contingencies) -> None:
+        """Replace the contingency list — used by the auto N-1/N-2
+        builders which always emit the whole set."""
+        self.contingencies = list(contingencies or [])
+
+    def append_contingency(self, contingency: dict) -> None:
+        """Append a single manual contingency to the list."""
+        self.contingencies.append(dict(contingency))
+
+    def remove_contingency(self, index: int) -> None:
+        if 0 <= index < len(self.contingencies):
+            self.contingencies.pop(index)
+
+    def contingency_ids(self) -> list[str]:
+        return [c.get("id", "") for c in self.contingencies]
+
+    # ------------------------------------------------------------------
+    # Monitored elements
+    # ------------------------------------------------------------------
+    def add_monitored(
+        self,
+        ctx_type: str,
+        contingency_ids=None,
+        branch_ids=None,
+        voltage_level_ids=None,
+        three_windings_transformer_ids=None,
+    ) -> list[str]:
+        errors = validate_monitored_element(
+            ctx_type, contingency_ids, branch_ids,
+            voltage_level_ids, three_windings_transformer_ids,
+        )
+        if errors:
+            return errors
+        self.monitored.append(make_monitored_element(
+            ctx_type,
+            contingency_ids=contingency_ids,
+            branch_ids=branch_ids,
+            voltage_level_ids=voltage_level_ids,
+            three_windings_transformer_ids=three_windings_transformer_ids,
+        ))
+        return []
+
+    def remove_monitored(self, index: int) -> None:
+        if 0 <= index < len(self.monitored):
+            self.monitored.pop(index)
+
+    # ------------------------------------------------------------------
+    # Limit reductions
+    # ------------------------------------------------------------------
+    def add_reduction(
+        self, value: float, permanent: bool, temporary: bool, **kwargs,
+    ) -> list[str]:
+        errors = validate_limit_reduction(value, permanent, temporary)
+        if errors:
+            return errors
+        self.reductions.append(
+            make_limit_reduction(value, permanent, temporary, **kwargs)
+        )
+        return []
+
+    def remove_reduction(self, index: int) -> None:
+        if 0 <= index < len(self.reductions):
+            self.reductions.pop(index)
+
+    # ------------------------------------------------------------------
+    # Remedial actions
+    # ------------------------------------------------------------------
+    def add_action(
+        self, action_type: str, action_id: str, fields: dict,
+    ) -> list[str]:
+        existing = [a.get("action_id", "") for a in self.actions]
+        errors = validate_action(action_type, action_id, fields, existing)
+        if errors:
+            return errors
+        self.actions.append(make_action(action_type, action_id, fields))
+        return []
+
+    def remove_action(self, index: int) -> None:
+        if 0 <= index < len(self.actions):
+            self.actions.pop(index)
+
+    def action_ids(self) -> list[str]:
+        return [a.get("action_id", "") for a in self.actions]
+
+    # ------------------------------------------------------------------
+    # Operator strategies
+    # ------------------------------------------------------------------
+    def add_strategy(
+        self,
+        strategy_id: str,
+        contingency_id: str,
+        action_ids,
+        condition_type: str = "TRUE_CONDITION",
+        violation_subject_ids=None,
+        violation_types=None,
+    ) -> list[str]:
+        existing = [s.get("operator_strategy_id", "") for s in self.strategies]
+        errors = validate_operator_strategy(strategy_id, action_ids, existing)
+        if errors:
+            return errors
+        self.strategies.append(make_operator_strategy(
+            strategy_id, contingency_id, action_ids,
+            condition_type=condition_type,
+            violation_subject_ids=violation_subject_ids,
+            violation_types=violation_types,
+        ))
+        return []
+
+    def remove_strategy(self, index: int) -> None:
+        if 0 <= index < len(self.strategies):
+            self.strategies.pop(index)
+
+    # ------------------------------------------------------------------
+    # Result handling
+    # ------------------------------------------------------------------
+    def store_results(self, results: dict) -> None:
+        """Store the dict returned by :func:`run_security_analysis`."""
+        self.results = results
+
+    def has_results(self) -> bool:
+        return bool(self.results)
+
+    def results_summary(self) -> pd.DataFrame:
+        """Pure reduction over ``self.results`` returning the
+        ``contingency_id`` / ``status`` / ``violations`` table every
+        host's Results sub-tab renders. Empty when no results."""
+        if not self.results:
+            return pd.DataFrame(
+                columns=["contingency_id", "status", "violations"],
+            )
+        return summarize_security_results(self.results)
 
 
 # ---------------------------------------------------------------------------

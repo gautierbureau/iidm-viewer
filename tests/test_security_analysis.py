@@ -1632,3 +1632,235 @@ def test_run_security_analysis_threads_advanced_config(xiidm_upload):
     assert cid in results["post"]
     # The operator strategy produced a result row.
     assert (cid + "_strat") in results["operator_strategies"]
+
+
+# ---------------------------------------------------------------------------
+# SecurityAnalysisViewModel
+# ---------------------------------------------------------------------------
+
+
+def test_view_model_defaults_are_empty():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    assert vm.contingencies == []
+    assert vm.monitored == []
+    assert vm.reductions == []
+    assert vm.actions == []
+    assert vm.strategies == []
+    assert vm.element_ids == {}
+    assert vm.results is None
+    assert vm.has_results() is False
+    assert vm.results_summary().empty
+
+
+def test_view_model_clear_resets_everything():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    vm.set_contingencies([{"id": "c1", "element_ids": ["L1"]}])
+    vm.add_monitored("ALL", branch_ids=["L1"])
+    vm.add_reduction(0.9, permanent=True, temporary=False)
+    vm.add_action("SWITCH", "a1", {"switch_id": "S1", "open": True})
+    vm.add_strategy("st1", "c1", ["a1"])
+    vm.set_element_ids({"lines": ["L1"]})
+    vm.store_results({"pre_status": "CONVERGED", "post": {}, "operator_strategies": {}})
+
+    vm.clear()
+    assert vm.contingencies == []
+    assert vm.monitored == []
+    assert vm.reductions == []
+    assert vm.actions == []
+    assert vm.strategies == []
+    assert vm.element_ids == {}
+    assert vm.results is None
+
+
+def test_view_model_clear_results_only():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    vm.store_results({"pre_status": "CONVERGED", "post": {}, "operator_strategies": {}})
+    vm.append_contingency({"id": "c1", "element_ids": ["L1"]})
+
+    vm.clear_results()
+    assert vm.results is None
+    assert vm.has_results() is False
+    # Contingencies survived — only the results slot was reset.
+    assert len(vm.contingencies) == 1
+
+
+# --- Contingencies ---------------------------------------------------------
+
+
+def test_view_model_set_contingencies_replaces_whole_list():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    vm.set_contingencies([{"id": "c1", "element_ids": ["L1"]}])
+    vm.set_contingencies([{"id": "c2", "element_ids": ["L2"]}])
+    assert vm.contingency_ids() == ["c2"]
+
+
+def test_view_model_append_contingency_and_remove():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    vm.append_contingency({"id": "c1", "element_ids": ["L1"]})
+    vm.append_contingency({"id": "c2", "element_ids": ["L2"]})
+    assert vm.contingency_ids() == ["c1", "c2"]
+
+    vm.remove_contingency(0)
+    assert vm.contingency_ids() == ["c2"]
+    # Out-of-range is a silent no-op.
+    vm.remove_contingency(99)
+    assert vm.contingency_ids() == ["c2"]
+
+
+# --- Monitored elements ----------------------------------------------------
+
+
+def test_view_model_add_monitored_validates_and_returns_errors():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    errs = vm.add_monitored("ALL")
+    assert errs and "branch" in errs[0].lower()
+    assert vm.monitored == []
+
+
+def test_view_model_add_monitored_appends_on_success():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    errs = vm.add_monitored("ALL", branch_ids=["L1"])
+    assert errs == []
+    assert len(vm.monitored) == 1
+    assert vm.monitored[0]["branch_ids"] == ["L1"]
+
+
+def test_view_model_remove_monitored():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    vm.add_monitored("ALL", branch_ids=["L1"])
+    vm.add_monitored("ALL", branch_ids=["L2"])
+    vm.remove_monitored(0)
+    assert len(vm.monitored) == 1
+    assert vm.monitored[0]["branch_ids"] == ["L2"]
+
+
+# --- Limit reductions ------------------------------------------------------
+
+
+def test_view_model_add_reduction_validates():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    # neither permanent nor temporary
+    errs = vm.add_reduction(0.5, permanent=False, temporary=False)
+    assert errs
+    assert vm.reductions == []
+
+    # out-of-range value
+    errs2 = vm.add_reduction(1.5, permanent=True, temporary=False)
+    assert errs2
+    assert vm.reductions == []
+
+
+def test_view_model_add_reduction_passes_optional_fields_through():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    errs = vm.add_reduction(
+        0.8, permanent=False, temporary=True,
+        min_temporary_duration=10, country="fr",
+    )
+    assert errs == []
+    entry = vm.reductions[0]
+    assert entry["min_temporary_duration"] == 10
+    assert entry["country"] == "FR"
+
+
+# --- Actions ---------------------------------------------------------------
+
+
+def test_view_model_add_action_rejects_duplicate_id():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    errs = vm.add_action("SWITCH", "a1", {"switch_id": "S1", "open": True})
+    assert errs == []
+    errs2 = vm.add_action("SWITCH", "a1", {"switch_id": "S2", "open": True})
+    assert errs2 and "already exists" in errs2[0]
+    # Only the first one is stored.
+    assert vm.action_ids() == ["a1"]
+
+
+def test_view_model_action_ids_helper():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    vm.add_action("SWITCH", "a1", {"switch_id": "S1", "open": True})
+    vm.add_action("SWITCH", "a2", {"switch_id": "S2", "open": False})
+    assert vm.action_ids() == ["a1", "a2"]
+    vm.remove_action(0)
+    assert vm.action_ids() == ["a2"]
+
+
+# --- Operator strategies ---------------------------------------------------
+
+
+def test_view_model_add_strategy_validates():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    errs = vm.add_strategy("", "c1", ["a1"])
+    assert errs and "Strategy ID" in errs[0]
+    assert vm.strategies == []
+
+
+def test_view_model_add_strategy_rejects_duplicate_id():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    vm.add_strategy("s1", "c1", ["a1"])
+    errs = vm.add_strategy("s1", "c2", ["a2"])
+    assert errs and "already exists" in errs[0]
+    assert len(vm.strategies) == 1
+
+
+def test_view_model_remove_strategy():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    vm.add_strategy("s1", "c1", ["a1"])
+    vm.add_strategy("s2", "c2", ["a2"])
+    vm.remove_strategy(0)
+    assert len(vm.strategies) == 1
+    assert vm.strategies[0]["operator_strategy_id"] == "s2"
+
+
+# --- Results ---------------------------------------------------------------
+
+
+def test_view_model_store_and_summarize_results():
+    from iidm_viewer.security_analysis import SecurityAnalysisViewModel
+
+    vm = SecurityAnalysisViewModel()
+    fake_results = {
+        "pre_status": "CONVERGED",
+        "post": {
+            "ctg1": {"status": "CONVERGED", "limit_violations": pd.DataFrame()},
+            "ctg2": {"status": "CONVERGED", "limit_violations": pd.DataFrame({"x": [1, 2]})},
+        },
+        "operator_strategies": {},
+    }
+    vm.store_results(fake_results)
+    assert vm.has_results() is True
+
+    summary = vm.results_summary()
+    assert list(summary.columns) == ["contingency_id", "status", "violations"]
+    by_id = {r["contingency_id"]: r for r in summary.to_dict(orient="records")}
+    assert by_id["ctg1"]["violations"] == 0
+    assert by_id["ctg2"]["violations"] == 2
