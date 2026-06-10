@@ -25,6 +25,7 @@ Public API:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Optional
 
 import pandas as pd
@@ -342,3 +343,89 @@ def max_fault_power_mva(summary_df: pd.DataFrame) -> float:
         return 0.0
     col = summary_df["Fault power (MVA)"].dropna()
     return float(col.max()) if not col.empty else 0.0
+
+
+# ---------------------------------------------------------------------------
+# View-model — host-agnostic state container for the Short Circuit tab
+# ---------------------------------------------------------------------------
+@dataclass
+class ShortCircuitViewModel:
+    """Mutable state container for the Short Circuit Analysis tab.
+
+    All three hosts (Streamlit, PySide6, NiceGUI) carry the same two
+    pieces of state — the bus-fault list and the last run's result
+    dict; this dataclass captures both and exposes the derived
+    summary / metric helpers so the per-host code reads off the
+    view-model rather than re-deriving them from the raw results.
+
+    Like :class:`SecurityAnalysisViewModel`, hosts hold one instance
+    per session and route every state change (set_faults,
+    store_results, clear) through it so the cross-host behaviour
+    stays in lockstep.
+    """
+
+    faults: list[dict] = field(default_factory=list)
+    results: Optional[dict] = None
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+    def clear(self) -> None:
+        """Reset faults + results — call on network swap / reduction."""
+        self.faults.clear()
+        self.results = None
+
+    def clear_results(self) -> None:
+        """Reset only the results (e.g. when the user reconfigures
+        before re-running)."""
+        self.results = None
+
+    # ------------------------------------------------------------------
+    # Faults
+    # ------------------------------------------------------------------
+    def set_faults(self, faults) -> None:
+        """Replace the fault list — the build helpers always emit the
+        whole list, so a setter is what every host needs."""
+        self.faults = list(faults or [])
+
+    def fault_ids(self) -> list[str]:
+        return [f.get("id", "") for f in self.faults]
+
+    # ------------------------------------------------------------------
+    # Results
+    # ------------------------------------------------------------------
+    def store_results(self, results: dict) -> None:
+        """Store the dict returned by :func:`run_short_circuit_analysis`."""
+        self.results = results
+
+    def has_results(self) -> bool:
+        return bool(self.results)
+
+    # ------------------------------------------------------------------
+    # Derived helpers — wrap the existing summary / metric functions
+    # so hosts don't reach for them directly.
+    # ------------------------------------------------------------------
+    def summary_df(self) -> pd.DataFrame:
+        """One row per fault, shaped by :data:`SUMMARY_COLUMNS`. Empty
+        when no results, with the canonical schema preserved so
+        downstream filters / table widgets stay safe."""
+        if not self.results:
+            return pd.DataFrame(columns=SUMMARY_COLUMNS)
+        return build_summary_dataframe(self.results)
+
+    def failure_count(self) -> int:
+        return count_failures(self.summary_df())
+
+    def with_violations_count(self) -> int:
+        return count_with_violations(self.summary_df())
+
+    def max_fault_power_mva(self) -> float:
+        return max_fault_power_mva(self.summary_df())
+
+    def fault_options(self) -> list[str]:
+        """``Fault`` column from the summary — what the host's
+        per-fault drill-down combo populates from."""
+        df = self.summary_df()
+        if df.empty:
+            return []
+        return list(df["Fault"].astype(str))

@@ -387,3 +387,118 @@ def test_render_config_tab_run_button_triggers_analysis():
         mock_st.spinner.return_value = cm
         _render_config_tab(net)
     assert mock_st.session_state.get("_sc_results") == sc_results
+
+
+# ---------------------------------------------------------------------------
+# ShortCircuitViewModel
+# ---------------------------------------------------------------------------
+
+
+def test_sc_view_model_defaults_are_empty():
+    from iidm_viewer.short_circuit_analysis import ShortCircuitViewModel
+
+    vm = ShortCircuitViewModel()
+    assert vm.faults == []
+    assert vm.results is None
+    assert vm.has_results() is False
+    assert vm.summary_df().empty
+    assert vm.failure_count() == 0
+    assert vm.with_violations_count() == 0
+    assert vm.max_fault_power_mva() == 0.0
+    assert vm.fault_options() == []
+
+
+def test_sc_view_model_clear_resets_everything():
+    from iidm_viewer.short_circuit_analysis import ShortCircuitViewModel
+
+    vm = ShortCircuitViewModel()
+    vm.set_faults([{"id": "SC_B1", "element_id": "B1", "fault_type": "THREE_PHASE"}])
+    vm.store_results({"fault_results": {}, "faults": []})
+    vm.clear()
+    assert vm.faults == []
+    assert vm.results is None
+    assert vm.has_results() is False
+
+
+def test_sc_view_model_clear_results_keeps_faults():
+    from iidm_viewer.short_circuit_analysis import ShortCircuitViewModel
+
+    vm = ShortCircuitViewModel()
+    vm.set_faults([{"id": "SC_B1", "element_id": "B1", "fault_type": "THREE_PHASE"}])
+    vm.store_results({"fault_results": {}, "faults": []})
+    vm.clear_results()
+    assert vm.faults  # untouched
+    assert vm.results is None
+
+
+def test_sc_view_model_set_faults_replaces_whole_list():
+    from iidm_viewer.short_circuit_analysis import ShortCircuitViewModel
+
+    vm = ShortCircuitViewModel()
+    vm.set_faults([{"id": "SC_B1", "element_id": "B1", "fault_type": "THREE_PHASE"}])
+    vm.set_faults([{"id": "SC_B2", "element_id": "B2", "fault_type": "THREE_PHASE"}])
+    assert vm.fault_ids() == ["SC_B2"]
+
+
+def test_sc_view_model_set_faults_handles_none():
+    from iidm_viewer.short_circuit_analysis import ShortCircuitViewModel
+
+    vm = ShortCircuitViewModel()
+    vm.set_faults(None)
+    assert vm.faults == []
+
+
+def test_sc_view_model_summary_and_metrics():
+    """The derived helpers wrap the existing summary / metric core
+    functions — same outputs from the view-model and the bare core."""
+    import pandas as pd
+    from iidm_viewer.short_circuit_analysis import (
+        ShortCircuitViewModel,
+        build_summary_dataframe,
+        count_failures,
+        count_with_violations,
+        max_fault_power_mva,
+    )
+
+    fake = {
+        "fault_results": {
+            "SC_B1": {
+                "status": "CONVERGED",
+                "short_circuit_power_mva": 1500.0,
+                "current_kA": 2.165,
+                "feeder_results": pd.DataFrame(),
+                "limit_violations": pd.DataFrame({
+                    "subject_id": ["B1"],
+                    "value": [15000.0],
+                }),
+            },
+            "SC_B2": {
+                "status": "FAILED",
+                "short_circuit_power_mva": None,
+                "current_kA": None,
+                "feeder_results": pd.DataFrame(),
+                "limit_violations": pd.DataFrame(),
+            },
+        },
+        "faults": [
+            {"id": "SC_B1", "element_id": "B1", "fault_type": "THREE_PHASE"},
+            {"id": "SC_B2", "element_id": "B2", "fault_type": "THREE_PHASE"},
+        ],
+    }
+
+    vm = ShortCircuitViewModel()
+    vm.store_results(fake)
+    assert vm.has_results() is True
+
+    # View-model summary matches the bare core helper.
+    pd.testing.assert_frame_equal(
+        vm.summary_df(), build_summary_dataframe(fake),
+    )
+
+    bare = build_summary_dataframe(fake)
+    assert vm.failure_count() == count_failures(bare)
+    assert vm.with_violations_count() == count_with_violations(bare)
+    assert vm.max_fault_power_mva() == max_fault_power_mva(bare)
+
+    # Fault drill-down options come from the summary's Fault column.
+    assert vm.fault_options() == ["SC_B1", "SC_B2"]
