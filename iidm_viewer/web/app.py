@@ -102,6 +102,7 @@ from iidm_viewer.data_view import (
     VL_FILTERABLE,
     apply_and_log_bulk_disconnect,
     apply_and_log_bulk_edit,
+    build_data_explorer_view_model,
     dataframe_to_csv,
     delete_and_log_elements,
     filter_by_voltage_level,
@@ -3416,8 +3417,32 @@ def _build_data_explorer(on_topology_changed=None):
             vl_filter.visible = False
             current_df["df"] = None
             return
+        # Filter-by-selected-VL: only meaningful when applicable. The
+        # VL toggle's visibility is independent of the view-model
+        # (it's a host-side widget affordance), so compute it here.
+        vl_applicable = (
+            label in VL_FILTERABLE
+            and _state.selected_vl is not None
+        )
+        vl_filter.visible = vl_applicable
+        if vl_applicable:
+            vl_filter.text = f"Filter by VL: {_state.selected_vl}"
+        elif vl_filter.value:
+            # Switched to a non-VL-filterable component; auto-uncheck.
+            vl_filter.value = False
+
+        # One shared call assembles the filter chain + editable / removable
+        # derivation. NiceGUI doesn't apply structured per-column filters
+        # in Python (ag-Grid handles client-side column filtering), so
+        # ``filter_specs`` is omitted; the host adds an id-substring
+        # filter via ag-Grid too.
         try:
-            df_full = get_enriched_dataframe(_state.network, label)
+            vm = build_data_explorer_view_model(
+                _state.network,
+                label,
+                selected_vl=_state.selected_vl,
+                filter_by_vl=(vl_applicable and vl_filter.value),
+            )
         except Exception as exc:
             grid.options.update({
                 "columnDefs": [], "rowData": [],
@@ -3428,24 +3453,9 @@ def _build_data_explorer(on_topology_changed=None):
             summary.set_text(f"{label}: failed — {exc}")
             bulk_row.set_visibility(False)
             return
-        df = reorder_columns(df_full, label)
-        original_rows = df.shape[0]
-
-        # Filter-by-selected-VL: only meaningful when applicable.
-        vl_applicable = (
-            label in VL_FILTERABLE
-            and _state.selected_vl is not None
-        )
-        vl_filter.visible = vl_applicable
-        if vl_applicable:
-            vl_filter.text = f"Filter by VL: {_state.selected_vl}"
-            if vl_filter.value:
-                df = filter_by_voltage_level(df, _state.selected_vl)
-        elif vl_filter.value:
-            # Switched to a non-VL-filterable component; auto-uncheck.
-            vl_filter.value = False
-
-        cols = [c for c in editable_attributes(label) if c in df.columns]
+        df = vm.rows_df
+        original_rows = vm.total_count
+        cols = list(vm.editable_cols)
         # ``FILTERS`` whitelist narrows ag-Grid's per-column filter
         # affordance to the same set Streamlit's expander offers.
         filterable_cols = [c for c in FILTERS.get(label, []) if c in df.columns]
@@ -3488,7 +3498,9 @@ def _build_data_explorer(on_topology_changed=None):
         _refresh_create_secondary_voltage_control_panel(svc_create_state, label)
         _refresh_create_extension_panel(extension_create_state, label)
         is_disconnectable = label in DISCONNECTABLE_COMPONENTS
-        is_removable = label in REMOVABLE_COMPONENTS
+        # ``is_removable`` comes from the view-model so PySide6 + NiceGUI
+        # share one removability source of truth.
+        is_removable = vm.is_removable
         bulk_row.set_visibility(bool(cols) or is_disconnectable or is_removable)
         # When the component isn't editable, hide the edit-only inputs
         # so the row reads cleanly as just "Disconnect" / "Delete".
