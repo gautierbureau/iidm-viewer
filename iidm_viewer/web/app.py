@@ -6689,22 +6689,14 @@ def _build_injection_map():
         TRANSPORT_NOMINAL_V_THRESHOLD,
         _METRIC_OPTIONS,
         _VIEW_OPTIONS,
+        InjectionMapViewModel,
         _extract_injection_data,
-        _filter_transport,
-        _suggest_full_scale,
         build_injection_map_html,
         injection_map_caption,
         metric_unit,
     )
 
-    state: dict = {
-        # Worker-fetched bundle: ``{"records": [...], "has_lf_p": bool,
-        # "has_lf_q": bool}`` or ``None`` for "no substationPosition".
-        "data": None,
-        # Per-metric full-scale memory so flipping P↔Q restores the
-        # value the user last set for the new metric.
-        "scale_by_metric": {},
-    }
+    vm = InjectionMapViewModel()
 
     ui.label(
         "Net active or reactive power per substation. "
@@ -6755,15 +6747,11 @@ def _build_injection_map():
         caption_lbl.set_text("")
 
     def _update_lf_note() -> None:
-        data = state["data"]
-        if data is None:
+        if vm.data is None:
             lf_note_lbl.visible = False
             return
         metric = _current_metric()
-        has_lf = (
-            data.get("has_lf_p") if metric == "P" else data.get("has_lf_q")
-        )
-        if has_lf:
+        if vm.has_lf(metric):
             lf_note_lbl.visible = False
             return
         fallback = "p0" if metric == "P" else "q0"
@@ -6776,29 +6764,23 @@ def _build_injection_map():
 
     def _seed_default_scale(records) -> None:
         metric = _current_metric()
-        scales = state["scale_by_metric"]
-        if metric in scales:
-            target = scales[metric]
-        else:
-            target = float(_suggest_full_scale(records, metric))
-            scales[metric] = target
+        target = vm.get_scale(metric, records=records)
+        vm.set_scale(metric, target)
         scale_label.set_text(f"Full-scale ± {metric_unit(metric)}:")
         scale_input.value = target
         scale_input.update()
 
     def _render_map() -> None:
-        data = state["data"]
-        if data is None:
+        if vm.data is None:
             return
         metric = _current_metric()
         try:
             full_scale = float(scale_input.value)
         except (TypeError, ValueError):
             full_scale = 500.0
-        state["scale_by_metric"][metric] = full_scale
-        records = data.get("records") or []
+        vm.set_scale(metric, full_scale)
         html_doc, transport = build_injection_map_html(
-            records,
+            vm.records(),
             metric=metric,
             mode=_current_mode(),
             full_scale=full_scale,
@@ -6823,11 +6805,9 @@ def _build_injection_map():
         caption_lbl.set_text(injection_map_caption(transport, metric))
 
     def _on_metric_changed(_e=None) -> None:
-        data = state["data"]
-        if data is None:
+        if vm.data is None:
             return
-        records = _filter_transport(data.get("records") or [])
-        _seed_default_scale(records)
+        _seed_default_scale(vm.records(transport_only=True))
         _render_map()
 
     metric_select.on("update:model-value", _on_metric_changed)
@@ -6836,8 +6816,7 @@ def _build_injection_map():
 
     async def refresh() -> None:
         if _state.network is None:
-            state["data"] = None
-            state["scale_by_metric"] = {}
+            vm.clear()
             _set_unavailable("Load a network to see the injection map.")
             return
         try:
@@ -6845,20 +6824,20 @@ def _build_injection_map():
                 _extract_injection_data, _state.network,
             )
         except Exception as exc:
-            state["data"] = None
+            vm.clear()
             _set_unavailable(f"Injection map failed: {exc}")
             return
         # Network swap → forget the previous network's per-metric scales.
-        state["scale_by_metric"] = {}
-        state["data"] = data
-        if data is None:
+        vm.clear()
+        vm.set_data(data)
+        if vm.data is None:
             _set_unavailable(
                 "No geographical data available. The network needs a "
                 "'substationPosition' extension with latitude/longitude "
                 "coordinates."
             )
             return
-        records = _filter_transport(data.get("records") or [])
+        records = vm.records(transport_only=True)
         if not records:
             _set_unavailable(
                 f"No substations with a voltage level at or above "
