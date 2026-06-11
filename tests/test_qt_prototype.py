@@ -1796,6 +1796,112 @@ def test_app_state_emits_signal_only_on_change(qapp):
     assert seen == ["VL_A", "VL_B", ""]
 
 
+def test_qt_appstate_nk_variant_lifecycle(qapp):
+    """Build → Run LF → Clear lifecycle on the Qt AppState. Each
+    transition must fire the right signal exactly once."""
+    import pypowsybl.network as pn
+    from iidm_viewer.cache_backend import (
+        LF_GEN, NK_CONTINGENCY, NK_LF_STATUS, NK_VARIANT_ID as _NK_KEY,
+    )
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.state import AppState
+    from iidm_viewer.variants import (
+        INITIAL_VARIANT_ID, NK_VARIANT_ID, list_variants,
+    )
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+
+    variant_seen: list = []
+    lf_seen: list = []
+    state.nk_variant_changed.connect(lambda v: variant_seen.append(v))
+    state.nk_loadflow_completed.connect(lambda r: lf_seen.append(r))
+
+    # Build: variant exists, dock keys set, signal fired once.
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+    assert state.nk_variant_id == NK_VARIANT_ID
+    assert state.nk_contingency == {"id": "x", "element_ids": ["L1-2-1"]}
+    assert state.nk_lf_status == "NEVER"
+    assert NK_VARIANT_ID in list_variants(state.network)
+    assert variant_seen == [NK_VARIANT_ID]
+
+    # Run LF: status flips, counter bumps on the N-K slot only.
+    result = state.run_nk_loadflow({}, {})
+    qapp.processEvents()
+    assert result is not None
+    assert state.nk_lf_status == result.status
+    assert lf_seen == [result]
+    gens = state.cache_backend.get(LF_GEN, {}) or {}
+    assert gens.get(NK_VARIANT_ID, 0) >= 1
+    assert gens.get(INITIAL_VARIANT_ID, 0) == 0  # base unchanged
+
+    # Clear: variant gone, dock keys cleared, signal fired with None.
+    state.clear_nk_variant()
+    qapp.processEvents()
+    assert state.nk_variant_id is None
+    assert NK_VARIANT_ID not in list_variants(state.network)
+    assert variant_seen[-1] is None
+
+
+def test_qt_appstate_nk_run_lf_returns_none_without_variant(qapp):
+    """Running an N-K LF before the variant is built must short-circuit
+    cleanly — no signal, no state mutation."""
+    from iidm_viewer.qt.state import AppState
+
+    state = AppState()
+    seen: list = []
+    state.nk_loadflow_completed.connect(lambda r: seen.append(r))
+    assert state.run_nk_loadflow({}, {}) is None
+    qapp.processEvents()
+    assert seen == []
+
+
+def test_qt_appstate_install_network_clears_nk(qapp):
+    """Swapping the network must drop the N-K dock state and fire
+    nk_variant_changed(None)."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.state import AppState
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+
+    seen: list = []
+    state.nk_variant_changed.connect(lambda v: seen.append(v))
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    qapp.processEvents()
+    assert state.nk_variant_id is None
+    assert seen == [None]
+
+
+def test_qt_sld_cache_keyed_by_variant(qapp):
+    """The Qt SLD tab's cache key now includes ``variant_id`` so the
+    InitialState and N-K SVGs coexist in the same dict slot."""
+    import pypowsybl.network as pn
+    from iidm_viewer.cache_backend import SLD
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.sld_tab import SldTab
+    from iidm_viewer.variants import INITIAL_VARIANT_ID
+
+    tab = SldTab()
+    network = NetworkProxy(run(pn.create_ieee14))
+    tab.set_network(network)
+    # Pick a VL the IEEE14 ships with.
+    vl_id = next(
+        iter(run(lambda: list(
+            object.__getattribute__(network, "_obj")
+            .get_voltage_levels(attributes=[]).index
+        )))
+    )
+    tab.show_voltage_level(vl_id)
+    qapp.processEvents()
+    cache = tab._cache_backend.setdefault(SLD, {})
+    assert (vl_id, INITIAL_VARIANT_ID) in cache
+
+
 def test_create_panel_unfolds_when_group_checked(qapp):
     """Programmatic ``_group.setChecked(True)`` unfolds the body —
     simulates the user clicking the QGroupBox header to expand."""

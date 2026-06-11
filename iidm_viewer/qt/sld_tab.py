@@ -30,6 +30,7 @@ from iidm_viewer.cache_backend import SLD, CacheBackend, DictBackend
 from iidm_viewer.diagram_services import generate_sld as _generate_sld
 from iidm_viewer.powsybl_worker import NetworkProxy
 from iidm_viewer.qt.web_view import PowsyblWebView
+from iidm_viewer.variants import INITIAL_VARIANT_ID
 
 
 _SLD_DIST = os.path.join(
@@ -164,16 +165,24 @@ class SldTab(QWidget):
             container_id = vl_id
             svg_type = "voltage-level"
 
+        # Cache key is ``(container_id, variant_id)`` so the InitialState
+        # and N-K SVGs coexist in the same slot. The UI dispatch on
+        # variant_id lands with the per-tab N-K rollout; here we only
+        # forward-compat the cache shape.
         cache = self._cache_backend.setdefault(SLD, {})
-        if container_id in cache:
-            svg, metadata = cache[container_id]
+        variant_id = INITIAL_VARIANT_ID
+        cache_key = (container_id, variant_id)
+        if cache_key in cache:
+            svg, metadata = cache[cache_key]
         else:
             try:
-                svg, metadata = _generate_sld(self._network, container_id)
+                svg, metadata = _generate_sld(
+                    self._network, container_id, variant_id=variant_id,
+                )
             except Exception as exc:
                 self._status.setText(f"SLD failed for {container_id}: {exc}")
                 return
-            cache[container_id] = (svg, metadata)
+            cache[cache_key] = (svg, metadata)
         if self._show_substation and sid:
             self._status.setText(f"Substation: {sid}")
         else:
@@ -244,9 +253,9 @@ class SldTab(QWidget):
         svg_type = getattr(self, "_svg_type", "voltage-level")
         # When showing the substation, the cache key is the substation id.
         sid, _ = self._get_substation_for_vl(self._current_vl)
-        cache_key = sid if (self._show_substation and sid) else self._current_vl
+        container_id = sid if (self._show_substation and sid) else self._current_vl
         cache = self._cache_backend.setdefault(SLD, {})
-        entry = cache.get(cache_key)
+        entry = cache.get((container_id, INITIAL_VARIANT_ID))
         if entry is None:
             return
         svg, metadata = entry

@@ -27,6 +27,7 @@ from iidm_viewer.cache_backend import NAD, CacheBackend, DictBackend
 from iidm_viewer.diagram_services import generate_nad as _generate_nad
 from iidm_viewer.powsybl_worker import NetworkProxy
 from iidm_viewer.qt.web_view import PowsyblWebView
+from iidm_viewer.variants import INITIAL_VARIANT_ID
 
 
 _NAD_DIST = os.path.join(
@@ -148,8 +149,12 @@ class NadTab(QWidget):
         """
         if self._network is None or self._current_vl is None:
             return
+        # Cache key is ``(vl_id, depth, variant_id)`` so the
+        # InitialState and N-K NAD SVGs coexist in the same slot.
+        # NAD doesn't have a Streamlit per-tab UI rollout yet — this
+        # forward-compats the cache shape for when it does.
         cache = self._cache_backend.setdefault(NAD, {})
-        key = (self._current_vl, self._depth)
+        key = (self._current_vl, self._depth, INITIAL_VARIANT_ID)
         if key in cache:
             return
         try:
@@ -161,7 +166,9 @@ class NadTab(QWidget):
         if not self._ready or self._current_vl is None:
             return
         cache = self._cache_backend.setdefault(NAD, {})
-        entry = cache.get((self._current_vl, self._depth))
+        entry = cache.get(
+            (self._current_vl, self._depth, INITIAL_VARIANT_ID)
+        )
         if entry is None:
             return
         svg, metadata = entry
