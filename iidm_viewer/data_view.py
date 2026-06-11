@@ -374,6 +374,7 @@ def build_data_explorer_view_model(
     filter_by_vl: bool = False,
     filter_specs: Optional[dict[str, Any]] = None,
     id_filter_substring: str = "",
+    variant_id: Optional[str] = None,
 ) -> DataExplorerViewModel:
     """Assemble the Data Explorer view-model for ``component``.
 
@@ -391,6 +392,10 @@ def build_data_explorer_view_model(
     The editable-columns whitelist is intersected with ``rows_df.columns``
     so the host doesn't try to render an editor for an attribute that's
     been filtered or projected away.
+
+    ``variant_id`` (kw-only): forwarded to :func:`get_enriched_dataframe`
+    so the rows reflect the chosen variant's connection / flow state.
+    Defaults to ``None`` (InitialState).
     """
     from iidm_viewer.component_registry import (
         EDITABLE_COMPONENTS,
@@ -398,7 +403,7 @@ def build_data_explorer_view_model(
     )
 
     method_name = COMPONENT_TYPES.get(component, "")
-    df = get_enriched_dataframe(network, component)
+    df = get_enriched_dataframe(network, component, variant_id=variant_id)
     total_count = len(df)
     if not df.empty:
         df = reorder_columns(df, component)

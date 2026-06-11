@@ -47,6 +47,8 @@ from iidm_viewer.filters import (
     render_filters,
 )
 from iidm_viewer import script_recorder
+from iidm_viewer.components import render_view_mode_radio
+from iidm_viewer.variants import INITIAL_VARIANT_ID, NK_VARIANT_ID
 
 
 # Columns to promote right after 'name' for specific component types.
@@ -1200,6 +1202,49 @@ def render_data_explorer(network, selected_vl):
         key=f"id_filter_{method_name}",
     )
 
+    view_mode = render_view_mode_radio("_de_view_mode")
+    if view_mode == "Side-by-side":
+        col_n, col_nk = st.columns(2)
+        with col_n:
+            st.markdown("**N (base)**")
+            _render_de_pane(
+                network, component, method_name, selected_vl, filter_by_vl,
+                id_filter,
+                variant_id=INITIAL_VARIANT_ID, key_prefix="de_n", editable=True,
+            )
+        with col_nk:
+            st.markdown("**N-K (contingency)**")
+            _render_de_pane(
+                network, component, method_name, selected_vl, filter_by_vl,
+                id_filter,
+                variant_id=NK_VARIANT_ID, key_prefix="de_nk", editable=False,
+            )
+    elif view_mode == "N-K":
+        _render_de_pane(
+            network, component, method_name, selected_vl, filter_by_vl,
+            id_filter,
+            variant_id=NK_VARIANT_ID, key_prefix="de_nk", editable=False,
+        )
+    else:
+        _render_de_pane(
+            network, component, method_name, selected_vl, filter_by_vl,
+            id_filter,
+            variant_id=INITIAL_VARIANT_ID, key_prefix="de", editable=True,
+        )
+
+    _render_all_change_logs(network)
+
+
+def _render_de_pane(
+    network, component, method_name, selected_vl, filter_by_vl, id_filter,
+    *, variant_id, key_prefix, editable,
+):
+    """Render the Data Explorer table for ``variant_id``.
+
+    The data editor + Apply/Remove buttons only fire when ``editable``
+    is True — N-K and Side-by-side panes route through this helper
+    with ``editable=False`` so the N-K view stays read-only.
+    """
     with st.spinner(f"Loading {component}..."):
         try:
             # Two-phase build so the filter expander can render against
@@ -1214,6 +1259,7 @@ def render_data_explorer(network, selected_vl):
                 component,
                 selected_vl=selected_vl,
                 filter_by_vl=filter_by_vl,
+                variant_id=variant_id,
             )
             if vl_vm.total_count == 0:
                 st.info(f"No {component.lower()} found in this network.")
@@ -1225,7 +1271,7 @@ def render_data_explorer(network, selected_vl):
             specs = collect_filter_specs(
                 vl_vm.rows_df,
                 FILTERS.get(component, []),
-                key_prefix=f"flt_{method_name}",
+                key_prefix=f"{key_prefix}_flt_{method_name}",
             )
 
             vm = _build_view_model(
@@ -1235,6 +1281,7 @@ def render_data_explorer(network, selected_vl):
                 filter_by_vl=filter_by_vl,
                 filter_specs=specs,
                 id_filter_substring=id_filter,
+                variant_id=variant_id,
             )
             df = vm.rows_df
             # ``data_view`` returns the DataFrame with the element id
@@ -1273,7 +1320,7 @@ def render_data_explorer(network, selected_vl):
             elif is_removable:
                 st.info("No properties are editable for this component, but rows can be removed.")
 
-            if editable_cols or is_removable:
+            if editable and (editable_cols or is_removable):
                 # Prepend a _remove checkbox column for removable components
                 if is_removable:
                     df_display = df.copy()
@@ -1370,7 +1417,13 @@ def render_data_explorer(network, selected_vl):
                             st.error(f"Remove failed: {e}")
 
             else:
-                st.dataframe(df, use_container_width=True)
+                # N-K / Side-by-side panes (or read-only components):
+                # render the rows without the editor toolbar — N-K is
+                # read-only by contract.
+                st.dataframe(
+                    df, use_container_width=True,
+                    key=f"{key_prefix}_df_{method_name}",
+                )
 
             csv = df.to_csv()
             st.download_button(
@@ -1378,8 +1431,7 @@ def render_data_explorer(network, selected_vl):
                 data=csv,
                 file_name=f"{component.lower().replace(' ', '_')}.csv",
                 mime="text/csv",
+                key=f"{key_prefix}_csv_{method_name}",
             )
         except Exception as e:
             st.error(f"Error loading {component}: {e}")
-
-    _render_all_change_logs(network)
