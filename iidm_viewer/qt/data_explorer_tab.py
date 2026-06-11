@@ -89,6 +89,7 @@ from iidm_viewer.data_view import (
     delete_and_log_elements,
 )
 from iidm_viewer.powsybl_worker import NetworkProxy
+from iidm_viewer.variants import INITIAL_VARIANT_ID, NK_VARIANT_ID
 
 
 class PandasTableModel(QAbstractTableModel):
@@ -269,6 +270,11 @@ class DataExplorerTab(QWidget):
         self._filter_specs: dict[str, object] = {}
         # Per-column filter widgets, rebuilt on every component change.
         self._filter_widgets: dict[str, QWidget] = {}
+        # Currently displayed variant — the view-mode combo below flips
+        # it; N-K mode is read-only by contract (no in-cell edits, no
+        # bulk apply, no remove).
+        self._variant_id = INITIAL_VARIANT_ID
+        self._state = None  # set via set_state
 
         self._combo = QComboBox()
         for label in COMPONENT_TYPES:
@@ -318,8 +324,20 @@ class DataExplorerTab(QWidget):
         self._table.verticalHeader().setDefaultSectionSize(22)
         self._table.selectionModel().selectionChanged.connect(self._on_selection_changed)
 
+        # View-mode combo — disabled until an N-K variant is built.
+        # N-K mode is read-only by contract.
+        self._view_mode_combo = QComboBox()
+        self._view_mode_combo.addItems(["N", "N-K"])
+        self._view_mode_combo.setEnabled(False)
+        self._view_mode_combo.currentTextChanged.connect(
+            self._on_view_mode_changed,
+        )
+
         controls = QHBoxLayout()
         controls.setContentsMargins(10, 6, 10, 0)
+        controls.addWidget(QLabel("View:"))
+        controls.addWidget(self._view_mode_combo)
+        controls.addSpacing(8)
         controls.addWidget(QLabel("Component:"))
         controls.addWidget(self._combo)
         controls.addSpacing(8)
@@ -471,6 +489,49 @@ class DataExplorerTab(QWidget):
         for panel in self._create_panels():
             panel.set_network(network)
             panel.set_component(component)
+
+    def set_state(self, state) -> None:
+        """Wire the tab to the host's :class:`AppState` so the view-mode
+        combo can enable / disable in response to N-K variant lifecycle
+        events. The N-K pane is read-only by contract — the in-cell
+        edit triggers stay disabled while ``self._variant_id`` is N-K
+        (handled inside ``_refresh`` via the editable-cols whitelist
+        and the bulk-edit button gates below)."""
+        self._state = state
+        state.nk_variant_changed.connect(self._on_nk_variant_changed)
+        state.nk_loadflow_completed.connect(
+            lambda _r: self._refresh(self._combo.currentText())
+        )
+        self._on_nk_variant_changed(state.nk_variant_id)
+
+    def _on_nk_variant_changed(self, variant_id) -> None:
+        active = variant_id == NK_VARIANT_ID
+        self._view_mode_combo.setEnabled(active)
+        if not active:
+            self._view_mode_combo.blockSignals(True)
+            self._view_mode_combo.setCurrentText("N")
+            self._view_mode_combo.blockSignals(False)
+            if self._variant_id != INITIAL_VARIANT_ID:
+                self._variant_id = INITIAL_VARIANT_ID
+                self._refresh(self._combo.currentText())
+        self._apply_variant_readonly()
+
+    def _on_view_mode_changed(self, txt: str) -> None:
+        new_variant = NK_VARIANT_ID if txt == "N-K" else INITIAL_VARIANT_ID
+        if new_variant == self._variant_id:
+            return
+        self._variant_id = new_variant
+        self._apply_variant_readonly()
+        self._refresh(self._combo.currentText())
+
+    def _apply_variant_readonly(self) -> None:
+        """N-K mode is read-only — flush in-cell edits through the
+        ``_set_bulk_enabled`` recompute so the bulk Apply / Apply&LF
+        / Disconnect / Delete buttons grey out. The in-cell edit
+        gate lives in :meth:`_on_edit_requested`."""
+        # Trigger a recompute of the bulk-button enabled state. The
+        # variant gate is inside ``_set_bulk_enabled`` (see below).
+        self._on_selection_changed()
 
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
@@ -737,6 +798,7 @@ class DataExplorerTab(QWidget):
                     self._vl_filter.isChecked() and label in VL_FILTERABLE
                 ),
                 filter_specs=self._filter_specs,
+                variant_id=self._variant_id,
             )
         except Exception as exc:
             self._model.set_dataframe(pd.DataFrame(), editable_cols=[])
@@ -786,16 +848,24 @@ class DataExplorerTab(QWidget):
     def _set_bulk_enabled(self, enabled: bool) -> None:
         # ``enabled`` here is the bulk-EDIT enable state. Disconnect /
         # Delete have their own enable rules (any selection, vs. the
-        # component being disconnectable / removable).
+        # component being disconnectable / removable). N-K mode is
+        # read-only by contract so every bulk action stays disabled
+        # while ``self._variant_id`` is not InitialState.
+        editable_variant = self._variant_id == INITIAL_VARIANT_ID
+        effective = enabled and editable_variant
         for w in (self._bulk_attr, self._bulk_value, self._bulk_apply, self._bulk_apply_lf):
-            w.setEnabled(enabled)
+            w.setEnabled(effective)
         n_selected = len(self._selected_element_ids())
         component = self._combo.currentText()
         self._bulk_disconnect.setEnabled(
-            n_selected > 0 and component in DISCONNECTABLE_COMPONENTS
+            editable_variant
+            and n_selected > 0
+            and component in DISCONNECTABLE_COMPONENTS
         )
         self._bulk_delete.setEnabled(
-            n_selected > 0 and component in REMOVABLE_COMPONENTS
+            editable_variant
+            and n_selected > 0
+            and component in REMOVABLE_COMPONENTS
         )
 
     def _refresh_bulk_attrs(self) -> None:
@@ -968,6 +1038,11 @@ class DataExplorerTab(QWidget):
     def _on_edit_requested(self, element_id: str, attribute: str, new_value, previous) -> None:
         component = self._combo.currentText()
         if self._network is None or not is_editable(component, attribute):
+            return
+        # N-K mode is read-only — silently drop the edit so the
+        # PandasTableModel can roll the visible cell back via its
+        # rollback hook.
+        if self._variant_id != INITIAL_VARIANT_ID:
             return
         try:
             prev = apply_cell_edit(self._network, component, element_id, attribute, new_value)
