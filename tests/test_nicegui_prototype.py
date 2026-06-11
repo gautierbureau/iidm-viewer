@@ -36,6 +36,72 @@ def test_app_state_fires_only_on_change():
     assert seen == ["VL_A", "VL_B", None]
 
 
+def test_nicegui_appstate_nk_variant_lifecycle():
+    """Build → Run LF → Clear lifecycle on the NiceGUI AppState. Each
+    transition fires the right listener callback exactly once."""
+    import pypowsybl.network as pn
+    from iidm_viewer.cache_backend import LF_GEN
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.variants import (
+        INITIAL_VARIANT_ID, NK_VARIANT_ID, list_variants,
+    )
+    from iidm_viewer.web.state import AppState
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+
+    variant_seen: list = []
+    lf_seen: list = []
+    state.on_nk_variant_changed(variant_seen.append)
+    state.on_nk_loadflow_completed(lf_seen.append)
+
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    assert state.nk_variant_id == NK_VARIANT_ID
+    assert NK_VARIANT_ID in list_variants(state.network)
+    assert variant_seen == [NK_VARIANT_ID]
+
+    result = state.run_nk_loadflow({}, {})
+    assert result is not None
+    assert lf_seen == [result]
+    gens = state.cache_backend.get(LF_GEN, {}) or {}
+    assert gens.get(NK_VARIANT_ID, 0) >= 1
+    assert gens.get(INITIAL_VARIANT_ID, 0) == 0
+
+    state.clear_nk_variant()
+    assert state.nk_variant_id is None
+    assert NK_VARIANT_ID not in list_variants(state.network)
+    assert variant_seen[-1] is None
+
+
+def test_nicegui_appstate_nk_run_lf_returns_none_without_variant():
+    """Running an N-K LF before the variant is built short-circuits."""
+    from iidm_viewer.web.state import AppState
+
+    state = AppState()
+    seen: list = []
+    state.on_nk_loadflow_completed(seen.append)
+    assert state.run_nk_loadflow({}, {}) is None
+    assert seen == []
+
+
+def test_nicegui_appstate_install_network_clears_nk():
+    """A network swap drops the dock state and fires
+    nk_variant_changed(None)."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.web.state import AppState
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+
+    seen: list = []
+    state.on_nk_variant_changed(seen.append)
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    assert state.nk_variant_id is None
+    assert seen == [None]
+
+
 def test_app_state_loads_ieee14_and_auto_selects_highest_voltage():
     from iidm_viewer.web.state import AppState
 
@@ -956,8 +1022,11 @@ def test_clear_diagrams_blanks_caches_and_last_args():
     from iidm_viewer.web import app
 
     # Seed cache + last-args so we can prove they get wiped.
-    app._nad_cache[("VL1", 1)] = ("<svg/>", "{}")
-    app._sld_cache["VL1"] = ("<svg/>", "{}")
+    # Cache keys are (vl_id, depth, variant_id) for NAD and
+    # (container_id, variant_id) for SLD as of N-K step 8.
+    from iidm_viewer.variants import INITIAL_VARIANT_ID
+    app._nad_cache[("VL1", 1, INITIAL_VARIANT_ID)] = ("<svg/>", "{}")
+    app._sld_cache[("VL1", INITIAL_VARIANT_ID)] = ("<svg/>", "{}")
     app._last_nad = {"svg": "<svg>...</svg>", "metadata": "{}", "height": 700}
     app._last_sld = {
         "svg": "<svg>...</svg>", "metadata": "{}",

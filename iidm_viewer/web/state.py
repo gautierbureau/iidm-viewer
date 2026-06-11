@@ -5,6 +5,13 @@ class's default listener-callback notification model is exactly what
 NiceGUI uses, so this subclass only re-exports the load-flow runner
 so existing ``monkeypatch.setattr("iidm_viewer.web.state.run_ac", …)``
 calls still intercept LF runs in tests.
+
+The N-K variant lifecycle methods (:meth:`build_nk_variant`,
+:meth:`run_nk_loadflow`, :meth:`clear_nk_variant`) and listener
+registration hooks (:meth:`on_nk_variant_changed`,
+:meth:`on_nk_loadflow_completed`) come straight from the base class
+— NiceGUI's pattern is exactly the listener-callback default the
+base class provides, so no overrides are needed.
 """
 from __future__ import annotations
 
@@ -16,6 +23,8 @@ from iidm_viewer.app_state import (
     AppState as _BaseAppState,
     LoadFlowListener,
     NetworkListener,
+    NkLoadFlowListener,
+    NkVariantListener,
     VlListener,
 )
 from iidm_viewer.loadflow import LoadFlowResult, run_ac
@@ -32,4 +41,11 @@ class AppState(_BaseAppState):
         return run_ac(network, generic_params, provider_params)
 
 
-__all__ = ["AppState", "LoadFlowListener", "NetworkListener", "VlListener"]
+__all__ = [
+    "AppState",
+    "LoadFlowListener",
+    "NetworkListener",
+    "NkLoadFlowListener",
+    "NkVariantListener",
+    "VlListener",
+]
