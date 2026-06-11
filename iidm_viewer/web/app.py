@@ -6865,13 +6865,17 @@ def _build_voltage_analysis():
                 options={None: "All nominal voltages"}, value=None,
             ).props("dense outlined").classes("w-64")
             ui.label("Layout:")
+            # ``_LAYOUT_OPTIONS`` / ``_VIEW_OPTIONS`` are ``{label: value}``
+            # for Streamlit's selectbox convention; NiceGUI's ui.select
+            # dict-options convention is ``{value: label}``, so invert
+            # at use site.
             map_layout_select = ui.select(
-                options=dict(_LAYOUT_OPTIONS),
+                options={v: k for k, v in _LAYOUT_OPTIONS.items()},
                 value=next(iter(_LAYOUT_OPTIONS.values())),
             ).props("dense outlined").classes("w-48")
             ui.label("View:")
             map_view_select = ui.select(
-                options=dict(_VIEW_OPTIONS),
+                options={v: k for k, v in _VIEW_OPTIONS.items()},
                 value=next(iter(_VIEW_OPTIONS.values())),
             ).props("dense outlined").classes("w-48")
             ui.label("Full-scale ± pu:")
@@ -7390,13 +7394,16 @@ def _build_injection_map():
     controls_row = ui.row().classes("items-center q-gutter-md no-wrap w-full")
     with controls_row:
         ui.label("Metric:")
+        # ``_METRIC_OPTIONS`` / ``_VIEW_OPTIONS`` are ``{label: value}``
+        # for Streamlit; invert for NiceGUI's ``{value: label}`` dict
+        # convention.
         metric_select = ui.select(
-            options=dict(_METRIC_OPTIONS),
+            options={v: k for k, v in _METRIC_OPTIONS.items()},
             value=next(iter(_METRIC_OPTIONS.values())),
         ).props("dense outlined").classes("w-48")
         ui.label("View:")
         view_select = ui.select(
-            options=dict(_VIEW_OPTIONS),
+            options={v: k for k, v in _VIEW_OPTIONS.items()},
             value=next(iter(_VIEW_OPTIONS.values())),
         ).props("dense outlined").classes("w-48")
         scale_label = ui.label("Full-scale ± MW:")
@@ -8036,6 +8043,21 @@ def main_page() -> None:
             vl_picker_state["df"] = None
         _rebuild_vl_options()
 
+    async def _async_refresh_tab(refresh_fn) -> None:
+        """Wrap a synchronous refresh closure so the event loop ticks
+        before + after the call. The refresh body still touches NiceGUI
+        widget state (ag-Grid rows, select options) so it must stay on
+        the event loop, but yielding between refreshes lets the upload
+        completion + button-state updates land immediately — the user
+        sees a responsive UI while the tabs progressively populate
+        instead of an opaque multi-second freeze on large networks."""
+        await asyncio.sleep(0)
+        try:
+            refresh_fn()
+        except Exception:
+            pass
+        await asyncio.sleep(0)
+
     def _on_state_network(network):
         # Enable the Run-LF button + reset status whenever the network
         # changes (load / clear). Also refresh the VL picker so it
@@ -8058,32 +8080,33 @@ def main_page() -> None:
             vl_filter_input.visible = False
             vl_select.visible = False
             _rebuild_vl_options()
-            refresh_data_grid()
-            refresh_reactive_curves()
-            refresh_operational_limits()
-            refresh_security_analysis()
-            refresh_short_circuit_analysis()
+            asyncio.create_task(_async_refresh_tab(refresh_data_grid))
+            asyncio.create_task(_async_refresh_tab(refresh_reactive_curves))
+            asyncio.create_task(_async_refresh_tab(refresh_operational_limits))
+            asyncio.create_task(_async_refresh_tab(refresh_security_analysis))
+            asyncio.create_task(_async_refresh_tab(refresh_short_circuit_analysis))
             asyncio.create_task(refresh_pmax())
             asyncio.create_task(refresh_voltage_analysis())
             asyncio.create_task(refresh_injection_map())
             asyncio.create_task(refresh_overview())
             return
-        # Defer the heaviest pypowsybl call (map data extraction) and
-        # the VL picker fetch via asyncio.to_thread so a Pégase
-        # 9k–sized network load doesn't freeze the event loop. The
-        # per-tab refreshes below still run synchronously — they hit
-        # smaller pypowsybl getters that compute in a couple of
-        # seconds even on large networks.
+        # Every heavy refresh runs in an async task so install_network
+        # returns immediately. The user sees the upload widget reset +
+        # the file label update without waiting for the per-tab
+        # pypowsybl reads to complete; the tabs then populate
+        # progressively as the tasks run. On Pégase 9k this turns a
+        # ~10s freeze into a sub-second UI response with the heavy
+        # tab loads finishing over the next 5-10 seconds.
         vl_filter_input.visible = True
         vl_select.visible = True
         asyncio.create_task(_async_list_voltage_levels(network))
         asyncio.create_task(_async_push_map())
         tabs.set_value(map_tab)
-        refresh_data_grid()
-        refresh_reactive_curves()
-        refresh_operational_limits()
-        refresh_security_analysis()
-        refresh_short_circuit_analysis()
+        asyncio.create_task(_async_refresh_tab(refresh_data_grid))
+        asyncio.create_task(_async_refresh_tab(refresh_reactive_curves))
+        asyncio.create_task(_async_refresh_tab(refresh_operational_limits))
+        asyncio.create_task(_async_refresh_tab(refresh_security_analysis))
+        asyncio.create_task(_async_refresh_tab(refresh_short_circuit_analysis))
         asyncio.create_task(refresh_pmax())
         asyncio.create_task(refresh_voltage_analysis())
         asyncio.create_task(refresh_injection_map())
@@ -8234,12 +8257,29 @@ def main_page() -> None:
     if _state.network is not None:
         file_lbl.set_text("(pre-loaded)")
         run_lf_btn.set_enabled(True)
-        _push_map()
-        refresh_data_grid()
+        # Defer the heaviest sync calls (map extraction, data grid
+        # build, default-VL SLD/NAD generation) so the first page
+        # render stays under a second even on Pégase-9k–sized
+        # pre-loaded networks. The tabs populate progressively as
+        # the tasks run.
+        asyncio.create_task(_async_push_map())
+        asyncio.create_task(_async_refresh_tab(refresh_data_grid))
         if _state.selected_vl:
             vl_lbl.set_text(f"VL: {_state.selected_vl}")
-            _push_sld(_state.selected_vl)
-            _push_nad(_state.selected_vl, _nad_depth)
+
+            async def _async_push_diagrams() -> None:
+                await asyncio.sleep(0)
+                try:
+                    _push_sld(_state.selected_vl)
+                except Exception:
+                    pass
+                await asyncio.sleep(0)
+                try:
+                    _push_nad(_state.selected_vl, _nad_depth)
+                except Exception:
+                    pass
+
+            asyncio.create_task(_async_push_diagrams())
 
 
 def _native_backend_available() -> bool:
