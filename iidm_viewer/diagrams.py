@@ -11,6 +11,8 @@ from iidm_viewer.navigation import decode_svg_id as _decode_svg_id
 from iidm_viewer.sld_component import render_interactive_sld
 from iidm_viewer.state import EDITABLE_COMPONENTS, add_to_change_log, toggle_switch
 from iidm_viewer import script_recorder
+from iidm_viewer.components import render_view_mode_radio
+from iidm_viewer.variants import INITIAL_VARIANT_ID, NK_VARIANT_ID
 
 
 # Fallback palette used only when the exact SLD-SVG color cannot be
@@ -308,6 +310,52 @@ def _get_bbt_buses(network, vl_id: str):
     return df
 
 
+def _generate_sld_cached(network, container_id, variant_id):
+    """Lookup + populate the SLD cache, now keyed by
+    ``(container_id, variant_id)`` so the InitialState and N-K SVGs
+    coexist without one variant's render evicting the other's."""
+    from iidm_viewer.diagram_services import generate_sld
+
+    sld_cache = _backend.setdefault(SLD, {})
+    cache_key = (container_id, variant_id)
+    cached_sld = sld_cache.get(cache_key)
+    if cached_sld is not None:
+        return cached_sld
+    svg, metadata = generate_sld(
+        network, container_id, variant_id=variant_id,
+    )
+    sld_cache[cache_key] = (svg, metadata)
+    return svg, metadata
+
+
+def _render_sld_pane(
+    network, container_id, svg_type, *, variant_id, key_prefix, editable,
+):
+    """Render one SLD pane for ``variant_id``. Click events fire only
+    in the InitialState pane — N-K is read-only by contract."""
+    with st.spinner("Generating Single Line Diagram..."):
+        try:
+            svg, metadata = _generate_sld_cached(
+                network, container_id, variant_id,
+            )
+        except Exception as e:
+            st.error(f"Error generating SLD: {e}")
+            return None, None
+
+    click = render_interactive_sld(
+        svg=svg,
+        metadata=metadata,
+        height=700,
+        svg_type=svg_type,
+        key=f"{key_prefix}_{container_id}_{variant_id}",
+    )
+    if not editable:
+        # N-K is read-only — drop click events so a stray breaker click
+        # can't mutate the working variant.
+        click = None
+    return svg, click
+
+
 def render_sld_tab(network, selected_vl):
     if not selected_vl:
         st.info("Select a voltage level in the sidebar to display the Single Line Diagram.")
@@ -342,29 +390,41 @@ def render_sld_tab(network, selected_vl):
                 st.session_state["sld_show_substation"] = True
                 st.rerun()
 
-    sld_cache = _backend.setdefault(SLD, {})
-    cached_sld = sld_cache.get(container_id)
-    if cached_sld is not None:
-        svg, metadata = cached_sld
+    view_mode = render_view_mode_radio("_sld_view_mode")
+
+    if view_mode == "Side-by-side":
+        col_n, col_nk = st.columns(2)
+        with col_n:
+            st.markdown("**N (base)**")
+            svg, click = _render_sld_pane(
+                network, container_id, svg_type,
+                variant_id=INITIAL_VARIANT_ID, key_prefix="sld_n",
+                editable=True,
+            )
+        with col_nk:
+            st.markdown("**N-K (contingency)**")
+            _render_sld_pane(
+                network, container_id, svg_type,
+                variant_id=NK_VARIANT_ID, key_prefix="sld_nk",
+                editable=False,
+            )
+    elif view_mode == "N-K":
+        svg = None
+        _render_sld_pane(
+            network, container_id, svg_type,
+            variant_id=NK_VARIANT_ID, key_prefix="sld_nk",
+            editable=False,
+        )
+        click = None
     else:
-        with st.spinner("Generating Single Line Diagram..."):
-            try:
-                from iidm_viewer.diagram_services import generate_sld
-                svg, metadata = generate_sld(network, container_id)
-            except Exception as e:
-                st.error(f"Error generating SLD: {e}")
-                return
-        sld_cache[container_id] = (svg, metadata)
+        svg, click = _render_sld_pane(
+            network, container_id, svg_type,
+            variant_id=INITIAL_VARIANT_ID, key_prefix="sld",
+            editable=True,
+        )
 
-    click = render_interactive_sld(
-        svg=svg,
-        metadata=metadata,
-        height=700,
-        svg_type=svg_type,
-        key=f"sld_{container_id}",
-    )
-
-    _render_bus_legend(network, selected_vl, svg)
+    if svg is not None:
+        _render_bus_legend(network, selected_vl, svg)
 
     if click and click.get("type") == "sld-vl-click":
         vl = click.get("vl")
