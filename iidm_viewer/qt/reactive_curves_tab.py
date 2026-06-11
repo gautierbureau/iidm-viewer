@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from iidm_viewer.powsybl_worker import NetworkProxy
 from iidm_viewer.qt.data_explorer_tab import PandasTableModel
+from iidm_viewer.variants import INITIAL_VARIANT_ID, NK_VARIANT_ID
 from iidm_viewer.reactive_curves import (
     STATUS_DIAMOND_COLOR,
     ReactiveCurvesViewModel,
@@ -64,10 +65,25 @@ class ReactiveCurvesTab(QWidget):
         self._view_model: Optional[ReactiveCurvesViewModel] = None
         self._gen_id: Optional[str] = None
         self._plot_tmp: Optional[str] = None  # temp file for Plotly HTML
+        self._variant_id = INITIAL_VARIANT_ID
+        self._state = None  # set via set_state
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
+
+        # View-mode combo — disabled until an N-K variant exists.
+        view_row = QHBoxLayout()
+        view_row.addWidget(QLabel("View:"))
+        self._view_mode_combo = QComboBox()
+        self._view_mode_combo.addItems(["N", "N-K"])
+        self._view_mode_combo.setEnabled(False)
+        self._view_mode_combo.currentTextChanged.connect(
+            self._on_view_mode_changed,
+        )
+        view_row.addWidget(self._view_mode_combo)
+        view_row.addStretch(1)
+        layout.addLayout(view_row)
 
         # Top row: VL narrow checkbox + generator picker.
         top_row = QHBoxLayout()
@@ -166,6 +182,33 @@ class ReactiveCurvesTab(QWidget):
     # ------------------------------------------------------------------
     # Public API (mirrors the other Qt tabs).
     # ------------------------------------------------------------------
+    def set_state(self, state) -> None:
+        """Wire the tab to the host's :class:`AppState` so the view-mode
+        combo can enable / disable in response to N-K variant lifecycle
+        events."""
+        self._state = state
+        state.nk_variant_changed.connect(self._on_nk_variant_changed)
+        state.nk_loadflow_completed.connect(lambda _r: self.refresh())
+        self._on_nk_variant_changed(state.nk_variant_id)
+
+    def _on_nk_variant_changed(self, variant_id) -> None:
+        active = variant_id == NK_VARIANT_ID
+        self._view_mode_combo.setEnabled(active)
+        if not active:
+            self._view_mode_combo.blockSignals(True)
+            self._view_mode_combo.setCurrentText("N")
+            self._view_mode_combo.blockSignals(False)
+            if self._variant_id != INITIAL_VARIANT_ID:
+                self._variant_id = INITIAL_VARIANT_ID
+                self.refresh()
+
+    def _on_view_mode_changed(self, txt: str) -> None:
+        new_variant = NK_VARIANT_ID if txt == "N-K" else INITIAL_VARIANT_ID
+        if new_variant == self._variant_id:
+            return
+        self._variant_id = new_variant
+        self.refresh()
+
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
         self._view_model = None
@@ -199,6 +242,7 @@ class ReactiveCurvesTab(QWidget):
         try:
             vm = build_reactive_curves_view_model(
                 self._network, only_vl=only_vl,
+                variant_id=self._variant_id,
             )
         except Exception as exc:
             self._view_model = None
