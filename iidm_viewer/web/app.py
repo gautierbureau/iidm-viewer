@@ -127,6 +127,11 @@ _sld_ready = False
 _last_map: Optional[dict] = None
 _last_nad: Optional[dict] = None
 _last_sld: Optional[dict] = None
+# N-K SLD iframe payload — populated only when the SLD tab is in
+# 'Side-by-side' mode. ``_send_render`` resends it after a tab switch
+# so the secondary iframe doesn't go blank on re-mount.
+_last_sld_nk: Optional[dict] = None
+_sld_nk_ready: bool = False
 
 # Diagram caches now live in ``_state.cache_backend`` — the same
 # host-agnostic backend the PySide6 prototype uses and the Streamlit
@@ -255,9 +260,12 @@ def _fetch_dataframe(network: NetworkProxy, getter_name: str):
 _BRIDGE_JS = r"""
 (function () {
   // Each component is identified by a short name; the iframe id is
-  // derived by convention. Keeping the registry data-driven means
-  // adding a 4th iframe later is one line.
-  const COMPONENTS = ['map', 'nad', 'sld'];
+  // derived by convention. ``sld-nk`` is the secondary SLD iframe
+  // surfaced when the user picks 'Side-by-side' on the SLD tab — it
+  // renders the N-K variant alongside the InitialState SVG in
+  // ``sld``. Keeping the registry data-driven means adding another
+  // iframe later is one line.
+  const COMPONENTS = ['map', 'nad', 'sld', 'sld-nk'];
 
   function iframeFor(component) {
     return document.getElementById('iidm-' + component + '-iframe');
@@ -335,6 +343,10 @@ _sld_show_substation: bool = False
 # InitialState so today's behaviour is preserved before any combo
 # interaction.
 _sld_variant_id: str = "InitialState"
+# View-mode (one of 'N' / 'N-K' / 'Side-by-side') for the SLD tab.
+# Tracked module-level so ``_push_sld`` can decide whether to fan the
+# render out to the secondary 'sld-nk' iframe alongside the primary.
+_sld_view_mode: str = "N"
 
 
 def _get_substation_for_vl(vl_id: str):
@@ -358,7 +370,7 @@ def _get_substation_for_vl(vl_id: str):
 
 
 def _push_sld(vl_id: str) -> None:
-    global _last_sld, _sld_show_substation
+    global _last_sld, _sld_show_substation, _last_sld_nk
     if not vl_id or _state.network is None:
         return
 
@@ -372,9 +384,9 @@ def _push_sld(vl_id: str) -> None:
         svg_type = "voltage-level"
 
     # SLD cache key is (container_id, variant_id) so the InitialState
-    # and N-K SVGs coexist in the same slot. The active variant is
-    # ``_sld_variant_id`` — the per-tab view-mode select flips it
-    # and calls _push_sld again.
+    # and N-K SVGs coexist in the same slot. ``_sld_variant_id`` is the
+    # primary iframe's variant; in 'Side-by-side' it's pinned to
+    # InitialState and the secondary 'sld-nk' iframe gets the N-K SVG.
     variant_id = _sld_variant_id
     cache_key = (container_id, variant_id)
     entry = _get_sld_cache().get(cache_key)
@@ -395,6 +407,31 @@ def _push_sld(vl_id: str) -> None:
     _last_sld = args
     if _sld_ready:
         _send_render("sld", args)
+
+    # Side-by-side: also push the N-K SVG into the secondary iframe.
+    if _sld_view_mode == "Side-by-side":
+        nk_key = (container_id, "N-K")
+        nk_entry = _get_sld_cache().get(nk_key)
+        if nk_entry is None:
+            try:
+                nk_entry = _generate_sld(
+                    _state.network, container_id, variant_id="N-K",
+                )
+                _get_sld_cache()[nk_key] = nk_entry
+            except Exception as exc:
+                ui.notify(
+                    f"N-K SLD generation failed for {container_id}: {exc}",
+                    type="negative",
+                )
+                return
+        nk_svg, nk_metadata = nk_entry
+        nk_args = {
+            "svg": nk_svg, "metadata": nk_metadata,
+            "height": 700, "svgType": svg_type,
+        }
+        _last_sld_nk = nk_args
+        if _sld_nk_ready:
+            _send_render("sld-nk", nk_args)
 
 
 def _push_map_flyto(substation_id: str, zoom: float = 11) -> None:
@@ -7473,10 +7510,11 @@ def main_page() -> None:
     state above survives, but iframe-ready flags reset because the
     page DOM is new.
     """
-    global _map_ready, _nad_ready, _sld_ready
+    global _map_ready, _nad_ready, _sld_ready, _sld_nk_ready
     _map_ready = False
     _nad_ready = False
     _sld_ready = False
+    _sld_nk_ready = False
 
     # Page-level bridge JS, head-injected so emitEvent is bound by the
     # time the iframes finish loading.
@@ -7796,39 +7834,64 @@ def main_page() -> None:
             with ui.row().classes("items-center q-pa-sm w-full"):
                 ui.label("View:").classes("text-caption")
                 sld_view_mode_select = ui.select(
-                    options=["N", "N-K"], value="N",
-                ).props("dense outlined").classes("w-24")
+                    options=["N", "N-K", "Side-by-side"], value="N",
+                ).props("dense outlined").classes("w-40")
                 sld_view_mode_select.set_enabled(False)
                 sld_vl_label = ui.label("").classes("text-caption q-ml-md")
                 sld_expand_btn = ui.button("Expand to substation") \
                     .props("flat dense").classes("q-ml-md")
                 sld_expand_btn.visible = False
+
+            # Primary SLD iframe — always in the DOM with its canonical
+            # id so the bridge JS routes 'sld' messages here. The
+            # parent flex row shares the width with the secondary
+            # iframe when Side-by-side is active.
             ui.html(
-                f'<iframe id="iidm-sld-iframe" src="{_SLD_URL}/index.html" '
-                'style="width:100%;height:calc(100vh - 180px);min-height:500px;'
-                'border:none;display:block;margin:0 auto"></iframe>',
+                "<div id='iidm-sld-pane-row' "
+                "style='display:flex;width:100%;gap:8px;'>"
+                f"<iframe id='iidm-sld-iframe' src='{_SLD_URL}/index.html' "
+                "style='flex:1;height:calc(100vh - 180px);min-height:500px;"
+                "border:none;display:block;'></iframe>"
+                f"<iframe id='iidm-sld-nk-iframe' src='{_SLD_URL}/index.html' "
+                "style='flex:1;height:calc(100vh - 180px);min-height:500px;"
+                "border:none;display:none;'></iframe>"
+                "</div>",
                 sanitize=False,
-            ).style("display:flex;justify-content:center").classes("w-full")
+            ).classes("w-full")
+
+            def _apply_sld_mode_visibility() -> None:
+                # Toggle the secondary iframe's display via the
+                # ``iidm-sld-nk-iframe`` element directly so we don't
+                # need to track a NiceGUI widget reference for it.
+                show_nk = _sld_view_mode == "Side-by-side"
+                ui.run_javascript(
+                    "var f = document.getElementById('iidm-sld-nk-iframe');"
+                    "if (f) f.style.display = "
+                    + ("'block'" if show_nk else "'none'") + ";"
+                )
 
             def _sld_on_view_mode_changed(_e=None) -> None:
-                global _sld_variant_id
+                global _sld_variant_id, _sld_view_mode
+                mode = sld_view_mode_select.value or "N"
+                _sld_view_mode = mode
                 new_v = (
-                    "N-K" if sld_view_mode_select.value == "N-K"
+                    "N-K" if mode == "N-K"
                     else "InitialState"
                 )
-                if new_v == _sld_variant_id:
-                    return
                 _sld_variant_id = new_v
+                _apply_sld_mode_visibility()
                 if _state.selected_vl:
                     _push_sld(_state.selected_vl)
 
             def _sld_on_nk_variant_changed(variant_id) -> None:
-                global _sld_variant_id
+                global _sld_variant_id, _sld_view_mode
                 active = variant_id == "N-K"
                 sld_view_mode_select.set_enabled(active)
                 if not active:
                     sld_view_mode_select.value = "N"
                     sld_view_mode_select.update()
+                    _sld_view_mode = "N"
+                    _apply_sld_mode_visibility()
                     if _sld_variant_id != "InitialState":
                         _sld_variant_id = "InitialState"
                         if _state.selected_vl:
@@ -8028,7 +8091,7 @@ def main_page() -> None:
         # args. q-tab-panels defaults to ``keep-alive=false``, so each
         # tab switch destroys and remounts the iframe; without this
         # resend the user sees a blank diagram after the first switch.
-        global _map_ready, _nad_ready, _sld_ready
+        global _map_ready, _nad_ready, _sld_ready, _sld_nk_ready
         component = e.args.get("component")
         if component == "map":
             _map_ready = True
@@ -8042,6 +8105,10 @@ def main_page() -> None:
             _sld_ready = True
             if _last_sld is not None:
                 _send_render("sld", _last_sld)
+        elif component == "sld-nk":
+            _sld_nk_ready = True
+            if _last_sld_nk is not None:
+                _send_render("sld-nk", _last_sld_nk)
 
     def _on_component_value(e):
         component = e.args.get("component")
