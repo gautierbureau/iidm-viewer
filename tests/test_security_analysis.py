@@ -11,8 +11,13 @@ from iidm_viewer.state import (
     run_security_analysis,
 )
 from iidm_viewer.security_analysis import (
+    MANUAL_GROUPING_TOKENS,
+    PER_ELEMENT_GROUPING,
+    SINGLE_GROUPING,
     SecurityAnalysisViewModel,
     _action_summary,
+    normalize_manual_contingency,
+    validate_manual_contingency,
 )
 from iidm_viewer.security_analysis_tab import (
     _get_filterable_df,
@@ -1885,3 +1890,113 @@ def test_view_model_store_and_summarize_results():
     by_id = {r["contingency_id"]: r for r in summary.to_dict(orient="records")}
     assert by_id["ctg1"]["violations"] == 0
     assert by_id["ctg2"]["violations"] == 2
+
+
+# ---------------------------------------------------------------------------
+# normalize_manual_contingency + validate_manual_contingency
+#
+# These cover the host-agnostic translator each manual picker (Streamlit
+# SA tab today, Qt / NiceGUI N-K docks later) funnels through. The dict
+# shape must stay byte-identical to the SA tab's pre-extraction output
+# so existing security_analysis.py callers (build_n1_contingencies-style
+# readers) still work uniformly.
+# ---------------------------------------------------------------------------
+def test_manual_grouping_tokens_cover_radio_labels():
+    """The Streamlit picker's radio labels must map to canonical tokens."""
+    from iidm_viewer.security_analysis import MANUAL_GROUPINGS
+
+    assert set(MANUAL_GROUPING_TOKENS.keys()) == set(MANUAL_GROUPINGS)
+    assert set(MANUAL_GROUPING_TOKENS.values()) == {
+        PER_ELEMENT_GROUPING, SINGLE_GROUPING,
+    }
+
+
+def test_validate_manual_contingency_empty_ids_errors():
+    errors = validate_manual_contingency([], PER_ELEMENT_GROUPING, None)
+    assert errors == ["Pick at least one element."]
+
+
+def test_validate_manual_contingency_single_needs_group_id():
+    errors = validate_manual_contingency(["L1"], SINGLE_GROUPING, "")
+    assert errors == ["A contingency id is required for grouped mode."]
+    errors = validate_manual_contingency(["L1"], SINGLE_GROUPING, "   ")
+    assert errors == ["A contingency id is required for grouped mode."]
+
+
+def test_validate_manual_contingency_unknown_grouping_errors():
+    errors = validate_manual_contingency(["L1"], "weird", None)
+    assert errors == ["Unknown grouping: 'weird'"]
+
+
+def test_validate_manual_contingency_well_formed_per_element():
+    assert validate_manual_contingency(
+        ["L1"], PER_ELEMENT_GROUPING, None,
+    ) == []
+
+
+def test_validate_manual_contingency_well_formed_single():
+    assert validate_manual_contingency(
+        ["L1", "L2"], SINGLE_GROUPING, "my_outage",
+    ) == []
+
+
+def test_normalize_per_element_returns_n1_shape():
+    """Per-element mode must produce exactly the
+    :func:`build_n1_contingencies` output shape so the SA tab can mix
+    automatic + manual contingencies without branching."""
+    out = normalize_manual_contingency(
+        "Lines", ["L1", "L2"], PER_ELEMENT_GROUPING, None,
+    )
+    assert out == [
+        {"id": "N1_L1", "element_id": "L1", "element_ids": ["L1"]},
+        {"id": "N1_L2", "element_id": "L2", "element_ids": ["L2"]},
+    ]
+
+
+def test_normalize_single_returns_one_grouped_contingency():
+    out = normalize_manual_contingency(
+        "Lines", ["L1", "L2", "L3"], SINGLE_GROUPING, "my_outage",
+    )
+    assert out == [{"id": "my_outage", "element_ids": ["L1", "L2", "L3"]}]
+
+
+def test_normalize_single_strips_group_id_whitespace():
+    out = normalize_manual_contingency(
+        "Lines", ["L1"], SINGLE_GROUPING, "  pad  ",
+    )
+    assert out == [{"id": "pad", "element_ids": ["L1"]}]
+
+
+def test_normalize_raises_on_empty_ids():
+    with pytest.raises(ValueError, match="at least one element"):
+        normalize_manual_contingency(
+            "Lines", [], PER_ELEMENT_GROUPING, None,
+        )
+
+
+def test_normalize_raises_on_missing_group_id():
+    with pytest.raises(ValueError, match="contingency id is required"):
+        normalize_manual_contingency(
+            "Lines", ["L1"], SINGLE_GROUPING, "",
+        )
+
+
+def test_normalize_raises_on_unknown_grouping():
+    with pytest.raises(ValueError, match="Unknown grouping"):
+        normalize_manual_contingency(
+            "Lines", ["L1"], "bogus", None,
+        )
+
+
+def test_normalize_per_element_output_matches_build_n1_shape():
+    """Concrete cross-check: a per-element manual entry must be
+    indistinguishable from a build_n1_contingencies entry for the
+    same element id."""
+    manual = normalize_manual_contingency(
+        "Lines", ["L1-2-1"], PER_ELEMENT_GROUPING, None,
+    )[0]
+    expected_keys = {"id", "element_id", "element_ids"}
+    assert set(manual.keys()) == expected_keys
+    assert manual["id"] == "N1_L1-2-1"
+    assert manual["element_id"] == "L1-2-1"
+    assert manual["element_ids"] == ["L1-2-1"]
