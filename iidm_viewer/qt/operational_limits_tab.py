@@ -46,6 +46,7 @@ from iidm_viewer.operational_limits import (
 )
 from iidm_viewer.powsybl_worker import NetworkProxy
 from iidm_viewer.qt.data_explorer_tab import PandasTableModel
+from iidm_viewer.variants import INITIAL_VARIANT_ID, NK_VARIANT_ID
 
 
 _LOADING_RED = QColor(255, 75, 75)
@@ -93,10 +94,28 @@ class OperationalLimitsTab(QWidget):
         self._element_id: Optional[str] = None
         self._threshold: int = 50
         self._plot_tmp: Optional[str] = None  # temp file for Plotly HTML
+        # Active variant the view-model is fetched against. The combo
+        # below flips it; defaults to InitialState so the today UX is
+        # preserved before any combo interaction.
+        self._variant_id = INITIAL_VARIANT_ID
+        self._state = None  # set via set_state
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
+
+        # View-mode combo — disabled until an N-K variant exists.
+        view_row = QHBoxLayout()
+        view_row.addWidget(QLabel("View:"))
+        self._view_mode_combo = QComboBox()
+        self._view_mode_combo.addItems(["N", "N-K"])
+        self._view_mode_combo.setEnabled(False)
+        self._view_mode_combo.currentTextChanged.connect(
+            self._on_view_mode_changed,
+        )
+        view_row.addWidget(self._view_mode_combo)
+        view_row.addStretch(1)
+        root.addLayout(view_row)
 
         # Placeholder shown when there's no data.
         self._placeholder = QLabel("Load a network to see operational limits.")
@@ -179,6 +198,35 @@ class OperationalLimitsTab(QWidget):
     # ------------------------------------------------------------------
     # Public API (mirrors the other Qt tabs).
     # ------------------------------------------------------------------
+    def set_state(self, state) -> None:
+        """Wire the tab to the host's :class:`AppState` so the view-mode
+        combo can enable / disable in response to N-K variant lifecycle
+        events."""
+        self._state = state
+        state.nk_variant_changed.connect(self._on_nk_variant_changed)
+        # Refresh whenever an N-K LF completes so the table picks up
+        # the new flow / loading values for the active variant.
+        state.nk_loadflow_completed.connect(lambda _r: self.refresh())
+        self._on_nk_variant_changed(state.nk_variant_id)
+
+    def _on_nk_variant_changed(self, variant_id) -> None:
+        active = variant_id == NK_VARIANT_ID
+        self._view_mode_combo.setEnabled(active)
+        if not active:
+            self._view_mode_combo.blockSignals(True)
+            self._view_mode_combo.setCurrentText("N")
+            self._view_mode_combo.blockSignals(False)
+            if self._variant_id != INITIAL_VARIANT_ID:
+                self._variant_id = INITIAL_VARIANT_ID
+                self.refresh()
+
+    def _on_view_mode_changed(self, txt: str) -> None:
+        new_variant = NK_VARIANT_ID if txt == "N-K" else INITIAL_VARIANT_ID
+        if new_variant == self._variant_id:
+            return
+        self._variant_id = new_variant
+        self.refresh()
+
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
         self._view_model = None
@@ -193,7 +241,9 @@ class OperationalLimitsTab(QWidget):
             self._set_data_visible(False)
             return
         try:
-            vm = build_operational_limits_view_model(self._network)
+            vm = build_operational_limits_view_model(
+                self._network, variant_id=self._variant_id,
+            )
         except Exception as exc:
             self._view_model = None
             self._placeholder.setText(f"Operational limits failed: {exc}")
