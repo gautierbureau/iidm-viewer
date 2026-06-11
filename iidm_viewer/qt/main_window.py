@@ -11,9 +11,11 @@ import os
 import sys
 from typing import Optional
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
+    QDockWidget,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -40,6 +42,7 @@ from iidm_viewer.qt.extensions_explorer_tab import ExtensionsExplorerTab
 from iidm_viewer.qt.injection_map_tab import InjectionMapTab
 from iidm_viewer.qt.map_tab import MapTab
 from iidm_viewer.qt.nad_tab import NadTab
+from iidm_viewer.qt.nk_variant_dock import NkVariantDock
 from iidm_viewer.qt.operational_limits_tab import OperationalLimitsTab
 from iidm_viewer.qt.overview_tab import OverviewTab
 from iidm_viewer.qt.pmax_visualization_tab import PmaxVisualizationTab
@@ -327,6 +330,21 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.sidebar)
         layout.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
+
+        # N-K variant dock — registered on the right side, closed by
+        # default so the picker stays out of the way until the user
+        # wants to build a contingency variant.
+        self.nk_variant_dock = NkVariantDock()
+        self.nk_variant_dock_widget = QDockWidget("N-K Variant", self)
+        self.nk_variant_dock_widget.setWidget(self.nk_variant_dock)
+        self.nk_variant_dock_widget.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea,
+        )
+        self.addDockWidget(
+            Qt.RightDockWidgetArea, self.nk_variant_dock_widget,
+        )
+        self.nk_variant_dock_widget.setVisible(False)
+        self.nk_variant_dock.set_state(self.state)
 
         status = QStatusBar()
         status.showMessage("Ready. Load a network to begin.")
@@ -665,6 +683,9 @@ class MainWindow(QMainWindow):
         self.sidebar.set_view_logs_enabled(False)
         self.sidebar.set_save_enabled(network is not None)
         self.sidebar.set_reduction_enabled(network is not None)
+        # Surface the N-K dock once a network is loaded so it's
+        # discoverable; keep it hidden when there's nothing to outage.
+        self.nk_variant_dock_widget.setVisible(network is not None)
         self.overview_tab.set_network(network)
         self.map_tab.set_network(network)
         self.nad_tab.set_network(network)
