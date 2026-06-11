@@ -84,6 +84,39 @@ def test_nicegui_appstate_nk_run_lf_returns_none_without_variant():
     assert seen == []
 
 
+def test_nicegui_build_nk_variant_card_uses_shared_helpers():
+    """The NiceGUI N-K picker card must funnel through
+    ``normalize_manual_contingency`` and the AppState's
+    ``build_nk_variant`` / ``run_nk_loadflow`` / ``clear_nk_variant``
+    so the picker UI stays in lockstep with the Streamlit + PySide6
+    hosts."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_nk_variant_card)
+    for token in (
+        "normalize_manual_contingency",
+        "build_nk_variant",
+        "run_nk_loadflow",
+        "clear_nk_variant",
+        "MANUAL_GROUPING_TOKENS",
+        "MANUAL_TYPE_IDS_KEY",
+        "on_nk_variant_changed",
+        "on_nk_loadflow_completed",
+    ):
+        assert token in src, f"N-K card should reference {token}"
+
+
+def test_nicegui_main_page_includes_nk_variant_card():
+    """The main page's sidebar must invoke ``_build_nk_variant_card``
+    so the picker is registered alongside the existing LF controls."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert "_build_nk_variant_card()" in src
+
+
 def test_nicegui_appstate_install_network_clears_nk():
     """A network swap drops the dock state and fires
     nk_variant_changed(None)."""

@@ -622,6 +622,200 @@ def _open_lf_report_dialog(report_json: Optional[str]) -> None:
     dialog.open()
 
 
+def _build_nk_variant_card() -> None:
+    """N-K Variant picker — analog of the Streamlit sidebar expander
+    and the PySide6 dock.
+
+    Composes:
+
+    * an element-type ``ui.select`` (Lines / 2WTs / 3WTs / Generators),
+    * an ID-substring ``ui.input`` filter,
+    * a multiselect ``ui.select`` of elements,
+    * a grouping ``ui.select`` + a group-id ``ui.input``,
+    * Build / Run N-K LF / Clear buttons that funnel through
+      :meth:`AppState.build_nk_variant` / :meth:`run_nk_loadflow` /
+      :meth:`clear_nk_variant`,
+    * a status label that mirrors ``nk_variant_changed`` /
+      ``nk_loadflow_completed`` events.
+
+    The card sits in a :class:`ui.expansion` so it stays out of the
+    way until the user wants to outage something.
+    """
+    from iidm_viewer.security_analysis import (
+        MANUAL_GROUPINGS,
+        MANUAL_GROUPING_TOKENS,
+        MANUAL_TYPES,
+        MANUAL_TYPE_IDS_KEY,
+        get_element_ids,
+        normalize_manual_contingency,
+    )
+    from iidm_viewer.variants import NK_VARIANT_ID
+
+    # Mutable picker state — kept in a dict so the closures below can
+    # all read / write the same set without nonlocal gymnastics.
+    state: dict = {"all_ids": []}
+
+    with ui.expansion("N-K Variant", icon="bolt").classes("full-width q-mt-sm"):
+        status_lbl = ui.label("").classes("text-caption q-pa-xs")
+        type_select = ui.select(
+            options=list(MANUAL_TYPES),
+            value=MANUAL_TYPES[0],
+            label="Element type",
+        ).classes("full-width")
+        filter_input = ui.input(
+            placeholder="Filter by ID (substring)",
+        ).classes("full-width")
+        ids_select = ui.select(
+            options=[], value=[], multiple=True,
+            label="Pick elements",
+        ).props("use-chips").classes("full-width")
+        grouping_select = ui.select(
+            options=list(MANUAL_GROUPINGS),
+            value=MANUAL_GROUPINGS[0],
+            label="Grouping",
+        ).classes("full-width")
+        group_id_input = ui.input(
+            placeholder="Contingency id (for single grouped mode)",
+        ).classes("full-width")
+
+        with ui.row().classes("full-width items-center q-gutter-sm q-mt-xs"):
+            build_btn = ui.button("Build N-K").props("flat dense")
+            run_lf_btn = ui.button("Run N-K LF").props("flat dense")
+            clear_btn = ui.button("Clear N-K").props("flat dense color=negative")
+        lf_status_lbl = ui.label("").classes("text-caption q-mt-xs")
+
+        def _reload_ids_for_current_type() -> None:
+            if _state.network is None:
+                state["all_ids"] = []
+                ids_select.options = []
+                ids_select.update()
+                return
+            try:
+                ids_map = get_element_ids(_state.network)
+            except Exception:
+                ids_map = {}
+            key = MANUAL_TYPE_IDS_KEY.get(type_select.value, "")
+            state["all_ids"] = list(ids_map.get(key, []))
+            _refresh_id_options()
+
+        def _refresh_id_options() -> None:
+            text = (filter_input.value or "").strip().lower()
+            opts = [
+                eid for eid in state["all_ids"]
+                if not text or text in str(eid).lower()
+            ]
+            ids_select.options = opts
+            # Strip any selection that fell out of the filter.
+            current = ids_select.value or []
+            ids_select.value = [v for v in current if v in opts]
+            ids_select.update()
+
+        def _refresh_buttons() -> None:
+            nk_active = _state.nk_variant_id == NK_VARIANT_ID
+            build_btn.set_enabled(_state.network is not None)
+            run_lf_btn.set_enabled(nk_active)
+            clear_btn.set_enabled(nk_active)
+
+        def _refresh_status() -> None:
+            contingency = _state.nk_contingency
+            if contingency is None:
+                status_lbl.set_text(
+                    "Pick elements to outage, then click Build N-K. "
+                    "Affected tabs surface an N / N-K toggle once "
+                    "the variant exists."
+                )
+                return
+            eids = contingency.get("element_ids") or []
+            status_lbl.set_text(
+                f"Active N-K: {contingency.get('id', '')} — "
+                + ", ".join(eids)
+            )
+
+        def _on_build_clicked() -> None:
+            if _state.network is None:
+                return
+            selected = ids_select.value or []
+            grouping_token = MANUAL_GROUPING_TOKENS.get(
+                grouping_select.value, grouping_select.value,
+            )
+            try:
+                contingencies = normalize_manual_contingency(
+                    type_select.value, list(selected),
+                    grouping_token, group_id_input.value or "",
+                )
+            except ValueError as exc:
+                ui.notify(str(exc), type="warning")
+                return
+            if len(contingencies) > 1:
+                grouped_ids: list[str] = []
+                for c in contingencies:
+                    grouped_ids.extend(c.get("element_ids") or [])
+                first_id = contingencies[0]["id"]
+                cid = (
+                    "N-K_grouped" if first_id.startswith("N1_")
+                    else f"{first_id}_grouped"
+                )
+                contingency = {"id": cid, "element_ids": grouped_ids}
+            else:
+                contingency = contingencies[0]
+            try:
+                _state.build_nk_variant(contingency)
+            except Exception as exc:
+                ui.notify(f"Build N-K failed: {exc}", type="negative")
+                return
+
+        async def _on_run_lf_clicked() -> None:
+            try:
+                result = await asyncio.to_thread(
+                    _state.run_nk_loadflow,
+                    _state.lf_generic_params,
+                    _state.lf_provider_params,
+                )
+            except Exception as exc:
+                ui.notify(f"N-K LF failed: {exc}", type="negative")
+                return
+            if result is None:
+                ui.notify("Build the N-K variant first.", type="warning")
+                return
+            status = result.status
+            color = "positive" if result.converged else "warning"
+            ui.notify(f"N-K LF: {status}", type=color)
+            lf_status_lbl.set_text(f"N-K LF: {status}")
+
+        def _on_clear_clicked() -> None:
+            _state.clear_nk_variant()
+            lf_status_lbl.set_text("")
+
+        def _on_nk_variant_changed(_variant_id) -> None:
+            _refresh_buttons()
+            _refresh_status()
+
+        def _on_nk_loadflow_completed(_result) -> None:
+            if _result is not None:
+                lf_status_lbl.set_text(f"N-K LF: {_result.status}")
+
+        def _on_network_changed(_network) -> None:
+            _reload_ids_for_current_type()
+            _refresh_buttons()
+            _refresh_status()
+
+        type_select.on("update:model-value",
+                       lambda _e=None: _reload_ids_for_current_type())
+        filter_input.on_value_change(lambda _e=None: _refresh_id_options())
+        build_btn.on_click(_on_build_clicked)
+        run_lf_btn.on_click(_on_run_lf_clicked)
+        clear_btn.on_click(_on_clear_clicked)
+
+        _state.on_nk_variant_changed(_on_nk_variant_changed)
+        _state.on_nk_loadflow_completed(_on_nk_loadflow_completed)
+        _state.on_network_changed(_on_network_changed)
+
+        # Initial sync.
+        _reload_ids_for_current_type()
+        _refresh_buttons()
+        _refresh_status()
+
+
 def _open_lf_parameters_dialog(on_save) -> None:
     """Open the "Load Flow Parameters" modal.
 
@@ -7128,6 +7322,11 @@ def main_page() -> None:
         view_logs_btn.on_click(
             lambda: _open_lf_report_dialog(_state.last_report_json),
         )
+
+        # N-K Variant picker — analog of the Streamlit sidebar expander
+        # and the PySide6 dock. Collapsed by default so it stays out of
+        # the way until the user wants to build a contingency variant.
+        _build_nk_variant_card()
 
         # "View live Script" — auto-recorded HMI-mirror script for this
         # session. Always available; the dialog handles the empty-log
