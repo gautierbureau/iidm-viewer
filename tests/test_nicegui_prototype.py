@@ -1387,7 +1387,13 @@ def test_security_analysis_tab_registered_in_main_page():
     src = inspect.getsource(app.main_page)
     assert 'ui.tab("Security Analysis")' in src
     assert "refresh_security_analysis = _build_security_analysis()" in src
-    assert "refresh_security_analysis()" in src
+    # The refresh closure is invoked via _async_refresh_tab so the
+    # function reference appears bare (no parens) in the source. Match
+    # either form so the assertion survives the async wrapper.
+    assert (
+        "refresh_security_analysis()" in src
+        or "_async_refresh_tab(refresh_security_analysis)" in src
+    )
 
 
 def test_security_analysis_builder_uses_shared_core():
@@ -1412,7 +1418,10 @@ def test_short_circuit_analysis_tab_registered_in_main_page():
     src = inspect.getsource(app.main_page)
     assert 'ui.tab("Short Circuit Analysis")' in src
     assert "refresh_short_circuit_analysis = _build_short_circuit_analysis()" in src
-    assert "refresh_short_circuit_analysis()" in src
+    assert (
+        "refresh_short_circuit_analysis()" in src
+        or "_async_refresh_tab(refresh_short_circuit_analysis)" in src
+    )
 
 
 def test_short_circuit_analysis_builder_uses_shared_core():
