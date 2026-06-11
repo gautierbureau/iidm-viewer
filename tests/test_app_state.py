@@ -205,7 +205,8 @@ def test_install_network_invalidates_cache_backend(monkeypatch):
     )
     state.install_network(MagicMock())
     assert state.cache_backend.get(LINES_ALL) is None
-    assert state.cache_backend.get(LF_GEN) == 0
+    # LF_GEN is per-variant: a fresh network resets to the InitialState slot.
+    assert state.cache_backend.get(LF_GEN) == {"InitialState": 0}
 
 
 def test_install_network_emits_network_then_vl(monkeypatch):
@@ -312,9 +313,13 @@ def test_run_loadflow_bumps_lf_gen(monkeypatch):
         "iidm_viewer.app_state.script_recorder.record_run_loadflow",
         lambda *a, **kw: None,
     )
-    assert state.cache_backend.get(LF_GEN, 0) == 0
+    # No counter set yet → reads default 0 via the helper.
+    from iidm_viewer.cache_backend import lf_gen as _lf_gen
+    assert _lf_gen(state.cache_backend) == 0
     state.run_loadflow()
-    assert state.cache_backend.get(LF_GEN) == 1
+    # InitialState counter bumped to 1, stored as a per-variant dict.
+    assert _lf_gen(state.cache_backend) == 1
+    assert state.cache_backend.get(LF_GEN) == {"InitialState": 1}
 
 
 def test_run_loadflow_emits_loadflow_completed(monkeypatch):

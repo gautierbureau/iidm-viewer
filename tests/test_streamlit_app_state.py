@@ -126,7 +126,8 @@ def test_install_network_invalidates_via_streamlit_backend():
         ):
             state.install_network(MagicMock())
         assert LINES_ALL not in shared
-        assert shared.get(LF_GEN) == 0
+        # LF_GEN is per-variant: a fresh network resets to the InitialState slot.
+        assert shared.get(LF_GEN) == {"InitialState": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +179,8 @@ def test_run_loadflow_writes_report_to_session_state():
         # ``_lf_report_json`` session-state key so the LF report dialog
         # and any other reader keeps finding it.
         assert shared["_lf_report_json"] == '{"report": "ok"}'
-        # _lf_gen bumped via the Streamlit cache backend.
-        assert shared[LF_GEN] == 1
+        # _lf_gen bumped via the Streamlit cache backend — per-variant dict.
+        assert shared[LF_GEN] == {"InitialState": 1}
 
 
 def test_run_ac_override_uses_module_local_binding():

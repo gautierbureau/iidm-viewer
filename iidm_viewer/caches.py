@@ -40,6 +40,7 @@ from iidm_viewer.cache_backend import (
     ENRICHED_COMPONENT,
     EXT_DF,
     GENERATORS_ALL,
+    INITIAL_VARIANT_ID,
     LINES_ALL,
     OPLIMITS,
     REACTIVE_CURVES,
@@ -100,31 +101,70 @@ def _net_key(network) -> int:
         return id(network)
 
 
-def _lf_gen() -> int:
-    return _cb.lf_gen(_backend)
+def _lf_gen(variant_id: str = INITIAL_VARIANT_ID) -> int:
+    return _cb.lf_gen(_backend, variant_id)
 
 
-def _cache_key(network) -> tuple[int, int]:
-    return _cb.cache_key(_net_key(network), _cb.lf_gen(_backend))
+def _cache_key(network, variant_id: str = INITIAL_VARIANT_ID) -> tuple:
+    return _cb.cache_key(
+        _net_key(network), _cb.lf_gen(_backend, variant_id),
+        variant_id=variant_id,
+    )
 
 
-def _get_all_attrs(network, session_key: str, getter_name: str):
-    """Cache ``getattr(network, getter_name)(all_attributes=True)`` per (net, lf_gen).
+def _slot_cache_for(session_key: str) -> dict:
+    """Read (or seed) the per-variant container for a single-entry slot.
+
+    Single-entry caches (e.g. ``_lines_all_cache``) now store
+    ``{variant_id: {"key": (net_key, lf_gen, variant_id), "df": DF}}``
+    so multiple variants coexist without one variant's load-flow bump
+    invalidating the others'."""
+    cache = _backend.get(session_key)
+    if not isinstance(cache, dict) or any(
+        not isinstance(v, dict) or "key" not in v for v in cache.values()
+    ):
+        # Either absent or still in the pre-N-K shape {"key": ..., "df": ...}
+        # — start fresh; legacy entries can be dropped because the new
+        # shape is incompatible.
+        cache = {}
+        _backend.set(session_key, cache)
+    return cache
+
+
+def _get_all_attrs(
+    network, session_key: str, getter_name: str,
+    *, variant_id: str = INITIAL_VARIANT_ID,
+):
+    """Cache ``getattr(network, getter_name)(all_attributes=True)``
+    per ``(net, lf_gen, variant_id)``.
 
     Returns the DataFrame with its natural pypowsybl index intact (usually
     the element id). Consumers that want ``reset_index`` should call it
     themselves — ``reset_index`` produces a copy so the cached frame is
     not mutated. Returns an empty DataFrame when the call raises.
+
+    ``variant_id`` (kw-only): when set, the fetch is routed through
+    :func:`iidm_viewer.variants.fetch_for_variant` so the switch +
+    work + restore stays atomic, and the result is stored in the
+    variant's slot in the per-key cache dict.
     """
-    key = _cache_key(network)
-    cached = _backend.get(session_key)
-    if cached is not None and cached.get("key") == key:
-        return cached["df"]
+    key = _cache_key(network, variant_id)
+    cache = _slot_cache_for(session_key)
+    slot = cache.get(variant_id)
+    if slot is not None and slot.get("key") == key:
+        return slot["df"]
     try:
-        df = getattr(network, getter_name)(all_attributes=True)
+        if variant_id == INITIAL_VARIANT_ID:
+            df = getattr(network, getter_name)(all_attributes=True)
+        else:
+            from iidm_viewer.variants import fetch_for_variant
+            df = fetch_for_variant(
+                network, getter_name, variant_id, all_attributes=True,
+            )
     except Exception:
         return pd.DataFrame()
-    _backend.set(session_key, {"key": key, "df": df})
+    cache[variant_id] = {"key": key, "df": df}
+    _backend.set(session_key, cache)
     return df
 
 
@@ -132,12 +172,25 @@ def get_lines_all(network):
     return _get_all_attrs(network, LINES_ALL, "get_lines")
 
 
+def get_lines_all_for_variant(network, variant_id: str = INITIAL_VARIANT_ID):
+    """Variant-keyed counterpart to :func:`get_lines_all`. Falls back
+    to the fast path when ``variant_id`` is ``InitialState``."""
+    return _get_all_attrs(network, LINES_ALL, "get_lines", variant_id=variant_id)
+
+
 def get_2wt_all(network):
     return _get_all_attrs(network, TWO_WT_ALL, "get_2_windings_transformers")
 
 
+def get_2wt_all_for_variant(network, variant_id: str = INITIAL_VARIANT_ID):
+    return _get_all_attrs(
+        network, TWO_WT_ALL, "get_2_windings_transformers",
+        variant_id=variant_id,
+    )
+
+
 def get_buses_all(network):
-    """Cache ``get_buses(all_attributes=True)`` per ``(net_key, lf_gen)``.
+    """Cache ``get_buses(all_attributes=True)`` per ``(net_key, lf_gen, variant_id)``.
 
     Bus voltages (v_mag, v_angle) change after a load flow; the cache is
     auto-invalidated when ``LF_GEN`` bumps and explicitly popped by
@@ -146,23 +199,37 @@ def get_buses_all(network):
     return _get_all_attrs(network, BUSES_ALL, "get_buses")
 
 
+def get_buses_all_for_variant(network, variant_id: str = INITIAL_VARIANT_ID):
+    return _get_all_attrs(
+        network, BUSES_ALL, "get_buses", variant_id=variant_id,
+    )
+
+
 def get_shunts_all(network):
-    """Cache ``get_shunt_compensators(all_attributes=True)`` per ``(net_key, lf_gen)``."""
+    """Cache ``get_shunt_compensators(all_attributes=True)`` per ``(net_key, lf_gen, variant_id)``."""
     return _get_all_attrs(network, SHUNTS_ALL, "get_shunt_compensators")
 
 
 def get_svc_all(network):
-    """Cache ``get_static_var_compensators(all_attributes=True)`` per ``(net_key, lf_gen)``."""
+    """Cache ``get_static_var_compensators(all_attributes=True)`` per ``(net_key, lf_gen, variant_id)``."""
     return _get_all_attrs(network, SVC_ALL, "get_static_var_compensators")
 
 
 def get_generators_all(network):
-    """Cache ``get_generators(all_attributes=True)`` per ``(net_key, lf_gen)``."""
+    """Cache ``get_generators(all_attributes=True)`` per ``(net_key, lf_gen, variant_id)``."""
     return _get_all_attrs(network, GENERATORS_ALL, "get_generators")
 
 
+def get_generators_all_for_variant(
+    network, variant_id: str = INITIAL_VARIANT_ID,
+):
+    return _get_all_attrs(
+        network, GENERATORS_ALL, "get_generators", variant_id=variant_id,
+    )
+
+
 def get_3wt_all(network):
-    """Cache ``get_3_windings_transformers(all_attributes=True)`` per ``(net_key, lf_gen)``."""
+    """Cache ``get_3_windings_transformers(all_attributes=True)`` per ``(net_key, lf_gen, variant_id)``."""
     return _get_all_attrs(network, THREE_WT_ALL, "get_3_windings_transformers")
 
 
@@ -180,24 +247,56 @@ _METHOD_TO_CACHE_FN: dict = {
 
 
 def get_component_df(network, method_name: str) -> pd.DataFrame:
-    """Return ``network.method_name(all_attributes=True)`` cached per ``(net_key, lf_gen)``.
+    """Return ``network.method_name(all_attributes=True)`` cached per ``(net_key, lf_gen, variant_id)``.
 
     For types already cached in this module (lines, generators, buses, etc.)
     delegates to the existing getter so the DataFrame is shared across tabs.
     For all other component types a general :data:`DE_COMPONENT` dict is
-    used, keyed by ``(net_key, lf_gen, method_name)``.
+    used, keyed by ``(net_key, lf_gen, variant_id, method_name)``.
     Returns an empty DataFrame on failure.
     """
-    known = _METHOD_TO_CACHE_FN.get(method_name)
+    return get_component_df_for_variant(network, method_name)
+
+
+_METHOD_TO_VARIANT_CACHE_FN: dict = {
+    "get_lines": get_lines_all_for_variant,
+    "get_2_windings_transformers": get_2wt_all_for_variant,
+    "get_generators": get_generators_all_for_variant,
+    "get_buses": get_buses_all_for_variant,
+}
+
+
+def get_component_df_for_variant(
+    network, method_name: str, variant_id: str = INITIAL_VARIANT_ID,
+) -> pd.DataFrame:
+    """Variant-aware variant of :func:`get_component_df`.
+
+    Routes the call through the per-variant single-entry cache when the
+    method has a dedicated cache slot (lines, 2WTs, generators, buses,
+    etc.), otherwise stashes the result in :data:`DE_COMPONENT` with a
+    variant-keyed lookup tuple."""
+    known = _METHOD_TO_VARIANT_CACHE_FN.get(method_name)
     if known is not None:
-        return known(network)
+        return known(network, variant_id)
+    # Fall back to the un-cached non-variant versions for shunts/SVCs/3WTs
+    # when the caller asked for InitialState — keeps today's behaviour.
+    if variant_id == INITIAL_VARIANT_ID:
+        known = _METHOD_TO_CACHE_FN.get(method_name)
+        if known is not None:
+            return known(network)
 
     cache = _backend.setdefault(DE_COMPONENT, {})
-    key = _cache_key(network) + (method_name,)
+    key = _cache_key(network, variant_id) + (method_name,)
     if key in cache:
         return cache[key]
 
-    df = getattr(network, method_name)(all_attributes=True)
+    if variant_id == INITIAL_VARIANT_ID:
+        df = getattr(network, method_name)(all_attributes=True)
+    else:
+        from iidm_viewer.variants import fetch_for_variant
+        df = fetch_for_variant(
+            network, method_name, variant_id, all_attributes=True,
+        )
     cache[key] = df
     return df
 
@@ -362,7 +461,7 @@ def enrich_with_joins(df: pd.DataFrame, vl_lookup: pd.DataFrame) -> pd.DataFrame
 
 
 def get_enriched_component(network, method_name: str) -> pd.DataFrame:
-    """Component DF enriched with VL-derived columns, cached per ``(net_key, lf_gen)``.
+    """Component DF enriched with VL-derived columns, cached per ``(net_key, lf_gen, variant_id)``.
 
     Delegates to :func:`get_component_df` then applies :func:`enrich_with_joins`
     so callers never re-run the merge on repeated reruns.  The enriched
@@ -370,11 +469,20 @@ def get_enriched_component(network, method_name: str) -> pd.DataFrame:
     filters on the result rather than before calling this function.
     Returns an empty DataFrame when the component type is absent or fails.
     """
+    return get_enriched_component_for_variant(network, method_name)
+
+
+def get_enriched_component_for_variant(
+    network, method_name: str, variant_id: str = INITIAL_VARIANT_ID,
+) -> pd.DataFrame:
+    """Variant-aware variant of :func:`get_enriched_component`. The VL
+    lookup is variant-invariant and stays on the InitialState fast path
+    regardless of the variant requested for the component frame."""
     cache = _backend.setdefault(ENRICHED_COMPONENT, {})
-    key = _cache_key(network) + (method_name,)
+    key = _cache_key(network, variant_id) + (method_name,)
     if key in cache:
         return cache[key]
-    df = get_component_df(network, method_name)
+    df = get_component_df_for_variant(network, method_name, variant_id)
     if not df.empty:
         df = enrich_with_joins(df, get_vl_lookup(network))
     cache[key] = df
@@ -425,15 +533,19 @@ def invalidate_on_topology_change(affects_geography: bool = False) -> None:
     _cb.invalidate_topology(_backend, affects_geography=affects_geography)
 
 
-def invalidate_on_load_flow() -> None:
-    """Bump ``_lf_gen`` and pop caches affected by the new flow solution.
+def invalidate_on_load_flow(variant_id: str = INITIAL_VARIANT_ID) -> None:
+    """Bump ``_lf_gen[variant_id]`` and pop caches affected by the
+    new flow solution on ``variant_id``.
 
     ``_lf_gen`` alone would be enough for caches keyed by
-    ``(net_key, lf_gen)``; we still pop explicitly to free memory and
-    cover caches (``_nad_cache``, ``_sld_cache``, ``_buses_all``) that
-    are not keyed by ``lf_gen``.
+    ``(net_key, lf_gen, variant_id)``; we still pop explicitly to
+    free memory and cover caches (``_nad_cache``, ``_sld_cache``,
+    ``_buses_all``) that are not keyed by ``lf_gen``.
+
+    Defaults to ``"InitialState"`` so today's call sites
+    (:meth:`state.AppState.run_loadflow`) keep working unchanged.
     """
-    _cb.invalidate_load_flow(_backend)
+    _cb.invalidate_load_flow(_backend, variant_id=variant_id)
 
 
 def invalidate_on_network_replace() -> None:

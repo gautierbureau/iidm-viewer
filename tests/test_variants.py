@@ -275,7 +275,88 @@ def test_drop_variant_is_idempotent(ieee14):
 
 
 # ---------------------------------------------------------------------------
-# variant_id plumbing in the six core surfaces
+# Streamlit cache layer extensions — variant-keyed _lf_gen / cache_key,
+# per-variant single-entry caches, _invalidate_topology wrapper.
+# ---------------------------------------------------------------------------
+def test_streamlit_lf_gen_keyed_per_variant():
+    """Bumping the InitialState counter via the Streamlit caches helper
+    must not touch the N-K counter and vice versa."""
+    from iidm_viewer import caches
+    from iidm_viewer.cache_backend import DictBackend
+    from unittest.mock import patch
+
+    backend = DictBackend()
+    with patch.object(caches, "_backend", backend):
+        caches.invalidate_on_load_flow()  # InitialState bump
+        caches.invalidate_on_load_flow(variant_id=NK_VARIANT_ID)
+        assert caches._lf_gen() == 1
+        assert caches._lf_gen(NK_VARIANT_ID) == 1
+        caches.invalidate_on_load_flow(variant_id=NK_VARIANT_ID)
+        assert caches._lf_gen() == 1       # untouched
+        assert caches._lf_gen(NK_VARIANT_ID) == 2
+
+
+def test_streamlit_get_lines_all_for_variant_round_trip(ieee14):
+    """The variant-keyed cache must hand back the variant's actual
+    DataFrame (with the disconnect applied) on a hit and on a miss."""
+    from iidm_viewer import caches
+    from iidm_viewer.cache_backend import DictBackend
+    from unittest.mock import patch
+
+    backend = DictBackend()
+    build_contingency_variant(
+        ieee14, {"id": "x", "element_ids": ["L1-2-1"]},
+    )
+    try:
+        with patch.object(caches, "_backend", backend):
+            # Miss: fetches via fetch_for_variant.
+            df_nk = caches.get_lines_all_for_variant(ieee14, NK_VARIANT_ID)
+            assert bool(df_nk.loc["L1-2-1", "connected1"]) is False
+            # Hit: reads the cache slot.
+            df_nk_again = caches.get_lines_all_for_variant(
+                ieee14, NK_VARIANT_ID,
+            )
+            assert bool(df_nk_again.loc["L1-2-1", "connected1"]) is False
+            # The two variants coexist in the same cache slot dict.
+            df_base = caches.get_lines_all(ieee14)
+            assert bool(df_base.loc["L1-2-1", "connected1"]) is True
+            # Working variant restored after every call.
+            assert get_working_variant_id(ieee14) == INITIAL_VARIANT_ID
+    finally:
+        drop_variant(ieee14)
+
+
+def test_streamlit_invalidate_topology_drops_nk_variant(ieee14):
+    """The state-side wrapper :func:`state._invalidate_topology` must
+    drop the N-K variant alongside the topology slot pops + clear the
+    N-K dock keys."""
+    from iidm_viewer import caches, cache_backend
+    from iidm_viewer.cache_backend import DictBackend
+    from iidm_viewer.state import _invalidate_topology
+    from unittest.mock import patch
+
+    build_contingency_variant(
+        ieee14, {"id": "x", "element_ids": ["L1-2-1"]},
+    )
+    assert NK_VARIANT_ID in list_variants(ieee14)
+
+    backend = DictBackend()
+    backend.set(cache_backend.NK_CONTINGENCY, {"id": "x"})
+    backend.set(cache_backend.NK_VARIANT_ID, NK_VARIANT_ID)
+
+    # Patch the streamlit session_state for the dock-key pops + the
+    # cache backend for the topology slot pops.
+    fake_session = {
+        cache_backend.NK_CONTINGENCY: {"id": "x"},
+        cache_backend.NK_VARIANT_ID: NK_VARIANT_ID,
+    }
+    with patch("iidm_viewer.state.st") as state_st, \
+            patch.object(caches, "_backend", backend):
+        state_st.session_state = fake_session
+        _invalidate_topology(ieee14)
+    assert NK_VARIANT_ID not in list_variants(ieee14)
+    for key in cache_backend.NK_CACHE_KEYS:
+        assert key not in fake_session
 #
 # The contract: variant_id=None (or InitialState) is behaviour-identical to
 # the pre-N-K signature; variant_id="N-K" returns the N-K variant's view.
