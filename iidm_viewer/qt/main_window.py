@@ -280,6 +280,7 @@ class MainWindow(QMainWindow):
         self.nad_tab.set_cache_backend(self.state.cache_backend)
         self.sld_tab = SldTab()
         self.sld_tab.set_cache_backend(self.state.cache_backend)
+        self.sld_tab.set_state(self.state)
         self.data_tab = DataExplorerTab()
         self.extensions_tab = ExtensionsExplorerTab()
         self.reactive_curves_tab = ReactiveCurvesTab()
