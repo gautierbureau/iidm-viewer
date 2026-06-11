@@ -142,6 +142,21 @@ def test_nicegui_data_explorer_threads_variant_id_and_gates_writes():
     assert "on_nk_variant_changed" in src
 
 
+def test_nicegui_sld_panel_threads_variant_id():
+    """The NiceGUI SLD tab panel must surface a view-mode select and
+    wire ``_sld_variant_id`` to the dock's ``nk_variant_changed``
+    listener."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    assert "sld_view_mode_select" in src
+    assert "_sld_variant_id" in src
+    # _push_sld reads _sld_variant_id when building the cache key.
+    push_src = inspect.getsource(app._push_sld)
+    assert "_sld_variant_id" in push_src
+
+
 def test_nicegui_main_page_includes_nk_variant_card():
     """The main page's sidebar must invoke ``_build_nk_variant_card``
     so the picker is registered alongside the existing LF controls."""

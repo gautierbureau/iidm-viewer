@@ -330,6 +330,11 @@ def _push_map() -> None:
 
 
 _sld_show_substation: bool = False
+# Active variant the SLD tab renders against. Flipped by the per-tab
+# view-mode select (registered inside the SLD tab panel); defaults to
+# InitialState so today's behaviour is preserved before any combo
+# interaction.
+_sld_variant_id: str = "InitialState"
 
 
 def _get_substation_for_vl(vl_id: str):
@@ -367,16 +372,16 @@ def _push_sld(vl_id: str) -> None:
         svg_type = "voltage-level"
 
     # SLD cache key is (container_id, variant_id) so the InitialState
-    # and N-K SVGs coexist in the same slot. The per-tab N-K rollout
-    # in the NiceGUI app starts using non-default variant_ids; for now
-    # we forward-compat the cache shape with the InitialState default.
-    from iidm_viewer.variants import INITIAL_VARIANT_ID as _INIT
-    cache_key = (container_id, _INIT)
+    # and N-K SVGs coexist in the same slot. The active variant is
+    # ``_sld_variant_id`` — the per-tab view-mode select flips it
+    # and calls _push_sld again.
+    variant_id = _sld_variant_id
+    cache_key = (container_id, variant_id)
     entry = _get_sld_cache().get(cache_key)
     if entry is None:
         try:
             entry = _generate_sld(
-                _state.network, container_id, variant_id=_INIT,
+                _state.network, container_id, variant_id=variant_id,
             )
         except Exception as exc:
             ui.notify(f"SLD generation failed for {container_id}: {exc}", type="negative")
@@ -7507,7 +7512,12 @@ def main_page() -> None:
             ).style("display:flex;justify-content:center").classes("w-full")
         with ui.tab_panel(sld_tab).classes("q-pa-none w-full"):
             with ui.row().classes("items-center q-pa-sm w-full"):
-                sld_vl_label = ui.label("").classes("text-caption")
+                ui.label("View:").classes("text-caption")
+                sld_view_mode_select = ui.select(
+                    options=["N", "N-K"], value="N",
+                ).props("dense outlined").classes("w-24")
+                sld_view_mode_select.set_enabled(False)
+                sld_vl_label = ui.label("").classes("text-caption q-ml-md")
                 sld_expand_btn = ui.button("Expand to substation") \
                     .props("flat dense").classes("q-ml-md")
                 sld_expand_btn.visible = False
@@ -7517,6 +7527,39 @@ def main_page() -> None:
                 'border:none;display:block;margin:0 auto"></iframe>',
                 sanitize=False,
             ).style("display:flex;justify-content:center").classes("w-full")
+
+            def _sld_on_view_mode_changed(_e=None) -> None:
+                global _sld_variant_id
+                new_v = (
+                    "N-K" if sld_view_mode_select.value == "N-K"
+                    else "InitialState"
+                )
+                if new_v == _sld_variant_id:
+                    return
+                _sld_variant_id = new_v
+                if _state.selected_vl:
+                    _push_sld(_state.selected_vl)
+
+            def _sld_on_nk_variant_changed(variant_id) -> None:
+                global _sld_variant_id
+                active = variant_id == "N-K"
+                sld_view_mode_select.set_enabled(active)
+                if not active:
+                    sld_view_mode_select.value = "N"
+                    sld_view_mode_select.update()
+                    if _sld_variant_id != "InitialState":
+                        _sld_variant_id = "InitialState"
+                        if _state.selected_vl:
+                            _push_sld(_state.selected_vl)
+
+            sld_view_mode_select.on(
+                "update:model-value", _sld_on_view_mode_changed,
+            )
+            _state.on_nk_variant_changed(_sld_on_nk_variant_changed)
+            _state.on_nk_loadflow_completed(
+                lambda _r: _push_sld(_state.selected_vl)
+                if _state.selected_vl else None
+            )
         def _on_topology_changed():
             """Rebuild VL picker + flush diagram caches after a create/delete."""
             try:
