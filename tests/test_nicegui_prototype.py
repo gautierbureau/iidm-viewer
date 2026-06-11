@@ -107,6 +107,41 @@ def test_nicegui_build_nk_variant_card_uses_shared_helpers():
         assert token in src, f"N-K card should reference {token}"
 
 
+def test_nicegui_reactive_curves_threads_variant_id():
+    """The NiceGUI Reactive Curves tab builder must thread variant_id
+    into ``build_reactive_curves_view_model`` so the active variant
+    drives the gens frame fetch."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_reactive_curves)
+    assert "variant_id=" in src
+    assert "on_nk_variant_changed" in src
+
+
+def test_nicegui_operational_limits_threads_variant_id():
+    """Same as Reactive Curves but for the Operational Limits tab."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_operational_limits)
+    assert "variant_id=" in src
+    assert "on_nk_variant_changed" in src
+
+
+def test_nicegui_data_explorer_threads_variant_id_and_gates_writes():
+    """The Data Explorer builder threads variant_id into the view-model
+    builder AND gates the cell-edit + bulk-edit handlers on
+    InitialState so N-K mode stays read-only."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_data_explorer)
+    assert "variant_id=" in src
+    assert "N-K view is read-only" in src
+    assert "on_nk_variant_changed" in src
+
+
 def test_nicegui_main_page_includes_nk_variant_card():
     """The main page's sidebar must invoke ``_build_nk_variant_card``
     so the picker is registered alongside the existing LF controls."""
