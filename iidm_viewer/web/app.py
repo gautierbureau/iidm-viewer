@@ -3450,8 +3450,8 @@ def _build_data_explorer(on_topology_changed=None):
     with ui.row().classes("q-pa-sm items-center w-full"):
         ui.label("View:").classes("text-caption")
         view_mode_select = ui.select(
-            options=["N", "N-K"], value="N",
-        ).props("dense outlined").classes("w-24")
+            options=["N", "N-K", "Side-by-side"], value="N",
+        ).props("dense outlined").classes("w-40")
         view_mode_select.set_enabled(False)
         ui.label("Component:").classes("q-ml-md")
         select = ui.select(
@@ -3599,6 +3599,28 @@ def _build_data_explorer(on_topology_changed=None):
         "rowSelection": "multiple",
     }, auto_size_columns=False).classes("w-full").style("height: 600px")
 
+    # --- Side-by-side container ------------------------------------------
+    # Hidden until the view-mode select is set to 'Side-by-side'. Two
+    # grids stacked horizontally: N (editable) on the left, N-K
+    # (read-only) on the right.
+    de_side_by_side = ui.column().classes("w-full q-pa-sm")
+    with de_side_by_side:
+        sxs_de_caption = ui.label("").classes("text-caption q-mb-sm")
+        with ui.row().classes("w-full no-wrap q-gutter-md"):
+            with ui.column().classes("col"):
+                ui.label("N (base)").classes("text-subtitle1")
+                de_sxs_grid_n = ui.aggrid({
+                    "columnDefs": [], "rowData": [],
+                    "defaultColDef": _DEFAULT_COL_DEF,
+                }, auto_size_columns=False).classes("w-full").style("height: 580px")
+            with ui.column().classes("col"):
+                ui.label("N-K (contingency — read-only)").classes("text-subtitle1")
+                de_sxs_grid_nk = ui.aggrid({
+                    "columnDefs": [], "rowData": [],
+                    "defaultColDef": _DEFAULT_COL_DEF,
+                }, auto_size_columns=False).classes("w-full").style("height: 580px")
+    de_side_by_side.visible = False
+
     # --- Bulk-edit panel --------------------------------------------------
     # ag-Grid keeps the selection on the client; we resolve it on demand
     # via ``grid.get_selected_rows()`` rather than mirroring it in Python.
@@ -3725,7 +3747,14 @@ def _build_data_explorer(on_topology_changed=None):
         # ``is_removable`` comes from the view-model so PySide6 + NiceGUI
         # share one removability source of truth.
         is_removable = vm.is_removable
-        bulk_row.set_visibility(bool(cols) or is_disconnectable or is_removable)
+        # N-K is read-only by contract: hide the entire bulk-edit row
+        # in N-K mode (and gate the apply buttons in Side-by-side, where
+        # only the N pane drives edits).
+        editable_variant = de_state["variant_id"] == INITIAL_VARIANT_ID
+        bulk_row.set_visibility(
+            editable_variant
+            and (bool(cols) or is_disconnectable or is_removable)
+        )
         # When the component isn't editable, hide the edit-only inputs
         # so the row reads cleanly as just "Disconnect" / "Delete".
         bulk_label.set_visibility(bool(cols))
@@ -3735,6 +3764,52 @@ def _build_data_explorer(on_topology_changed=None):
         disconnect_button.set_visibility(is_disconnectable)
         delete_button.set_visibility(is_removable)
         bulk_label.set_text("Apply to selection:")
+
+        # Side-by-side: surface a read-only N-K pane next to the active
+        # InitialState pane so the user can diff rows. The primary grid
+        # above stays bound to InitialState in this mode (set in
+        # _on_view_mode_changed).
+        sxs = _current_de_view_mode() == "Side-by-side"
+        de_side_by_side.visible = sxs
+        if sxs:
+            _render_de_side_by_side(label, df, vl_applicable)
+
+    def _render_de_side_by_side(label: str, n_df, vl_applicable: bool) -> None:
+        """Populate the two side-by-side grids: left = N rows
+        (already cached in ``n_df``), right = N-K rows."""
+        from iidm_viewer.data_view import build_data_explorer_view_model
+        # The N pane reuses the InitialState rows we just computed; the
+        # N-K pane needs its own view-model build.
+        try:
+            nk_vm = build_data_explorer_view_model(
+                _state.network, label,
+                selected_vl=_state.selected_vl,
+                filter_by_vl=(vl_applicable and vl_filter.value),
+                variant_id=NK_VARIANT_ID,
+            )
+        except Exception as exc:
+            sxs_de_caption.set_text(f"Side-by-side build failed: {exc}")
+            return
+        nk_df = nk_vm.rows_df if nk_vm is not None else None
+        sxs_de_caption.set_text(
+            f"{n_df.shape[0]} rows in N · "
+            f"{(nk_df.shape[0] if nk_df is not None else 0)} in N-K"
+        )
+
+        def _grid_opts(df) -> dict:
+            if df is None or df.empty:
+                return {
+                    "columnDefs": [], "rowData": [],
+                    "defaultColDef": _DEFAULT_COL_DEF,
+                }
+            return _dataframe_to_aggrid_options(
+                df, editable_cols=[], filterable_cols=[],
+            )
+
+        de_sxs_grid_n.options.update(_grid_opts(n_df))
+        de_sxs_grid_n.update()
+        de_sxs_grid_nk.options.update(_grid_opts(nk_df))
+        de_sxs_grid_nk.update()
 
     def on_cell_changed(e) -> None:
         """ag-Grid emits ``cellValueChanged`` with ``data, colId, oldValue, newValue``."""
@@ -3968,9 +4043,18 @@ def _build_data_explorer(on_topology_changed=None):
     grid.on("cellValueChanged", on_cell_changed)
     select.on_value_change(lambda _e: refresh())
 
+    def _current_de_view_mode() -> str:
+        return view_mode_select.value or "N"
+
     def _on_view_mode_changed(_e=None) -> None:
-        new_v = NK_VARIANT_ID if view_mode_select.value == "N-K" else INITIAL_VARIANT_ID
-        if new_v == de_state["variant_id"]:
+        mode = _current_de_view_mode()
+        if mode == "Side-by-side":
+            new_v = INITIAL_VARIANT_ID  # primary pane drives bulk-edit gates
+        elif mode == "N-K":
+            new_v = NK_VARIANT_ID
+        else:
+            new_v = INITIAL_VARIANT_ID
+        if new_v == de_state["variant_id"] and mode != "Side-by-side":
             return
         de_state["variant_id"] = new_v
         refresh()
