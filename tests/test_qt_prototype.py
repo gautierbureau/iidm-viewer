@@ -1995,6 +1995,89 @@ def test_qt_nk_dock_status_reflects_active_contingency(qapp):
     assert "Build N-K" in dock._status_lbl.text()
 
 
+def test_qt_sld_side_by_side_shows_both_panes(qapp):
+    """Picking Side-by-side splits the SLD panel and shows the N-K
+    pane alongside the InitialState pane. Flipping back to N hides
+    the N-K pane."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.sld_tab import SldTab
+    from iidm_viewer.qt.state import AppState
+    from iidm_viewer.variants import INITIAL_VARIANT_ID, drop_variant
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    tab = SldTab()
+    tab.set_cache_backend(state.cache_backend)
+    tab.set_state(state)
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+    try:
+        # Combo carries the three-mode option set.
+        opts = [
+            tab._view_mode_combo.itemText(i)
+            for i in range(tab._view_mode_combo.count())
+        ]
+        assert opts == ["N", "N-K", "Side-by-side"]
+
+        tab._view_mode_combo.setCurrentText("Side-by-side")
+        qapp.processEvents()
+        # The primary view stays on InitialState; the N-K view tracks the
+        # right pane and is now part of the splitter's visible layout.
+        assert tab._view_mode == "Side-by-side"
+        assert tab._variant_id == INITIAL_VARIANT_ID
+        # When the parent isn't shown, isVisible() returns False on the
+        # children — assert via the splitter's child index instead.
+        assert tab._splitter.widget(1) is tab._view_nk
+        # ``setVisible(True)`` was called in the handler; the explicit
+        # bookkeeping flag we can read regardless of parent visibility.
+        assert tab._view_nk.isVisibleTo(tab._splitter) is True
+
+        # Flip back to N — N-K pane hides again.
+        tab._view_mode_combo.setCurrentText("N")
+        qapp.processEvents()
+        assert tab._view_mode == "N"
+        assert tab._view_nk.isVisibleTo(tab._splitter) is False
+    finally:
+        drop_variant(state.network)
+
+
+def test_qt_sld_side_by_side_populates_both_cache_slots(qapp):
+    """In Side-by-side, ``show_voltage_level`` pre-fetches both
+    variants' SVGs so a re-render hits the cache for both panes."""
+    import pypowsybl.network as pn
+    from iidm_viewer.cache_backend import SLD
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.sld_tab import SldTab
+    from iidm_viewer.qt.state import AppState
+    from iidm_viewer.variants import (
+        INITIAL_VARIANT_ID, NK_VARIANT_ID, drop_variant,
+    )
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    tab = SldTab()
+    tab.set_cache_backend(state.cache_backend)
+    tab.set_state(state)
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+    try:
+        tab._view_mode_combo.setCurrentText("Side-by-side")
+        tab.set_network(state.network)  # rebind so show_voltage_level fires
+        # Pick any VL that the IEEE14 ships with.
+        raw = object.__getattribute__(state.network, "_obj")
+        vl_id = run(
+            lambda: list(raw.get_voltage_levels(attributes=[]).index)
+        )[0]
+        tab.show_voltage_level(vl_id)
+        qapp.processEvents()
+        cache = tab._cache_backend.setdefault(SLD, {})
+        assert (vl_id, INITIAL_VARIANT_ID) in cache
+        assert (vl_id, NK_VARIANT_ID) in cache
+    finally:
+        drop_variant(state.network)
+
+
 def test_qt_sld_view_mode_combo_disabled_until_variant_built(qapp):
     """The SLD tab's view-mode combo is disabled until the dock
     builds an N-K variant; flipping it then routes through the
