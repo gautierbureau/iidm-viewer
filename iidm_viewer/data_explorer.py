@@ -1268,10 +1268,19 @@ def _render_de_pane(
                 st.info(f"No {component.lower()} in this voltage level.")
                 return
 
+            # Default-mode pane keeps the historical "flt_..." widget key
+            # so existing tests + persisted filter UI state survive the
+            # refactor; side-by-side panes scope by key_prefix so the
+            # two views don't collide.
+            flt_prefix = (
+                f"flt_{method_name}"
+                if key_prefix == "de"
+                else f"{key_prefix}_flt_{method_name}"
+            )
             specs = collect_filter_specs(
                 vl_vm.rows_df,
                 FILTERS.get(component, []),
-                key_prefix=f"{key_prefix}_flt_{method_name}",
+                key_prefix=flt_prefix,
             )
 
             vm = _build_view_model(
