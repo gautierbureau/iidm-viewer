@@ -75,13 +75,72 @@ def test_dict_backend_keys_lists_set_keys():
 # --- Cache key helper -------------------------------------------------------
 
 
-def test_cache_key_no_extras_is_pair():
-    assert cb.cache_key(123, 4) == (123, 4)
+def test_cache_key_no_extras_is_net_gen_variant_triple():
+    # variant_id defaults to "InitialState" so the tuple stays the same
+    # for every pre-N-K caller without needing them to pass it explicitly.
+    assert cb.cache_key(123, 4) == (123, 4, "InitialState")
 
 
 def test_cache_key_with_extras_appends_them():
-    assert cb.cache_key(123, 4, "get_lines") == (123, 4, "get_lines")
-    assert cb.cache_key(123, 4, "x", "y") == (123, 4, "x", "y")
+    assert cb.cache_key(123, 4, "get_lines") == (123, 4, "InitialState", "get_lines")
+    assert cb.cache_key(123, 4, "x", "y") == (123, 4, "InitialState", "x", "y")
+
+
+def test_cache_key_variant_id_changes_tuple():
+    """Different ``variant_id`` values must produce distinct cache keys
+    so the same (net, lf_gen) coordinates don't collide across variants."""
+    assert (
+        cb.cache_key(123, 4, variant_id="N-K")
+        != cb.cache_key(123, 4, variant_id="InitialState")
+    )
+
+
+def test_lf_gen_keyed_per_variant():
+    """Bumping one variant's counter must not disturb another's."""
+    b = DictBackend()
+    assert cb.lf_gen(b, "N-K") == 0
+    cb.bump_lf_gen(b)  # default InitialState bump
+    cb.bump_lf_gen(b, "N-K")
+    cb.bump_lf_gen(b, "N-K")
+    assert cb.lf_gen(b) == 1
+    assert cb.lf_gen(b, "N-K") == 2
+
+
+def test_lf_gen_migrates_legacy_int_storage():
+    """A backend still carrying an int (pre-N-K shape) must still read
+    correctly as the InitialState counter."""
+    b = DictBackend()
+    b.set(LF_GEN, 3)
+    assert cb.lf_gen(b) == 3
+    # Next bump rewrites it as a dict.
+    cb.bump_lf_gen(b)
+    assert isinstance(b.get(LF_GEN), dict)
+    assert b.get(LF_GEN)["InitialState"] == 4
+
+
+def test_invalidate_load_flow_only_bumps_requested_variant():
+    b = DictBackend()
+    cb.invalidate_load_flow(b)  # default InitialState
+    cb.invalidate_load_flow(b, variant_id="N-K")
+    assert cb.lf_gen(b) == 1
+    assert cb.lf_gen(b, "N-K") == 1
+    cb.invalidate_load_flow(b, variant_id="N-K")
+    assert cb.lf_gen(b) == 1   # not bumped
+    assert cb.lf_gen(b, "N-K") == 2
+
+
+def test_invalidate_network_replace_pops_nk_slots():
+    """Network replace must drop the N-K dock state alongside every
+    DataFrame / map cache."""
+    b = DictBackend()
+    for slot in cb.NK_CACHE_KEYS:
+        b.set(slot, {"placeholder": slot})
+    cb.bump_lf_gen(b, "N-K")
+    cb.invalidate_network_replace(b)
+    for slot in cb.NK_CACHE_KEYS:
+        assert b.get(slot) is None
+    # LF counter is back to a clean {"InitialState": 0}.
+    assert b.get(LF_GEN) == {"InitialState": 0}
 
 
 # --- LF generation counter --------------------------------------------------
@@ -96,7 +155,9 @@ def test_bump_lf_gen_increments_and_returns_new_value():
     b = DictBackend()
     assert cb.bump_lf_gen(b) == 1
     assert cb.bump_lf_gen(b) == 2
-    assert b.get(LF_GEN) == 2
+    # LF_GEN now stores a per-variant dict — default variant counter is 2.
+    assert b.get(LF_GEN) == {"InitialState": 2}
+    assert cb.lf_gen(b) == 2
 
 
 def test_reset_lf_gen_zeroes_counter():

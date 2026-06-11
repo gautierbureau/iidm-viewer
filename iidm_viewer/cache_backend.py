@@ -23,6 +23,16 @@ The backend is intentionally minimal:
   :data:`GEOGRAPHY_SLOTS`, :data:`NETWORK_REPLACE_SLOTS`) drive the three
   invalidation hooks (:func:`invalidate_topology`,
   :func:`invalidate_load_flow`, :func:`invalidate_network_replace`).
+
+Variant awareness
+-----------------
+
+Per the N-K plan, ``LF_GEN`` storage is a ``dict[str, int]`` keyed by
+variant id so the InitialState ('N') and N-K counters bump
+independently. ``cache_key`` includes ``variant_id`` so multiple
+variants coexist in the same dict-shaped cache without collisions.
+:data:`NK_CACHE_KEYS` lists the session keys carrying the N-K dock's
+state so :func:`invalidate_network_replace` can pop them all.
 """
 from __future__ import annotations
 
@@ -105,6 +115,14 @@ SUBSTATION_POSITIONS = "_substation_positions_cache"
 VOLTAGE_MAP = "_voltage_map_cache"
 INJECTION_MAP = "_injection_map_cache"
 
+# N-K variant state — kept here so :func:`invalidate_network_replace`
+# pops them and so each host's state extension imports a single source
+# of truth for the slot names.
+NK_CONTINGENCY = "_nk_contingency"
+NK_VARIANT_ID = "_nk_variant_id"
+NK_LF_STATUS = "_nk_lf_status"
+NK_LF_REPORT_JSON = "_nk_lf_report_json"
+
 
 # --- Slot groupings for invalidation ----------------------------------------
 
@@ -154,33 +172,78 @@ NETWORK_REPLACE_SLOTS: tuple[str, ...] = (
     INJECTION_MAP,
 )
 
+#: N-K dock state — popped on network replace (the N-K variant lives on
+#: the dying raw network handle, so no :func:`drop_variant` call is needed).
+NK_CACHE_KEYS: tuple[str, ...] = (
+    NK_CONTINGENCY,
+    NK_VARIANT_ID,
+    NK_LF_STATUS,
+    NK_LF_REPORT_JSON,
+)
+
 
 # --- Load-flow generation counter -------------------------------------------
+#
+# Storage shape: ``dict[str, int]`` keyed by variant id. Bumping the
+# InitialState counter doesn't disturb the N-K counter and vice versa,
+# so per-variant ``(net_key, lf_gen, variant_id)`` cache keys stay
+# stable across cross-variant LF runs.
 
-def lf_gen(backend: CacheBackend) -> int:
-    """Read the load-flow generation counter from ``backend``."""
-    return backend.get(LF_GEN, 0)
+INITIAL_VARIANT_ID = "InitialState"
 
 
-def bump_lf_gen(backend: CacheBackend) -> int:
-    """Increment the LF generation counter and return the new value."""
-    new = lf_gen(backend) + 1
-    backend.set(LF_GEN, new)
-    return new
+def _read_lf_gen_map(backend: CacheBackend) -> dict[str, int]:
+    """Return the per-variant LF counter dict, migrating legacy int
+    storage in-place when the backend still carries the pre-N-K shape."""
+    raw = backend.get(LF_GEN)
+    if isinstance(raw, dict):
+        return raw
+    if raw is None:
+        return {}
+    return {INITIAL_VARIANT_ID: int(raw)}
+
+
+def lf_gen(backend: CacheBackend, variant_id: str = INITIAL_VARIANT_ID) -> int:
+    """Read the load-flow generation counter for ``variant_id``.
+
+    Returns ``0`` for variants that have never run a load flow."""
+    return _read_lf_gen_map(backend).get(variant_id, 0)
+
+
+def bump_lf_gen(
+    backend: CacheBackend, variant_id: str = INITIAL_VARIANT_ID,
+) -> int:
+    """Increment ``variant_id``'s LF generation counter and return the
+    new value."""
+    gens = _read_lf_gen_map(backend)
+    gens[variant_id] = gens.get(variant_id, 0) + 1
+    backend.set(LF_GEN, gens)
+    return gens[variant_id]
 
 
 def reset_lf_gen(backend: CacheBackend) -> None:
-    """Reset the LF generation counter to ``0`` (network replace)."""
-    backend.set(LF_GEN, 0)
+    """Reset the LF generation counter to ``{"InitialState": 0}``
+    (network replace). The N-K counter is implicitly dropped along
+    with the rest of the dict."""
+    backend.set(LF_GEN, {INITIAL_VARIANT_ID: 0})
 
 
 # --- Cache keying -----------------------------------------------------------
 
-def cache_key(net_key: int, gen: int, *extra: Any) -> tuple:
-    """Build a cache key tuple from network id, LF generation and extras."""
+def cache_key(
+    net_key: int, gen: int, *extra: Any,
+    variant_id: str = INITIAL_VARIANT_ID,
+) -> tuple:
+    """Build a cache key tuple from network id, LF generation, variant
+    id and any extra suffix.
+
+    The ``variant_id`` argument is keyword-only so today's call sites
+    that only need ``(net_key, gen)`` lookups keep working — the
+    default ``"InitialState"`` slot matches the pre-N-K shape semantically
+    while making the tuple distinct per variant."""
     if extra:
-        return (net_key, gen, *extra)
-    return (net_key, gen)
+        return (net_key, gen, variant_id, *extra)
+    return (net_key, gen, variant_id)
 
 
 # --- Invalidation -----------------------------------------------------------
@@ -216,24 +279,40 @@ def invalidate_topology(
         _pop_all(backend, GEOGRAPHY_SLOTS)
 
 
-def invalidate_load_flow(backend: CacheBackend) -> None:
-    """Bump ``LF_GEN`` and pop caches affected by the new flow solution.
+def invalidate_load_flow(
+    backend: CacheBackend, *, variant_id: str = INITIAL_VARIANT_ID,
+) -> None:
+    """Bump ``variant_id``'s LF counter and pop caches affected by the
+    new flow solution.
 
     ``LF_GEN`` alone would be enough for caches keyed by
-    ``(net_key, lf_gen)``; we still pop explicitly to free memory and
-    cover caches (:data:`NAD`, :data:`SLD`, :data:`BUSES_ALL`) that are not
-    keyed by ``lf_gen``.
+    ``(net_key, lf_gen, variant_id)``; we still pop explicitly to free
+    memory and cover caches (:data:`NAD`, :data:`SLD`, :data:`BUSES_ALL`)
+    that are not keyed by ``lf_gen``.
+
+    ``variant_id`` (kw-only): when set to a non-InitialState variant,
+    only that variant's counter is bumped — the N-side caches stay
+    warm across an N-K LF run.
     """
-    bump_lf_gen(backend)
+    bump_lf_gen(backend, variant_id)
     _pop_all(backend, TOPOLOGY_SLOTS)
     _pop_all(backend, LOAD_FLOW_SLOTS)
 
 
 def invalidate_network_replace(backend: CacheBackend) -> None:
     """Pop every per-network cache — used by ``load_network`` /
-    ``create_empty_network``."""
+    ``create_empty_network``.
+
+    Also drops the N-K dock state (the N-K variant lives on the old
+    raw network and is implicitly released along with it) and resets
+    the per-variant LF counter to ``{"InitialState": 0}``.
+    """
     _pop_all(
         backend,
-        TOPOLOGY_SLOTS + GEOGRAPHY_SLOTS + LOAD_FLOW_SLOTS + NETWORK_REPLACE_SLOTS,
+        TOPOLOGY_SLOTS
+        + GEOGRAPHY_SLOTS
+        + LOAD_FLOW_SLOTS
+        + NETWORK_REPLACE_SLOTS
+        + NK_CACHE_KEYS,
     )
     reset_lf_gen(backend)

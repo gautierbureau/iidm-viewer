@@ -283,6 +283,31 @@ from iidm_viewer.component_registry import _resolve_hvdc_removal  # noqa: F401, 
 from iidm_viewer.component_registry import remove_elements as _remove_elements_shared
 
 
+def _invalidate_topology(network, *, affects_geography: bool = False) -> None:
+    """Topology-edit invalidator + N-K cleanup.
+
+    Wraps :func:`caches.invalidate_on_topology_change` and additionally
+    drops the N-K variant (if any) from the network and clears the
+    N-K dock's session keys. A topology mutation makes the N-K
+    contingency's connection state stale relative to the edited base,
+    so the dock must reset.
+
+    The :func:`variants.drop_variant` call is wrapped in try/except
+    because in unit tests the network handle may be a MagicMock with
+    no variant manager — the topology invalidation must still fire.
+    """
+    from iidm_viewer import cache_backend
+    from iidm_viewer.variants import drop_variant
+
+    invalidate_on_topology_change(affects_geography=affects_geography)
+    try:
+        drop_variant(network)
+    except Exception:
+        pass
+    for key in cache_backend.NK_CACHE_KEYS:
+        st.session_state.pop(key, None)
+
+
 def remove_components(network, component: str, ids: list[str]) -> list[str]:
     """Remove elements from the network and invalidate session caches.
 
@@ -293,7 +318,7 @@ def remove_components(network, component: str, ids: list[str]) -> list[str]:
     wrapper just adds the Streamlit cache-invalidation step.
     """
     removed = _remove_elements_shared(network, component, ids)
-    invalidate_on_topology_change()
+    _invalidate_topology(network)
     return removed
 
 
@@ -323,7 +348,7 @@ def update_components(network, component: str, changes_df):
             method(subset)
 
     run(_do_update)
-    invalidate_on_topology_change()
+    _invalidate_topology(network)
 
 
 def add_to_change_log(method_name: str, changes_df: pd.DataFrame, original_df: pd.DataFrame):
@@ -369,7 +394,7 @@ def toggle_switch(network, switch_id: str, new_open: bool) -> tuple[bool, bool]:
     """
     from iidm_viewer.component_registry import toggle_switch as _shared
     result = _shared(network, switch_id, new_open)
-    invalidate_on_topology_change()
+    _invalidate_topology(network)
     return result
 
 
@@ -393,7 +418,7 @@ def remove_extension(network, extension_name: str, ids: list):
         remove_extension as _shared_remove_extension,
     )
     _shared_remove_extension(network, extension_name, ids)
-    invalidate_on_topology_change()
+    _invalidate_topology(network)
 
 
 def update_extension(network, extension_name: str, changes_df):
@@ -402,7 +427,7 @@ def update_extension(network, extension_name: str, changes_df):
         update_extension as _shared_update_extension,
     )
     _shared_update_extension(network, extension_name, changes_df)
-    invalidate_on_topology_change()
+    _invalidate_topology(network)
 
 
 # ----------------------------------------------------------------------
@@ -437,13 +462,13 @@ from iidm_viewer.component_creation import (  # noqa: E402, F401  (re-exported)
 def _dispatch_bay_create(network, bay_fn_name, fields):
     """Streamlit wrapper that also invalidates topology + geography caches."""
     _shared_dispatch_bay_create(network, bay_fn_name, fields)
-    invalidate_on_topology_change(affects_geography=True)
+    _invalidate_topology(network, affects_geography=True)
 
 
 def _dispatch_shunt_bay(network, fields):
     """Streamlit wrapper for the shunt-bay create that also invalidates caches."""
     _shared_dispatch_shunt_bay(network, fields)
-    invalidate_on_topology_change(affects_geography=True)
+    _invalidate_topology(network, affects_geography=True)
 
 
 def create_component_bay(network, component, fields):
@@ -454,7 +479,7 @@ def create_component_bay(network, component, fields):
     # on bad input; the Streamlit-side wrapper just adds the
     # session-state cache flush and the script recorder hook.
     _shared(network, component, fields)
-    invalidate_on_topology_change(affects_geography=True)
+    _invalidate_topology(network, affects_geography=True)
     bay_fn = (
         "create_shunt_compensator_bay"
         if component == "Shunt Compensators"
@@ -484,7 +509,7 @@ def create_branch_bay(network, component: str, fields: dict):
     invalidation + Session Script recording."""
     from iidm_viewer.component_creation import create_branch_bay as _shared
     _shared(network, component, fields)
-    invalidate_on_topology_change(affects_geography=True)
+    _invalidate_topology(network, affects_geography=True)
     bay_fn = CREATABLE_BRANCHES[component]["bay_function"]
     script_recorder.record_create_branch_bay(component, bay_fn, fields)
 
@@ -513,7 +538,7 @@ def create_container(network, component: str, fields: dict):
     invalidation + Session Script recording."""
     from iidm_viewer.component_creation import create_container as _shared
     _shared(network, component, fields)
-    invalidate_on_topology_change(affects_geography=True)
+    _invalidate_topology(network, affects_geography=True)
     script_recorder.record_create_container(
         component,
         CREATABLE_CONTAINERS[component]["create_function"],
@@ -569,7 +594,7 @@ def create_tap_changer(
         create_tap_changer as _shared,
     )
     _shared(network, kind, transformer_id, main_fields, steps)
-    invalidate_on_topology_change(affects_geography=True)
+    _invalidate_topology(network, affects_geography=True)
     spec = CREATABLE_TAP_CHANGERS[kind]
     script_recorder.record_create_tap_changer(
         kind,
@@ -599,7 +624,7 @@ def create_coupling_device(
 ):
     from iidm_viewer.component_creation import create_coupling_device as _shared
     _shared(network, bbs1, bbs2, switch_prefix)
-    invalidate_on_topology_change(affects_geography=True)
+    _invalidate_topology(network, affects_geography=True)
     script_recorder.record_create_coupling_device(bbs1, bbs2, switch_prefix)
 
 
@@ -620,7 +645,7 @@ def create_hvdc_line(network, fields: dict):
     """Streamlit wrapper around the shared dispatcher; adds cache invalidation."""
     from iidm_viewer.component_creation import create_hvdc_line as _shared
     _shared(network, fields)
-    invalidate_on_topology_change(affects_geography=True)
+    _invalidate_topology(network, affects_geography=True)
     script_recorder.record_create_hvdc_line(fields)
 
 
@@ -643,7 +668,7 @@ def create_reactive_limits(
 ):
     from iidm_viewer.component_creation import create_reactive_limits as _shared
     _shared(network, element_id, mode, payload)
-    invalidate_on_topology_change()
+    _invalidate_topology(network)
     script_recorder.record_create_reactive_limits(element_id, mode, payload)
 
 
@@ -673,7 +698,7 @@ def create_operational_limits(
 ):
     from iidm_viewer.component_creation import create_operational_limits as _shared
     _shared(network, element_id, side, limit_type, limits, group_name)
-    invalidate_on_topology_change()
+    _invalidate_topology(network)
     script_recorder.record_create_operational_limits(
         element_id, side, limit_type, limits, group_name=group_name
     )
@@ -702,7 +727,7 @@ def create_extension(network, extension_name: str, target_id: str, fields: dict)
         create_extension as _shared,
     )
     _shared(network, extension_name, target_id, fields)
-    invalidate_on_topology_change()
+    _invalidate_topology(network)
     # The shared dispatcher trims + coerces ``fields`` internally before
     # calling pypowsybl; the recording just needs the user-supplied
     # ``fields`` and the schema's index column.
@@ -733,7 +758,7 @@ def create_secondary_voltage_control(
         create_secondary_voltage_control as _shared,
     )
     _shared(network, zones, units)
-    invalidate_on_topology_change()
+    _invalidate_topology(network)
     script_recorder.record_create_secondary_voltage_control(zones, units)
 
 
@@ -779,10 +804,15 @@ def compute_target_v_q_sensitivities(network, gen_ids):
         compute_target_v_q_sensitivities as _shared_compute,
     )
 
+    from iidm_viewer.caches import _lf_gen
+
     cache = st.session_state.setdefault("_dq_dv_cache", {})
     raw = object.__getattribute__(network, "_obj")
     net_id = id(raw)
-    lf_gen = st.session_state.get("_lf_gen", 0)
+    # Read the InitialState counter — the cached sensitivities are
+    # against the base variant. N-K sensitivities would key by their
+    # own variant id once the dock starts using this helper.
+    lf_gen = _lf_gen()
 
     gen_ids = list(gen_ids)
     missing = [g for g in gen_ids if (net_id, lf_gen, g) not in cache]
