@@ -312,6 +312,7 @@ class MainWindow(QMainWindow):
         # ChangeLog so the panel below shows a unified history that
         # survives tab switches and component changes.
         self.data_tab.set_change_log(self.state.change_log)
+        self.data_tab.set_state(self.state)
 
         self.sidebar = _Sidebar(
             self._on_load_clicked,

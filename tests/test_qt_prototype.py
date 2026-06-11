@@ -2053,6 +2053,66 @@ def test_qt_sld_view_mode_resets_to_n_on_clear(qapp):
     assert tab._variant_id == INITIAL_VARIANT_ID
 
 
+def test_qt_data_explorer_view_mode_combo_disabled_until_variant_built(qapp):
+    """The Data Explorer tab's view-mode combo enables only once the
+    N-K dock has built a variant; flipping to N-K threads the variant
+    id into the view-model builder."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.data_explorer_tab import DataExplorerTab
+    from iidm_viewer.qt.state import AppState
+    from iidm_viewer.variants import (
+        INITIAL_VARIANT_ID, NK_VARIANT_ID, drop_variant,
+    )
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    tab = DataExplorerTab()
+    tab.set_state(state)
+    qapp.processEvents()
+    assert tab._view_mode_combo.isEnabled() is False
+    assert tab._variant_id == INITIAL_VARIANT_ID
+
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+    try:
+        assert tab._view_mode_combo.isEnabled() is True
+        tab._view_mode_combo.setCurrentText("N-K")
+        qapp.processEvents()
+        assert tab._variant_id == NK_VARIANT_ID
+    finally:
+        drop_variant(state.network)
+
+
+def test_qt_data_explorer_nk_mode_disables_bulk_buttons(qapp):
+    """In N-K mode the Data Explorer's bulk Apply / Apply&LF /
+    Disconnect / Delete buttons must stay disabled — N-K is
+    read-only by contract."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.data_explorer_tab import DataExplorerTab
+    from iidm_viewer.qt.state import AppState
+    from iidm_viewer.variants import drop_variant
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    tab = DataExplorerTab()
+    tab.set_network(state.network)
+    tab.set_state(state)
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+    tab._view_mode_combo.setCurrentText("N-K")
+    qapp.processEvents()
+    try:
+        # In N-K mode every bulk action is gated regardless of selection.
+        assert tab._bulk_apply.isEnabled() is False
+        assert tab._bulk_apply_lf.isEnabled() is False
+        assert tab._bulk_disconnect.isEnabled() is False
+        assert tab._bulk_delete.isEnabled() is False
+    finally:
+        drop_variant(state.network)
+
+
 def test_qt_rcc_view_mode_combo_disabled_until_variant_built(qapp):
     """The Reactive Capability Curves tab's view-mode combo enables
     only once the N-K dock has built a variant, and flipping it
