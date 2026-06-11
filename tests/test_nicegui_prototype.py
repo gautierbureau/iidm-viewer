@@ -193,6 +193,25 @@ def test_nicegui_sld_panel_threads_variant_id():
     assert "_sld_variant_id" in push_src
 
 
+def test_nicegui_sld_panel_offers_side_by_side():
+    """The NiceGUI SLD tab panel must register a second iframe + the
+    'sld-nk' bridge component for Side-by-side rendering."""
+    import inspect
+    from iidm_viewer.web import app
+
+    main_src = inspect.getsource(app.main_page)
+    # The view-mode select carries the third option.
+    assert "Side-by-side" in main_src
+    # The bridge JS registers 'sld-nk' as a component.
+    assert "'sld-nk'" in app._BRIDGE_JS
+    # The SLD tab panel embeds the secondary iframe.
+    assert "iidm-sld-nk-iframe" in main_src
+    # _push_sld fans the render out to the N-K iframe in Side-by-side mode.
+    push_src = inspect.getsource(app._push_sld)
+    assert "sld-nk" in push_src
+    assert "_last_sld_nk" in push_src
+
+
 def test_nicegui_main_page_includes_nk_variant_card():
     """The main page's sidebar must invoke ``_build_nk_variant_card``
     so the picker is registered alongside the existing LF controls."""
