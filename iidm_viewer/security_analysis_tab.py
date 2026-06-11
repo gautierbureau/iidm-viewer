@@ -234,6 +234,81 @@ def _render_json_upload_section(
                         st.rerun()
 
 
+def render_manual_contingency_picker_streamlit(
+    network,
+    *,
+    key_prefix: str,
+    submit_label: str = "Add contingencies",
+) -> list[dict] | None:
+    """Render the manual contingency picker (element-type selectbox +
+    filter + multiselect + grouping radio + group_id text + submit) and
+    return the normalized contingencies on submit, ``None`` otherwise.
+
+    Surfaces validation errors from
+    :func:`security_analysis.normalize_manual_contingency` as
+    ``st.warning`` and returns ``None`` so the caller can keep its
+    own list intact.
+
+    ``key_prefix`` scopes every widget so the picker can be used in
+    multiple places on the same page without key collisions (the SA
+    tab uses ``"sa_manual"``; the N-K sidebar uses ``"nk_pick"``).
+    """
+    ids = _get_ids(network)
+
+    manual_type = st.selectbox(
+        "Element type",
+        options=_MANUAL_TYPES,
+        key=f"{key_prefix}_type",
+    )
+
+    # Filters are rendered outside the form so changing them re-renders
+    # the multiselect options immediately.
+    type_df = _get_filterable_df(network, manual_type)
+    if type_df.empty:
+        type_ids = ids.get(_MANUAL_TYPE_IDS_KEY[manual_type], [])
+    else:
+        filter_cols = FILTERS.get(manual_type, [])
+        filtered_df = render_filters(
+            type_df,
+            filter_cols,
+            key_prefix=f"{key_prefix}_flt_{manual_type}",
+            label=f"Filter {manual_type.lower()}",
+        )
+        type_ids = list(filtered_df.index.astype(str))
+
+    with st.form(f"{key_prefix}_form", clear_on_submit=True):
+        st.caption(f"{len(type_ids)} {manual_type.lower()} available after filtering")
+        selected_ids = st.multiselect(
+            f"Pick {manual_type.lower()} to include",
+            options=type_ids,
+            key=f"{key_prefix}_ids",
+        )
+        grouping = st.radio(
+            "Grouping",
+            options=_MANUAL_GROUPINGS,
+            index=0,
+            key=f"{key_prefix}_grouping",
+        )
+        group_id = st.text_input(
+            "Contingency id (for single grouped mode)",
+            key=f"{key_prefix}_group_id",
+            placeholder="e.g. N2_outage_southwest",
+        )
+        submitted = st.form_submit_button(submit_label)
+
+    if not submitted:
+        return None
+
+    grouping_token = _MANUAL_GROUPING_TOKENS.get(grouping, grouping)
+    try:
+        return normalize_manual_contingency(
+            manual_type, selected_ids, grouping_token, group_id,
+        )
+    except ValueError as exc:
+        st.warning(str(exc))
+        return None
+
+
 # --- Configuration: Contingencies sub-tab ---
 
 def _render_contingencies_subtab(network):
@@ -281,72 +356,28 @@ def _render_contingencies_subtab(network):
         "or several contingencies alongside the automatic ones."
     )
     manual: list[dict] = st.session_state.setdefault("_sa_manual_contingencies", [])
-    ids = _get_ids(network)
-
-    manual_type = st.selectbox(
-        "Element type",
-        options=_MANUAL_TYPES,
-        key="sa_manual_type",
+    new_contingencies = render_manual_contingency_picker_streamlit(
+        network,
+        key_prefix="sa_manual",
+        submit_label="Add manual contingencies",
     )
-
-    # Filters are rendered outside the form so changing them re-renders the
-    # multiselect options immediately.
-    type_df = _get_filterable_df(network, manual_type)
-    if type_df.empty:
-        type_ids = ids.get(_MANUAL_TYPE_IDS_KEY[manual_type], [])
-    else:
-        filter_cols = FILTERS.get(manual_type, [])
-        filtered_df = render_filters(
-            type_df,
-            filter_cols,
-            key_prefix=f"sa_manual_flt_{manual_type}",
-            label=f"Filter {manual_type.lower()}",
-        )
-        type_ids = list(filtered_df.index.astype(str))
-
-    with st.form("sa_manual_contingency_form", clear_on_submit=True):
-        st.caption(f"{len(type_ids)} {manual_type.lower()} available after filtering")
-        selected_ids = st.multiselect(
-            f"Pick {manual_type.lower()} to include",
-            options=type_ids,
-            key="sa_manual_ids",
-        )
-        grouping = st.radio(
-            "Grouping",
-            options=_MANUAL_GROUPINGS,
-            index=0,
-            key="sa_manual_grouping",
-        )
-        group_id = st.text_input(
-            "Contingency id (for single grouped mode)",
-            key="sa_manual_group_id",
-            placeholder="e.g. N2_outage_southwest",
-        )
-        submitted = st.form_submit_button("Add manual contingencies")
-
-    if submitted:
-        grouping_token = _MANUAL_GROUPING_TOKENS.get(grouping, grouping)
-        try:
-            new_contingencies = normalize_manual_contingency(
-                manual_type, selected_ids, grouping_token, group_id,
-            )
-        except ValueError as exc:
-            st.warning(str(exc))
+    if new_contingencies:
+        existing = {c["id"] for c in manual}
+        added = 0
+        skipped: list[str] = []
+        for c in new_contingencies:
+            if c["id"] in existing:
+                skipped.append(c["id"])
+                continue
+            manual.append(c)
+            existing.add(c["id"])
+            added += 1
+        if added:
+            st.rerun()
+        elif len(new_contingencies) == 1:
+            st.warning(f"Contingency id '{skipped[0]}' already exists.")
         else:
-            existing = {c["id"] for c in manual}
-            added = 0
-            for c in new_contingencies:
-                if c["id"] in existing:
-                    continue
-                manual.append(c)
-                existing.add(c["id"])
-                added += 1
-            if added:
-                st.rerun()
-            elif grouping_token == "per_element":
-                st.warning("All selected elements were already added.")
-            else:
-                st.warning(f"Contingency id '{new_contingencies[0]['id']}' already exists.")
+            st.warning("All selected elements were already added.")
 
     if manual:
         st.caption(f"{len(manual)} manual contingency(ies) defined")

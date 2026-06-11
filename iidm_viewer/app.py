@@ -1,5 +1,7 @@
 import streamlit as st
 from iidm_viewer.state import (
+    build_nk_variant,
+    clear_nk_variant,
     create_empty_network,
     export_network,
     get_export_formats,
@@ -8,6 +10,11 @@ from iidm_viewer.state import (
     init_state,
     load_network,
     run_loadflow,
+    run_nk_loadflow,
+)
+from iidm_viewer import cache_backend as _cb
+from iidm_viewer.security_analysis_tab import (
+    render_manual_contingency_picker_streamlit,
 )
 from iidm_viewer.io_options import (
     ext_to_format,
@@ -316,6 +323,90 @@ with st.sidebar:
         if st.session_state.get("_lf_report_json"):
             if st.button("View Logs", key="lf_logs_btn", help="Load Flow Logs"):
                 show_lf_report_dialog()
+
+        # -- N-K Variant section ------------------------------------
+        nk_variant_id = st.session_state.get(_cb.NK_VARIANT_ID)
+        nk_contingency = st.session_state.get(_cb.NK_CONTINGENCY)
+        with st.expander("N-K Variant", expanded=False):
+            if nk_variant_id and nk_contingency:
+                eids = nk_contingency.get("element_ids") or []
+                st.markdown(
+                    f"**Active N-K**: `{nk_contingency.get('id', '')}` — "
+                    f"{', '.join(f'`{e}`' for e in eids)}"
+                )
+                nk_status = st.session_state.get(_cb.NK_LF_STATUS, "NEVER")
+                if nk_status == "CONVERGED":
+                    st.success(f"N-K LF: {nk_status}")
+                elif nk_status == "NEVER":
+                    st.caption("N-K LF: not run yet")
+                else:
+                    st.warning(f"N-K LF: {nk_status}")
+            else:
+                st.caption(
+                    "Pick the elements to outage, then click **Build N-K**. "
+                    "Affected tabs surface an N / N-K / Side-by-side toggle "
+                    "once the variant exists."
+                )
+
+            new_contingencies = render_manual_contingency_picker_streamlit(
+                network,
+                key_prefix="nk_pick",
+                submit_label="Build N-K",
+            )
+            if new_contingencies:
+                if len(new_contingencies) > 1:
+                    # Per-element selection produced N-1s; collapse them into
+                    # a single grouped contingency so the variant carries
+                    # every chosen element at once.
+                    grouped_ids = []
+                    for c in new_contingencies:
+                        grouped_ids.extend(c.get("element_ids") or [])
+                    contingency = {
+                        "id": new_contingencies[0]["id"] + "_grouped"
+                        if not new_contingencies[0]["id"].startswith("N1_")
+                        else "N-K_grouped",
+                        "element_ids": grouped_ids,
+                    }
+                else:
+                    contingency = new_contingencies[0]
+                try:
+                    build_nk_variant(network, contingency)
+                except Exception as exc:
+                    st.warning(f"Build N-K failed: {exc}")
+                else:
+                    st.rerun()
+
+            col_run, col_clear = st.columns([2, 1])
+            with col_run:
+                if st.button(
+                    "Run N-K Load Flow",
+                    key="nk_run_lf_btn",
+                    disabled=not nk_variant_id,
+                    use_container_width=True,
+                ):
+                    with st.spinner("Running N-K load flow..."):
+                        result = run_nk_loadflow(network)
+                    if result is None:
+                        st.warning("Build the N-K variant first.")
+                    elif result.converged:
+                        st.success(f"N-K LF: {result.status}")
+                    else:
+                        st.warning(f"N-K LF: {result.status}")
+                    st.rerun()
+            with col_clear:
+                if st.button(
+                    "Clear N-K",
+                    key="nk_clear_btn",
+                    disabled=not nk_variant_id,
+                    use_container_width=True,
+                ):
+                    clear_nk_variant(network)
+                    st.rerun()
+
+            if st.session_state.get(_cb.NK_LF_REPORT_JSON):
+                if st.button("View N-K LF Logs", key="nk_lf_logs_btn"):
+                    show_lf_report_dialog()
+
         st.divider()
         if st.button(
             "View live Script",

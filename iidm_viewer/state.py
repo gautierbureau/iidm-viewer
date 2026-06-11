@@ -283,6 +283,80 @@ from iidm_viewer.component_registry import _resolve_hvdc_removal  # noqa: F401, 
 from iidm_viewer.component_registry import remove_elements as _remove_elements_shared
 
 
+# ---------------------------------------------------------------------------
+# N-K variant management — Streamlit-side wrappers around
+# :mod:`iidm_viewer.variants`. Each sets / clears the dock's session keys
+# alongside the worker call so the sidebar UI stays in sync.
+# ---------------------------------------------------------------------------
+def build_nk_variant(network, contingency: dict) -> None:
+    """Clone the working variant into the N-K variant and persist the
+    contingency + variant-id session keys so the dock + per-tab toggles
+    can react. Resets the N-K LF counter so a fresh build always starts
+    at a clean slate.
+    """
+    from iidm_viewer import cache_backend
+    from iidm_viewer.variants import (
+        NK_VARIANT_ID,
+        build_contingency_variant,
+    )
+
+    build_contingency_variant(network, contingency)
+    st.session_state[cache_backend.NK_CONTINGENCY] = dict(contingency)
+    st.session_state[cache_backend.NK_VARIANT_ID] = NK_VARIANT_ID
+    st.session_state[cache_backend.NK_LF_STATUS] = "NEVER"
+    st.session_state[cache_backend.NK_LF_REPORT_JSON] = None
+    # Reset the N-K LF counter so per-variant cache keys start from 0.
+    gens = _caches_backend.get(cache_backend.LF_GEN, {}) or {}
+    if isinstance(gens, dict):
+        gens.pop(NK_VARIANT_ID, None)
+        _caches_backend.set(cache_backend.LF_GEN, gens)
+
+
+def run_nk_loadflow(network):
+    """Run an AC load flow on the N-K variant + invalidate the N-K
+    variant's slot in the Streamlit caches.
+
+    Returns the :class:`LoadFlowResult` or ``None`` when the N-K
+    variant has not been built yet.
+    """
+    from iidm_viewer import cache_backend
+    from iidm_viewer.lf_parameters import get_lf_parameters
+    from iidm_viewer.variants import NK_VARIANT_ID, run_loadflow_on_variant
+
+    if not st.session_state.get(cache_backend.NK_VARIANT_ID):
+        return None
+    generic, provider = get_lf_parameters()
+    result = run_loadflow_on_variant(
+        network, NK_VARIANT_ID,
+        generic_params=generic, provider_params=provider,
+    )
+    st.session_state[cache_backend.NK_LF_STATUS] = result.status
+    st.session_state[cache_backend.NK_LF_REPORT_JSON] = result.report_json
+    invalidate_on_load_flow(NK_VARIANT_ID)
+    return result
+
+
+def clear_nk_variant(network) -> None:
+    """Drop the N-K variant from the network's variant manager and clear
+    every dock session key. Safe to call when the variant doesn't
+    exist (no-op via :func:`variants.drop_variant`).
+    """
+    from iidm_viewer import cache_backend
+    from iidm_viewer.variants import NK_VARIANT_ID, drop_variant
+
+    try:
+        drop_variant(network)
+    except Exception:
+        pass
+    for key in cache_backend.NK_CACHE_KEYS:
+        st.session_state.pop(key, None)
+    # Drop the N-K LF counter so a future build starts from a clean slate.
+    gens = _caches_backend.get(cache_backend.LF_GEN, {}) or {}
+    if isinstance(gens, dict) and NK_VARIANT_ID in gens:
+        gens.pop(NK_VARIANT_ID)
+        _caches_backend.set(cache_backend.LF_GEN, gens)
+
+
 def _invalidate_topology(network, *, affects_geography: bool = False) -> None:
     """Topology-edit invalidator + N-K cleanup.
 

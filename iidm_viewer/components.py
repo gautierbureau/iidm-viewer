@@ -75,3 +75,51 @@ def vl_selector(network):
 
 def render_svg(svg_string, height=600):
     st_components.html(svg_string, height=height, scrolling=True)
+
+
+# ---------------------------------------------------------------------------
+# N-K view-mode toggle
+# ---------------------------------------------------------------------------
+NK_VIEW_MODE_OPTIONS: tuple[str, ...] = ("N", "N-K", "Side-by-side")
+
+
+def render_view_mode_radio(key: str) -> str:
+    """Per-tab view-mode radio at the top of an affected tab.
+
+    Returns the active mode (one of :data:`NK_VIEW_MODE_OPTIONS`). The
+    "N-K" and "Side-by-side" options are disabled — and the active mode
+    forced back to ``"N"`` — until ``st.session_state["_nk_variant_id"]``
+    is set by the sidebar's "Build N-K" action. This keeps the toggle
+    discoverable without ever offering a state the tab can't yet render.
+    """
+    nk_ready = bool(st.session_state.get("_nk_variant_id"))
+    options = list(NK_VIEW_MODE_OPTIONS)
+
+    # Coerce stale picks back to "N" when the variant has been cleared.
+    current = st.session_state.get(key, "N")
+    if not nk_ready and current != "N":
+        st.session_state[key] = "N"
+        current = "N"
+
+    if not nk_ready:
+        st.radio(
+            "View mode",
+            options=options,
+            index=0,
+            key=key,
+            horizontal=True,
+            disabled=True,
+            help=(
+                'Build an "N-K Variant" from the sidebar to enable '
+                "N-K and Side-by-side modes."
+            ),
+        )
+        return "N"
+
+    return st.radio(
+        "View mode",
+        options=options,
+        index=options.index(current) if current in options else 0,
+        key=key,
+        horizontal=True,
+    )
