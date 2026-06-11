@@ -34,6 +34,13 @@ class AppState(_BaseAppState, QObject):
     # inspect ``.status`` / ``.converged`` for the UI status routing,
     # and stash ``.report_json`` for an optional logs dialog.
     loadflow_completed = Signal(object)
+    # Emitted when the N-K variant is built (carries the variant id,
+    # currently always ``"N-K"``) or cleared (``None``). Tab widgets
+    # connect this to refresh their view-mode toggles.
+    nk_variant_changed = Signal(object)
+    # Emitted after each successful N-K load flow run. Same wrapper
+    # shape as :attr:`loadflow_completed`.
+    nk_loadflow_completed = Signal(object)
 
     def __init__(self, parent=None) -> None:
         # Explicit two-step init: QObject needs ``parent``, the base
@@ -58,6 +65,12 @@ class AppState(_BaseAppState, QObject):
 
     def _emit_loadflow_completed(self, result: LoadFlowResult) -> None:
         self.loadflow_completed.emit(result)
+
+    def _emit_nk_variant_changed(self, variant_id) -> None:
+        self.nk_variant_changed.emit(variant_id)
+
+    def _emit_nk_loadflow_completed(self, result: LoadFlowResult) -> None:
+        self.nk_loadflow_completed.emit(result)
 
     # ------------------------------------------------------------------
     # Run AC LF through this module's ``run_ac`` binding so existing
