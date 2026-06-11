@@ -285,6 +285,7 @@ class MainWindow(QMainWindow):
         self.extensions_tab = ExtensionsExplorerTab()
         self.reactive_curves_tab = ReactiveCurvesTab()
         self.operational_limits_tab = OperationalLimitsTab()
+        self.operational_limits_tab.set_state(self.state)
         self.security_analysis_tab = SecurityAnalysisTab()
         self.short_circuit_tab = ShortCircuitAnalysisTab()
         self.pmax_visualization_tab = PmaxVisualizationTab()
