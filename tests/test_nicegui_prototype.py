@@ -222,6 +222,37 @@ def test_nicegui_main_page_includes_nk_variant_card():
     assert "_build_nk_variant_card()" in src
 
 
+def test_nicegui_nk_variant_card_lazy_loads_ids():
+    """The N-K picker card must NOT call ``get_element_ids`` (a heavy
+    ~30k-row pypowsybl read on Pégase 9k) synchronously from its
+    ``on_network_changed`` listener — that previously froze the
+    event loop for tens of seconds during install_network."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_nk_variant_card)
+    # The async variant is the one wired into network/type/expansion
+    # handlers so the heavy fetch is off the event loop.
+    assert "_reload_ids_for_current_type_async" in src
+    assert "asyncio.to_thread" in src
+    # The network-changed handler must NOT call the synchronous
+    # variant — it should only mark ids_stale and reset the picker UI.
+    assert "ids_stale" in src
+
+
+def test_nicegui_main_page_offloads_heavy_network_load_work():
+    """Loading a large network must defer the heaviest pypowsybl
+    calls (map extraction + VL list) off the event loop so the UI
+    doesn't freeze."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app.main_page)
+    # The map push runs on the worker thread.
+    assert "_async_push_map" in src
+    assert "_async_list_voltage_levels" in src
+
+
 def test_nicegui_appstate_install_network_clears_nk():
     """A network swap drops the dock state and fires
     nk_variant_changed(None)."""

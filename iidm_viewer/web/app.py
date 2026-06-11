@@ -695,9 +695,11 @@ def _build_nk_variant_card() -> None:
 
     # Mutable picker state — kept in a dict so the closures below can
     # all read / write the same set without nonlocal gymnastics.
-    state: dict = {"all_ids": []}
+    # ``ids_stale`` flips to True on network swap so the next time the
+    # user touches the picker we re-fetch via asyncio.to_thread.
+    state: dict = {"all_ids": [], "ids_stale": True, "loading": False}
 
-    with ui.expansion("N-K Variant", icon="bolt").classes("full-width q-mt-sm"):
+    with ui.expansion("N-K Variant", icon="bolt").classes("full-width q-mt-sm") as expansion:
         status_lbl = ui.label("").classes("text-caption q-pa-xs")
         type_select = ui.select(
             options=list(MANUAL_TYPES),
@@ -727,8 +729,14 @@ def _build_nk_variant_card() -> None:
         lf_status_lbl = ui.label("").classes("text-caption q-mt-xs")
 
         def _reload_ids_for_current_type() -> None:
+            """Synchronous fetch — only used by the small-network path
+            (tests / IEEE-14). For large networks the async variant
+            below is the one wired into the type-select + expansion
+            handlers so the event loop never blocks on the
+            ``get_element_ids`` worker call."""
             if _state.network is None:
                 state["all_ids"] = []
+                state["ids_stale"] = False
                 ids_select.options = []
                 ids_select.update()
                 return
@@ -738,7 +746,41 @@ def _build_nk_variant_card() -> None:
                 ids_map = {}
             key = MANUAL_TYPE_IDS_KEY.get(type_select.value, "")
             state["all_ids"] = list(ids_map.get(key, []))
+            state["ids_stale"] = False
             _refresh_id_options()
+
+        async def _reload_ids_for_current_type_async() -> None:
+            """Async-safe variant: runs the heavy ``get_element_ids``
+            fetch via ``asyncio.to_thread`` so the event loop keeps
+            spinning on large networks (e.g. Pégase 9k where the call
+            walks tens of thousands of switches + lines)."""
+            if _state.network is None:
+                state["all_ids"] = []
+                state["ids_stale"] = False
+                ids_select.options = []
+                ids_select.update()
+                return
+            if state["loading"]:
+                return
+            state["loading"] = True
+            ids_select.options = ["Loading…"]
+            ids_select.value = []
+            ids_select.set_enabled(False)
+            ids_select.update()
+            try:
+                try:
+                    ids_map = await asyncio.to_thread(
+                        get_element_ids, _state.network,
+                    )
+                except Exception:
+                    ids_map = {}
+                key = MANUAL_TYPE_IDS_KEY.get(type_select.value, "")
+                state["all_ids"] = list(ids_map.get(key, []))
+                state["ids_stale"] = False
+                ids_select.set_enabled(True)
+                _refresh_id_options()
+            finally:
+                state["loading"] = False
 
         def _refresh_id_options() -> None:
             text = (filter_input.value or "").strip().lower()
@@ -837,23 +879,53 @@ def _build_nk_variant_card() -> None:
                 lf_status_lbl.set_text(f"N-K LF: {_result.status}")
 
         def _on_network_changed(_network) -> None:
-            _reload_ids_for_current_type()
+            """Cheap network-swap handler — only marks the IDs as
+            stale + resets the picker UI. The actual
+            ``get_element_ids`` fetch is deferred until the user opens
+            the expansion (lazy) so we don't block the event loop on
+            large networks like Pégase 9k where the heavy listener
+            chain at ``install_network`` was already taking tens of
+            seconds."""
+            state["ids_stale"] = True
+            state["all_ids"] = []
+            ids_select.options = []
+            ids_select.value = []
+            ids_select.update()
             _refresh_buttons()
             _refresh_status()
 
-        type_select.on("update:model-value",
-                       lambda _e=None: _reload_ids_for_current_type())
+        async def _ensure_ids_loaded() -> None:
+            if state["ids_stale"] and not state["loading"]:
+                await _reload_ids_for_current_type_async()
+
+        def _on_type_changed(_e=None) -> None:
+            # Fire-and-forget so the select change event doesn't have to
+            # await before yielding back to NiceGUI's event loop.
+            asyncio.create_task(_reload_ids_for_current_type_async())
+
+        def _on_expansion_value_changed(e=None) -> None:
+            # ``ui.expansion`` emits its model value as ``True`` when
+            # the user opens the panel — that's our cue to populate
+            # the picker if the IDs are stale.
+            value = getattr(e, "args", None)
+            opened = bool(value) if value is not None else bool(expansion.value)
+            if opened:
+                asyncio.create_task(_ensure_ids_loaded())
+
+        type_select.on("update:model-value", _on_type_changed)
         filter_input.on_value_change(lambda _e=None: _refresh_id_options())
         build_btn.on_click(_on_build_clicked)
         run_lf_btn.on_click(_on_run_lf_clicked)
         clear_btn.on_click(_on_clear_clicked)
+        expansion.on("update:model-value", _on_expansion_value_changed)
 
         _state.on_nk_variant_changed(_on_nk_variant_changed)
         _state.on_nk_loadflow_completed(_on_nk_loadflow_completed)
         _state.on_network_changed(_on_network_changed)
 
-        # Initial sync.
-        _reload_ids_for_current_type()
+        # Initial sync — cheap parts only. The IDs lazy-load on the
+        # first expansion open.
+        state["ids_stale"] = True
         _refresh_buttons()
         _refresh_status()
 
@@ -7942,6 +8014,28 @@ def main_page() -> None:
     # ------------------------------------------------------------------
     # Cross-tab navigation: substation click on map -> SLD tab on that VL.
     # ------------------------------------------------------------------
+    async def _async_push_map() -> None:
+        """Run the heaviest network-change side-effect (map data
+        extraction + JSON-encode + iframe push) on the worker thread
+        so a Pégase 9k–sized load doesn't block the event loop."""
+        try:
+            await asyncio.to_thread(_push_map)
+        except Exception:
+            pass
+
+    async def _async_list_voltage_levels(network) -> None:
+        """Pre-populate the VL picker without blocking the event loop."""
+        try:
+            from iidm_viewer.network_loader import (
+                list_voltage_levels_for_selector,
+            )
+            vl_picker_state["df"] = await asyncio.to_thread(
+                list_voltage_levels_for_selector, network,
+            )
+        except Exception:
+            vl_picker_state["df"] = None
+        _rebuild_vl_options()
+
     def _on_state_network(network):
         # Enable the Run-LF button + reset status whenever the network
         # changes (load / clear). Also refresh the VL picker so it
@@ -7974,17 +8068,16 @@ def main_page() -> None:
             asyncio.create_task(refresh_injection_map())
             asyncio.create_task(refresh_overview())
             return
-        try:
-            from iidm_viewer.network_loader import (
-                list_voltage_levels_for_selector,
-            )
-            vl_picker_state["df"] = list_voltage_levels_for_selector(network)
-        except Exception:
-            vl_picker_state["df"] = None
+        # Defer the heaviest pypowsybl call (map data extraction) and
+        # the VL picker fetch via asyncio.to_thread so a Pégase
+        # 9k–sized network load doesn't freeze the event loop. The
+        # per-tab refreshes below still run synchronously — they hit
+        # smaller pypowsybl getters that compute in a couple of
+        # seconds even on large networks.
         vl_filter_input.visible = True
         vl_select.visible = True
-        _rebuild_vl_options()
-        _push_map()
+        asyncio.create_task(_async_list_voltage_levels(network))
+        asyncio.create_task(_async_push_map())
         tabs.set_value(map_tab)
         refresh_data_grid()
         refresh_reactive_curves()
