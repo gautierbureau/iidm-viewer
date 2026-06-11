@@ -23,12 +23,13 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -82,9 +83,11 @@ class SldTab(QWidget):
         self._cache_backend: CacheBackend = DictBackend()
         self._ready = False
         self._show_substation = False
-        # Currently displayed variant — flipped by the view-mode combo
-        # once the N-K dock has built a variant. Defaults to InitialState
-        # so today's behaviour is preserved before any combo interaction.
+        # View-mode UX state. ``_view_mode`` is one of "N" / "N-K" /
+        # "Side-by-side"; ``_variant_id`` is the variant the **left**
+        # (single-pane) view renders. In Side-by-side the left pane is
+        # always InitialState and the right pane is N-K.
+        self._view_mode = "N"
         self._variant_id = INITIAL_VARIANT_ID
         self._state = None  # set via set_state
 
@@ -95,11 +98,10 @@ class SldTab(QWidget):
         self._expand_btn.clicked.connect(self._on_expand_toggle)
 
         # View-mode combo — disabled until an N-K variant exists.
-        # Side-by-side is deferred to a polish step; today the combo
-        # offers N + N-K and flips the active variant rendered into
-        # the single QWebEngineView.
+        # 'N' and 'N-K' show one pane; 'Side-by-side' splits the panel
+        # in two via a QSplitter so both variants render together.
         self._view_mode_combo = QComboBox()
-        self._view_mode_combo.addItems(["N", "N-K"])
+        self._view_mode_combo.addItems(["N", "N-K", "Side-by-side"])
         self._view_mode_combo.setEnabled(False)
         self._view_mode_combo.currentTextChanged.connect(
             self._on_view_mode_changed,
@@ -113,15 +115,28 @@ class SldTab(QWidget):
         header.addWidget(self._expand_btn)
         header.addStretch(1)
 
+        # Two web views wrapped in a QSplitter so Side-by-side can
+        # render both panes simultaneously. The N-K pane is hidden in
+        # the single-pane modes (N or N-K alone).
         self._view = PowsyblWebView(_SLD_DIST, self)
         self._view.value_received.connect(self._on_value)
         self._view.ready.connect(self._on_ready)
+        self._view_nk = PowsyblWebView(_SLD_DIST, self)
+        # N-K is read-only — drop value events so a stray breaker
+        # click on the N-K SVG can't mutate the working variant.
+        self._view_nk.value_received.connect(lambda _v: None)
+        self._view_nk.ready.connect(self._on_nk_ready)
+        self._nk_ready = False
+        self._splitter = QSplitter(Qt.Horizontal)
+        self._splitter.addWidget(self._view)
+        self._splitter.addWidget(self._view_nk)
+        self._view_nk.setVisible(False)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addLayout(header)
-        layout.addWidget(self._view, 1)
+        layout.addWidget(self._splitter, 1)
 
     @property
     def _cache(self) -> dict:
@@ -162,18 +177,34 @@ class SldTab(QWidget):
             self._view_mode_combo.blockSignals(True)
             self._view_mode_combo.setCurrentText("N")
             self._view_mode_combo.blockSignals(False)
+            self._view_mode = "N"
+            self._view_nk.setVisible(False)
             if self._variant_id != INITIAL_VARIANT_ID:
                 self._variant_id = INITIAL_VARIANT_ID
                 if self._current_vl:
                     self.show_voltage_level(self._current_vl)
 
     def _on_view_mode_changed(self, txt: str) -> None:
-        new_variant = NK_VARIANT_ID if txt == "N-K" else INITIAL_VARIANT_ID
-        if new_variant == self._variant_id:
+        if txt == self._view_mode:
             return
-        self._variant_id = new_variant
+        self._view_mode = txt
+        if txt == "Side-by-side":
+            self._variant_id = INITIAL_VARIANT_ID
+            self._view_nk.setVisible(True)
+        elif txt == "N-K":
+            self._variant_id = NK_VARIANT_ID
+            self._view_nk.setVisible(False)
+        else:
+            self._variant_id = INITIAL_VARIANT_ID
+            self._view_nk.setVisible(False)
         if self._current_vl:
             self.show_voltage_level(self._current_vl)
+
+    def _on_nk_ready(self) -> None:
+        self._nk_ready = True
+        # Re-render so the N-K pane catches up after late readiness.
+        if self._view_mode == "Side-by-side" and self._current_vl:
+            self._render()
 
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
@@ -224,8 +255,8 @@ class SldTab(QWidget):
 
         # Cache key is ``(container_id, variant_id)`` so the InitialState
         # and N-K SVGs coexist in the same slot. The active variant
-        # follows ``self._variant_id`` — the view-mode combo flips it
-        # and triggers a re-fetch through this method.
+        # follows ``self._variant_id`` for the primary view; Side-by-side
+        # additionally pre-fetches the N-K pane below.
         cache = self._cache_backend.setdefault(SLD, {})
         variant_id = self._variant_id
         cache_key = (container_id, variant_id)
@@ -240,6 +271,19 @@ class SldTab(QWidget):
                 self._status.setText(f"SLD failed for {container_id}: {exc}")
                 return
             cache[cache_key] = (svg, metadata)
+        if self._view_mode == "Side-by-side":
+            nk_key = (container_id, NK_VARIANT_ID)
+            if nk_key not in cache:
+                try:
+                    nk_svg, nk_meta = _generate_sld(
+                        self._network, container_id,
+                        variant_id=NK_VARIANT_ID,
+                    )
+                    cache[nk_key] = (nk_svg, nk_meta)
+                except Exception as exc:
+                    self._status.setText(
+                        f"N-K SLD failed for {container_id}: {exc}"
+                    )
         if self._show_substation and sid:
             self._status.setText(f"Substation: {sid}")
         else:
@@ -328,3 +372,14 @@ class SldTab(QWidget):
             # library's no-op setSvgContent.
             preserveViewport=True,
         )
+        if self._view_mode == "Side-by-side" and self._nk_ready:
+            nk_entry = cache.get((container_id, NK_VARIANT_ID))
+            if nk_entry is not None:
+                nk_svg, nk_metadata = nk_entry
+                self._view_nk.render_component(
+                    svg=nk_svg,
+                    metadata=nk_metadata,
+                    height=700,
+                    svgType=svg_type,
+                    preserveViewport=True,
+                )
