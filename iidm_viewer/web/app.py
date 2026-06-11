@@ -4467,12 +4467,18 @@ def _build_reactive_curves():
                    "variant_id": INITIAL_VARIANT_ID}
 
     # View-mode select — disabled until the dock builds an N-K variant.
+    # 'Side-by-side' shows the containment summary for both variants
+    # so the user can compare which generators flipped state under
+    # the contingency.
     with ui.row().classes("items-center q-pa-sm"):
         ui.label("View:").classes("text-caption")
         view_mode_select = ui.select(
-            options=["N", "N-K"], value="N",
-        ).props("dense outlined").classes("w-24")
+            options=["N", "N-K", "Side-by-side"], value="N",
+        ).props("dense outlined").classes("w-40")
         view_mode_select.set_enabled(False)
+
+    def _current_view_mode() -> str:
+        return view_mode_select.value or "N"
 
     only_vl_row = ui.row().classes("items-center q-pa-sm w-full")
     with only_vl_row:
@@ -4518,6 +4524,34 @@ def _build_reactive_curves():
         summary_caption = ui.label("").classes("text-caption q-pa-sm")
         summary_caption.visible = False
         summary_body = ui.column().classes("w-full")
+
+    # --- Side-by-side section (hidden until "Side-by-side" picked) ------
+    # Two summary panels arranged via ui.row(): for each variant, surface
+    # the generator counts in each containment bucket so the user can
+    # tell at a glance which generators moved between Inside / Edge /
+    # Outside under the contingency.
+    side_by_side_group = ui.column().classes("w-full q-pa-sm")
+    with side_by_side_group:
+        ui.label("Containment summary — N vs N-K").classes("text-h6")
+        sxs_rcc_caption = ui.label("").classes("text-caption q-mb-sm")
+        with ui.row().classes("w-full no-wrap q-gutter-md"):
+            with ui.column().classes("col"):
+                ui.label("N (base)").classes("text-subtitle1")
+                sxs_n_metrics = ui.row().classes("q-pa-sm w-full")
+                with sxs_n_metrics:
+                    sxs_n_inside = ui.label("Inside: —")
+                    sxs_n_warning = ui.label("Edge/Near: —")
+                    sxs_n_action = ui.label("Outside/Saturated: —")
+                    sxs_n_unknown = ui.label("Unknown: —")
+            with ui.column().classes("col"):
+                ui.label("N-K (contingency)").classes("text-subtitle1")
+                sxs_nk_metrics = ui.row().classes("q-pa-sm w-full")
+                with sxs_nk_metrics:
+                    sxs_nk_inside = ui.label("Inside: —")
+                    sxs_nk_warning = ui.label("Edge/Near: —")
+                    sxs_nk_action = ui.label("Outside/Saturated: —")
+                    sxs_nk_unknown = ui.label("Unknown: —")
+    side_by_side_group.visible = False
 
     def _render_subset(label, df, *, default_open):
         if df.empty:
@@ -4618,6 +4652,47 @@ def _build_reactive_curves():
         _render_subset("PV near saturation",
                        summary.pv_near_saturation, default_open=False)
 
+    def _render_rcc_side_by_side() -> None:
+        """Build view models for both variants and surface containment
+        counts side-by-side."""
+        if _state.network is None:
+            return
+        try:
+            n_vm = build_reactive_curves_view_model(
+                _state.network, variant_id=INITIAL_VARIANT_ID,
+            )
+            nk_vm = build_reactive_curves_view_model(
+                _state.network, variant_id=NK_VARIANT_ID,
+            )
+        except Exception as exc:
+            sxs_rcc_caption.set_text(f"Side-by-side build failed: {exc}")
+            return
+        if n_vm is None or nk_vm is None:
+            sxs_rcc_caption.set_text(
+                "Build the N-K variant + run an N-K load flow to populate "
+                "both panes."
+            )
+            return
+        n_sum = build_containment_summary(n_vm.classified, n_vm.gens_df)
+        nk_sum = build_containment_summary(nk_vm.classified, nk_vm.gens_df)
+        sxs_rcc_caption.set_text(
+            f"{len(n_vm.gens_df)} gens in N · {len(nk_vm.gens_df)} in N-K"
+        )
+        sxs_n_inside.set_text(f"Inside: {n_sum.n_inside}")
+        sxs_n_warning.set_text(f"Edge/Near: {n_sum.n_warning}")
+        sxs_n_action.set_text(
+            f"Outside/Saturated: {n_sum.n_action}"
+            + (f" (PV→PQ: {n_sum.n_saturated})" if n_sum.n_saturated else "")
+        )
+        sxs_n_unknown.set_text(f"Unknown/Needs LF: {n_sum.n_unknown}")
+        sxs_nk_inside.set_text(f"Inside: {nk_sum.n_inside}")
+        sxs_nk_warning.set_text(f"Edge/Near: {nk_sum.n_warning}")
+        sxs_nk_action.set_text(
+            f"Outside/Saturated: {nk_sum.n_action}"
+            + (f" (PV→PQ: {nk_sum.n_saturated})" if nk_sum.n_saturated else "")
+        )
+        sxs_nk_unknown.set_text(f"Unknown/Needs LF: {nk_sum.n_unknown}")
+
     def _render_selected_gen():
         vm = state["vm"]
         gen_id = state["gen_id"]
@@ -4692,6 +4767,7 @@ def _build_reactive_curves():
             state["gen_id"] = None
             placeholder.set_text("Load a network first.")
             placeholder.visible = True
+            side_by_side_group.visible = False
             only_vl_row.visible = False
             gen_select.options = []
             gen_select.update()
@@ -4748,10 +4824,19 @@ def _build_reactive_curves():
         gen_select.update()
         _render_selected_gen()
         _render_summary(vm)
+        side_by_side_group.visible = _current_view_mode() == "Side-by-side"
+        if side_by_side_group.visible:
+            _render_rcc_side_by_side()
 
     def _on_view_mode_changed(_e=None) -> None:
-        new_v = NK_VARIANT_ID if view_mode_select.value == "N-K" else INITIAL_VARIANT_ID
-        if new_v == state["variant_id"]:
+        mode = _current_view_mode()
+        if mode == "Side-by-side":
+            new_v = INITIAL_VARIANT_ID
+        elif mode == "N-K":
+            new_v = NK_VARIANT_ID
+        else:
+            new_v = INITIAL_VARIANT_ID
+        if new_v == state["variant_id"] and mode != "Side-by-side":
             return
         state["variant_id"] = new_v
         refresh()
