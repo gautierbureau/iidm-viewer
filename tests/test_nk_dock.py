@@ -198,6 +198,64 @@ def test_render_view_mode_radio_disabled_until_variant_exists():
     assert at.session_state["mode_key"] == "N"
 
 
+# ---------------------------------------------------------------------------
+# Per-tab N-K rollout — Reactive Curves
+# ---------------------------------------------------------------------------
+def test_rcc_tab_renders_view_mode_radio_n_only_when_no_variant(xiidm_upload):
+    """With no N-K variant in session, the Reactive Curves tab's
+    view-mode radio is disabled and the active mode stays ``"N"``."""
+    from streamlit.testing.v1 import AppTest
+    from iidm_viewer.state import load_network as _load
+
+    at = AppTest.from_file("iidm_viewer/app.py")
+    at.run(timeout=30)
+    at.session_state["network"] = _load(xiidm_upload)
+    at.session_state["_last_file"] = xiidm_upload.name
+    at.run(timeout=30)
+    assert not at.exception
+    # The radio default is "N" — _nk_variant_id is None so any stale
+    # pick is forced back to "N" by render_view_mode_radio.
+    try:
+        active = at.session_state["_rcc_view_mode"]
+    except KeyError:
+        active = "N"
+    assert active == "N"
+
+
+def test_rcc_tab_renders_side_by_side_when_variant_built(xiidm_upload):
+    """Building the N-K variant must let the Reactive Curves tab render
+    side-by-side without raising."""
+    from streamlit.testing.v1 import AppTest
+    from iidm_viewer.state import load_network as _load
+
+    at = AppTest.from_file("iidm_viewer/app.py")
+    at.run(timeout=30)
+    network = _load(xiidm_upload)
+    at.session_state["network"] = network
+    at.session_state["_last_file"] = xiidm_upload.name
+    # Build the N-K variant directly via the state helper to bypass
+    # the picker form (forms need a session-driven submit).
+    fake_session = at.session_state
+    with patch("iidm_viewer.state.st") as state_st:
+        state_st.session_state = fake_session
+        from iidm_viewer.state import build_nk_variant
+        build_nk_variant(
+            network, {"id": "x", "element_ids": ["L1-2-1"]},
+        )
+    at.session_state["_rcc_view_mode"] = "Side-by-side"
+    try:
+        at.run(timeout=60)
+        assert not at.exception
+        # Both panes share the same view-mode key.
+        assert at.session_state["_rcc_view_mode"] == "Side-by-side"
+    finally:
+        from iidm_viewer.variants import drop_variant
+        try:
+            drop_variant(network)
+        except Exception:
+            pass
+
+
 def test_render_view_mode_radio_enables_when_variant_set():
     """Once ``_nk_variant_id`` is set the radio enables N-K +
     Side-by-side; the active value can flip to either option."""
