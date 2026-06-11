@@ -31,7 +31,7 @@ from typing import Optional
 import pandas as pd
 import plotly.graph_objects as go
 
-from iidm_viewer.powsybl_worker import NetworkProxy
+from iidm_viewer.powsybl_worker import NetworkProxy, run
 
 
 # ---------------------------------------------------------------------------
@@ -66,26 +66,62 @@ def duration_label(d: int) -> str:
 # ---------------------------------------------------------------------------
 # Worker-routed pypowsybl fetchers
 # ---------------------------------------------------------------------------
-def _branch_dataframes(network):
+def _branch_dataframes(network, variant_id: Optional[str] = None):
     """Yield ``(lines_df, 2wt_df)`` directly from pypowsybl.
 
-    Each fetch is wrapped in a try/except so that a single failure (no
-    transformers in this network, attribute change in pypowsybl, etc.)
-    doesn't take the whole helper down — the caller can still see
+    Fast path (``variant_id is None`` or ``"InitialState"``): each
+    fetch goes through ``network.<method>(...)`` — same shape as
+    before, two worker round-trips, MagicMock-friendly for unit tests.
+
+    Variant-scoped path: switch + both fetches + restore happen
+    atomically inside one worker round-trip.
+
+    Each fetch is wrapped in a try/except so a single failure (no
+    transformers in this network, attribute change in pypowsybl,
+    etc.) doesn't take the whole helper down — the caller still sees
     whichever frame did come back.
     """
-    for method_name in ("get_lines", "get_2_windings_transformers"):
-        try:
-            df = getattr(network, method_name)(all_attributes=True)
-        except Exception:
-            df = pd.DataFrame()
-        yield df
+    from iidm_viewer.variants import INITIAL_VARIANT_ID, with_variant
+
+    if variant_id is None or variant_id == INITIAL_VARIANT_ID:
+        for method_name in ("get_lines", "get_2_windings_transformers"):
+            try:
+                df = getattr(network, method_name)(all_attributes=True)
+            except Exception:
+                df = pd.DataFrame()
+            yield df
+        return
+
+    raw = object.__getattribute__(network, "_obj")
+
+    def _do():
+        with with_variant(raw, variant_id):
+            try:
+                lines = raw.get_lines(all_attributes=True)
+            except Exception:
+                lines = pd.DataFrame()
+            try:
+                t2w = raw.get_2_windings_transformers(all_attributes=True)
+            except Exception:
+                t2w = pd.DataFrame()
+            return lines, t2w
+
+    lines, t2w = run(_do)
+    yield lines
+    yield t2w
 
 
-def get_current_flows(network: NetworkProxy) -> dict[str, dict[str, float]]:
-    """Return ``{element_id: {'i1': …, 'i2': …}}`` for lines + 2WTs."""
+def get_current_flows(
+    network: NetworkProxy, *, variant_id: Optional[str] = None,
+) -> dict[str, dict[str, float]]:
+    """Return ``{element_id: {'i1': …, 'i2': …}}`` for lines + 2WTs.
+
+    ``variant_id`` (kw-only): when set, the flows are read against the
+    given variant instead of InitialState. Switch + both fetches +
+    restore atomically in one worker round-trip.
+    """
     flows: dict[str, dict[str, float]] = {}
-    for df in _branch_dataframes(network):
+    for df in _branch_dataframes(network, variant_id=variant_id):
         if df.empty or "i1" not in df.columns or "i2" not in df.columns:
             continue
         for idx, row in df[["i1", "i2"]].iterrows():
@@ -93,15 +129,20 @@ def get_current_flows(network: NetworkProxy) -> dict[str, dict[str, float]]:
     return flows
 
 
-def get_branch_losses(network: NetworkProxy) -> dict[str, float]:
+def get_branch_losses(
+    network: NetworkProxy, *, variant_id: Optional[str] = None,
+) -> dict[str, float]:
     """Return ``{element_id: losses_MW}`` for lines + 2-winding transformers.
 
     Active-power losses = ``p1 + p2`` (pypowsybl sign convention: both
     flows positive when entering the branch). Returns NaN where ``p1``
     or ``p2`` is NaN (typically before any load flow has run).
+
+    ``variant_id`` (kw-only): when set, the losses are read against
+    the given variant instead of InitialState.
     """
     losses: dict[str, float] = {}
-    for df in _branch_dataframes(network):
+    for df in _branch_dataframes(network, variant_id=variant_id):
         if df.empty or "p1" not in df.columns or "p2" not in df.columns:
             continue
         for idx, row in df[["p1", "p2"]].iterrows():
@@ -119,6 +160,8 @@ def get_branch_losses(network: NetworkProxy) -> dict[str, float]:
 def compute_loading(
     network: NetworkProxy,
     limits_reset: pd.DataFrame,
+    *,
+    variant_id: Optional[str] = None,
 ) -> pd.DataFrame:
     """Worst-side ``loading_pct = I_actual / I_permanent_limit * 100``.
 
@@ -127,6 +170,12 @@ def compute_loading(
     ``permanent_limit``, ``current``, ``loading_pct``, ``losses``. One
     row per element (the worst of its two sides). Empty when the
     network has no lines / 2WTs or no load flow has been run.
+
+    ``variant_id`` (kw-only): currents + losses are read against the
+    given variant when set. ``limits_reset`` itself is variant-
+    invariant (operational limits are part of the network's
+    definition, not connection state) so callers may pass the same
+    frame regardless of ``variant_id``.
 
     No caching here — hosts that need it wrap this call with their own
     (Streamlit's tab keeps a per-``(net_key, lf_gen)`` cache).
@@ -139,7 +188,7 @@ def compute_loading(
     perm = perm.rename(columns={"value": "permanent_limit"})
 
     rows = []
-    for df in _branch_dataframes(network):
+    for df in _branch_dataframes(network, variant_id=variant_id):
         if df.empty or "i1" not in df.columns or "i2" not in df.columns:
             continue
         sub = df[["i1", "i2", "name"]] if "name" in df.columns else df[["i1", "i2"]]
@@ -166,7 +215,7 @@ def compute_loading(
     worst = merged.loc[idx_max].sort_values("loading_pct", ascending=False)
 
     # Attach per-element losses (p1 + p2).
-    losses = get_branch_losses(network)
+    losses = get_branch_losses(network, variant_id=variant_id)
     worst["losses"] = worst["element_id"].map(losses)
     return worst.reset_index(drop=True)
 
@@ -259,6 +308,7 @@ def build_operational_limits_view_model(
     loading_df: Optional["pd.DataFrame"] = None,
     flows: Optional[dict] = None,
     losses: Optional[dict] = None,
+    variant_id: Optional[str] = None,
 ) -> Optional[OperationalLimitsViewModel]:
     """Build the view model for the Operational Limits tab.
 
@@ -266,13 +316,20 @@ def build_operational_limits_view_model(
 
     1. Fetch ``get_operational_limits()`` (or use the caller-supplied
        ``limits_df`` so Streamlit can pass its session-state cache).
+       Operational limits are variant-invariant and read against
+       InitialState.
     2. Return ``None`` when there are no limits at all.
     3. Drop ``MAX_DOUBLE`` sentinel rows for the display frame.
-    4. Compute worst-side loading per element.
+    4. Compute worst-side loading per element against ``variant_id``.
     5. Surface the list of element IDs that have at least one
        displayable limit.
-    6. Pre-fetch current flows + losses so hosts can render the
-       per-element chart without an extra worker hop.
+    6. Pre-fetch current flows + losses against ``variant_id`` so
+       hosts can render the per-element chart without an extra worker
+       hop.
+
+    ``variant_id`` (kw-only): forwarded to the flow / loading / losses
+    fetches so the view model reflects the chosen variant. Defaults
+    to ``None`` (InitialState).
     """
     if limits_df is None:
         try:
@@ -287,11 +344,13 @@ def build_operational_limits_view_model(
     element_ids = list(display["element_id"].unique())
 
     if loading_df is None:
-        loading_df = compute_loading(network, limits_reset)
+        loading_df = compute_loading(
+            network, limits_reset, variant_id=variant_id,
+        )
     if flows is None:
-        flows = get_current_flows(network)
+        flows = get_current_flows(network, variant_id=variant_id)
     if losses is None:
-        losses = get_branch_losses(network)
+        losses = get_branch_losses(network, variant_id=variant_id)
 
     return OperationalLimitsViewModel(
         limits_df=limits_reset,

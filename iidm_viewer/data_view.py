@@ -297,6 +297,7 @@ def enrich_with_joins(df: pd.DataFrame, vl_lookup: pd.DataFrame) -> pd.DataFrame
 
 def get_enriched_dataframe(
     network: NetworkProxy, component: str,
+    *, variant_id: Optional[str] = None,
 ) -> pd.DataFrame:
     """Return the component's DataFrame enriched with VL-derived columns.
 
@@ -304,8 +305,13 @@ def get_enriched_dataframe(
     refresh; one worker round-trip per call (the registry's
     ``get_dataframe`` already runs on the worker, and
     :func:`build_vl_lookup` does too).
+
+    ``variant_id`` (kw-only): forwarded to :func:`get_dataframe` so the
+    component frame is fetched against ``variant_id``. The VL lookup
+    is variant-invariant (substations + voltage levels are topology,
+    not connection state) and stays on the InitialState fast path.
     """
-    df = get_dataframe(network, component)
+    df = get_dataframe(network, component, variant_id=variant_id)
     if df.empty or component not in COMPONENT_TYPES:
         return df
     lookup = build_vl_lookup(network)
