@@ -205,6 +205,83 @@ def build_n1_contingencies(
     ]
 
 
+# ---------------------------------------------------------------------------
+# Manual contingency normalizer (host-agnostic — shared by the Streamlit
+# Security Analysis tab and the N-K variant picker docks)
+# ---------------------------------------------------------------------------
+PER_ELEMENT_GROUPING = "per_element"  # one N-1 contingency per element
+SINGLE_GROUPING = "single"            # one N-k contingency for the whole selection
+
+# Mapping from the Streamlit radio labels (:data:`MANUAL_GROUPINGS`) to
+# the canonical tokens above. Exposed so each host can offer its own
+# widget labels while still funnelling through the normalizer.
+MANUAL_GROUPING_TOKENS: dict[str, str] = {
+    MANUAL_GROUPINGS[0]: PER_ELEMENT_GROUPING,
+    MANUAL_GROUPINGS[1]: SINGLE_GROUPING,
+}
+
+
+def validate_manual_contingency(
+    element_ids,
+    grouping: str,
+    group_id: Optional[str],
+) -> list[str]:
+    """Return a list of error strings for a manual-picker selection.
+
+    Empty list ⇒ the selection is well-formed. The host decides how to
+    surface the errors (toast / status label / inline caption).
+    """
+    errors: list[str] = []
+    if not element_ids:
+        errors.append("Pick at least one element.")
+    if grouping not in (PER_ELEMENT_GROUPING, SINGLE_GROUPING):
+        errors.append(f"Unknown grouping: {grouping!r}")
+    elif grouping == SINGLE_GROUPING and not (group_id or "").strip():
+        errors.append("A contingency id is required for grouped mode.")
+    return errors
+
+
+def normalize_manual_contingency(
+    element_type: str,
+    element_ids,
+    grouping: str,
+    group_id: Optional[str],
+) -> list[dict]:
+    """Translate a manual picker selection into the canonical
+    contingency shape.
+
+    ``element_type`` is one of :data:`MANUAL_TYPES` and is currently
+    surfaced only for symmetry with future split-by-type validations —
+    every entry uses pypowsybl's id-based contingency model so
+    ``element_type`` isn't part of the output dict.
+
+    Returns:
+
+    * ``grouping == "per_element"`` →
+      ``[{"id": "N1_<eid>", "element_id": eid, "element_ids": [eid]}, …]``
+      (one entry per element, identical shape to
+      :func:`build_n1_contingencies` so downstream readers can pull
+      either source without branching).
+    * ``grouping == "single"`` →
+      ``[{"id": <group_id>, "element_ids": [...]}]`` — one grouped
+      contingency carrying every selected id.
+
+    Raises :class:`ValueError` (joined errors from
+    :func:`validate_manual_contingency`) on invalid input.
+    """
+    del element_type  # currently unused; kept for forward compatibility
+    errors = validate_manual_contingency(element_ids, grouping, group_id)
+    if errors:
+        raise ValueError("; ".join(errors))
+    if grouping == PER_ELEMENT_GROUPING:
+        return [
+            {"id": f"N1_{eid}", "element_id": eid, "element_ids": [eid]}
+            for eid in element_ids
+        ]
+    cid = (group_id or "").strip()
+    return [{"id": cid, "element_ids": list(element_ids)}]
+
+
 def build_n2_contingencies(
     network: NetworkProxy,
     element_type: str,

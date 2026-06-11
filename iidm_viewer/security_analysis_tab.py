@@ -47,7 +47,9 @@ from iidm_viewer.security_analysis import (
     build_n1_contingencies,
     build_n2_contingencies,
     get_element_ids,
+    normalize_manual_contingency,
     run_security_analysis,
+    MANUAL_GROUPING_TOKENS as _MANUAL_GROUPING_TOKENS,
 )
 
 
@@ -323,38 +325,28 @@ def _render_contingencies_subtab(network):
         submitted = st.form_submit_button("Add manual contingencies")
 
     if submitted:
-        if not selected_ids:
-            st.warning("Pick at least one element.")
-        elif grouping == _MANUAL_GROUPINGS[0]:
+        grouping_token = _MANUAL_GROUPING_TOKENS.get(grouping, grouping)
+        try:
+            new_contingencies = normalize_manual_contingency(
+                manual_type, selected_ids, grouping_token, group_id,
+            )
+        except ValueError as exc:
+            st.warning(str(exc))
+        else:
             existing = {c["id"] for c in manual}
             added = 0
-            for eid in selected_ids:
-                cid = f"N1_{eid}"
-                if cid in existing:
+            for c in new_contingencies:
+                if c["id"] in existing:
                     continue
-                manual.append({
-                    "id": cid,
-                    "element_id": eid,
-                    "element_ids": [eid],
-                })
-                existing.add(cid)
+                manual.append(c)
+                existing.add(c["id"])
                 added += 1
             if added:
                 st.rerun()
-            else:
+            elif grouping_token == "per_element":
                 st.warning("All selected elements were already added.")
-        else:
-            cid = group_id.strip()
-            if not cid:
-                st.warning("A contingency id is required for grouped mode.")
-            elif any(c["id"] == cid for c in manual):
-                st.warning(f"Contingency id '{cid}' already exists.")
             else:
-                manual.append({
-                    "id": cid,
-                    "element_ids": list(selected_ids),
-                })
-                st.rerun()
+                st.warning(f"Contingency id '{new_contingencies[0]['id']}' already exists.")
 
     if manual:
         st.caption(f"{len(manual)} manual contingency(ies) defined")
