@@ -129,6 +129,17 @@ def test_nicegui_operational_limits_threads_variant_id():
     assert "on_nk_variant_changed" in src
 
 
+def test_nicegui_reactive_curves_offers_side_by_side():
+    """The Reactive Curves tab must surface a 'Side-by-side' option
+    and route through a per-variant containment renderer."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_reactive_curves)
+    assert "Side-by-side" in src
+    assert "_render_rcc_side_by_side" in src
+
+
 def test_nicegui_operational_limits_offers_side_by_side():
     """The Operational Limits tab must surface a 'Side-by-side' option
     in its view-mode select and route through a dedicated
