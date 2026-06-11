@@ -129,6 +129,19 @@ def test_nicegui_operational_limits_threads_variant_id():
     assert "on_nk_variant_changed" in src
 
 
+def test_nicegui_operational_limits_offers_side_by_side():
+    """The Operational Limits tab must surface a 'Side-by-side' option
+    in its view-mode select and route through a dedicated
+    side-by-side renderer."""
+    import inspect
+    from iidm_viewer.web import app
+
+    src = inspect.getsource(app._build_operational_limits)
+    assert "Side-by-side" in src
+    assert "_render_side_by_side" in src
+    assert "side_by_side_group" in src
+
+
 def test_nicegui_data_explorer_threads_variant_id_and_gates_writes():
     """The Data Explorer builder threads variant_id into the view-model
     builder AND gates the cell-edit + bulk-edit handlers on

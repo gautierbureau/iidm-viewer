@@ -4809,17 +4809,26 @@ def _build_operational_limits():
     ).classes("text-caption q-pa-md")
 
     # View-mode select — disabled until the dock builds an N-K variant.
+    # 'Side-by-side' splits the panel into N + N-K loading tables
+    # so the user can scan both variants' worst-loaded elements at once.
     with ui.row().classes("items-center q-pa-sm"):
         ui.label("View:").classes("text-caption")
         view_mode_select = ui.select(
-            options=["N", "N-K"], value="N",
-        ).props("dense outlined").classes("w-24")
+            options=["N", "N-K", "Side-by-side"], value="N",
+        ).props("dense outlined").classes("w-40")
         view_mode_select.set_enabled(False)
 
+    def _current_view_mode() -> str:
+        return view_mode_select.value or "N"
+
     def _on_view_mode_changed(_e=None) -> None:
-        new_v = NK_VARIANT_ID if view_mode_select.value == "N-K" else INITIAL_VARIANT_ID
-        if new_v == state["variant_id"]:
-            return
+        mode = _current_view_mode()
+        if mode == "Side-by-side":
+            new_v = INITIAL_VARIANT_ID  # left pane drives single-pane widgets
+        elif mode == "N-K":
+            new_v = NK_VARIANT_ID
+        else:
+            new_v = INITIAL_VARIANT_ID
         state["variant_id"] = new_v
         refresh()
 
@@ -4856,6 +4865,28 @@ def _build_operational_limits():
             "defaultColDef": _DEFAULT_COL_DEF,
         }).classes("w-full").style("height: 280px")
 
+    # --- Side-by-side section (hidden until "Side-by-side" picked) ------
+    # Two loading tables wrapped in a ui.row() so the user can scan N
+    # and N-K worst-loaded elements simultaneously.
+    side_by_side_group = ui.column().classes("w-full q-pa-sm")
+    with side_by_side_group:
+        ui.label("Most loaded elements — N vs N-K").classes("text-h6")
+        sxs_caption = ui.label("").classes("text-caption q-mb-sm")
+        with ui.row().classes("w-full no-wrap"):
+            with ui.column().classes("col"):
+                ui.label("N (base)").classes("text-subtitle1")
+                sxs_grid_n = ui.aggrid({
+                    "columnDefs": [], "rowData": [],
+                    "defaultColDef": _DEFAULT_COL_DEF,
+                }).classes("w-full").style("height: 380px")
+            with ui.column().classes("col"):
+                ui.label("N-K (contingency)").classes("text-subtitle1")
+                sxs_grid_nk = ui.aggrid({
+                    "columnDefs": [], "rowData": [],
+                    "defaultColDef": _DEFAULT_COL_DEF,
+                }).classes("w-full").style("height: 380px")
+    side_by_side_group.visible = False
+
     # --- Element detail section ----------------------------------------
     element_group = ui.column().classes("w-full q-pa-sm")
     with element_group:
@@ -4880,9 +4911,89 @@ def _build_operational_limits():
         }).classes("w-full").style("height: 220px")
 
     def _set_data_visible(visible: bool) -> None:
-        most_loaded_group.visible = visible
+        sxs = _current_view_mode() == "Side-by-side"
+        most_loaded_group.visible = visible and not sxs
+        side_by_side_group.visible = visible and sxs
+        # The element-detail section stays single-pane; it's driven by
+        # the active variant_id even when Side-by-side is active.
         element_group.visible = visible
         placeholder.visible = not visible
+
+    def _render_side_by_side() -> None:
+        """Render both variants' most-loaded tables. Reuses the
+        per-variant cached compute via ``build_operational_limits_view_model``."""
+        threshold = int(state["threshold"])
+        # Fetch limits once and reuse — they're variant-invariant.
+        if _state.network is None:
+            return
+        try:
+            n_vm = build_operational_limits_view_model(
+                _state.network, variant_id=INITIAL_VARIANT_ID,
+            )
+            nk_vm = build_operational_limits_view_model(
+                _state.network, variant_id=NK_VARIANT_ID,
+            )
+        except Exception as exc:
+            sxs_caption.set_text(f"Side-by-side build failed: {exc}")
+            return
+        if n_vm is None or nk_vm is None:
+            sxs_caption.set_text(
+                "Build the N-K variant + run an N-K load flow to populate "
+                "both panes."
+            )
+            return
+
+        def _shape(vm) -> pd.DataFrame:
+            df = vm.loading_df
+            if df is None or df.empty:
+                return pd.DataFrame()
+            above = df[df["loading_pct"] >= threshold].copy()
+            if above.empty:
+                return pd.DataFrame()
+            show = above[["element_id", "element_type", "side",
+                          "current", "permanent_limit",
+                          "loading_pct", "losses"]].copy()
+            show.columns = ["Element", "Type", "Side",
+                            "I (A)", "Limit (A)", "Loading (%)",
+                            "Losses (MW)"]
+            show["Side"] = show["Side"].map(
+                {"ONE": "1", "TWO": "2"})
+            show["I (A)"] = show["I (A)"].round(1)
+            show["Loading (%)"] = show["Loading (%)"].round(1)
+            show["Losses (MW)"] = show["Losses (MW)"].round(3)
+            return show
+
+        n_show = _shape(n_vm)
+        nk_show = _shape(nk_vm)
+        sxs_caption.set_text(
+            f"{len(n_show)} elements above {threshold}% in N; "
+            f"{len(nk_show)} in N-K."
+        )
+
+        def _column_defs(df: pd.DataFrame) -> list:
+            out = []
+            for col in df.columns:
+                defn: dict = {"headerName": col, "field": col}
+                if col == "Loading (%)":
+                    defn["cellClassRules"] = {
+                        "bg-red-3 text-white": "x >= 100",
+                        "bg-orange-3 text-white": "x >= 80 && x < 100",
+                    }
+                out.append(defn)
+            return out
+
+        sxs_grid_n.options.update({
+            "columnDefs": _column_defs(n_show),
+            "rowData": n_show.to_dict("records"),
+            "defaultColDef": _DEFAULT_COL_DEF,
+        })
+        sxs_grid_n.update()
+        sxs_grid_nk.options.update({
+            "columnDefs": _column_defs(nk_show),
+            "rowData": nk_show.to_dict("records"),
+            "defaultColDef": _DEFAULT_COL_DEF,
+        })
+        sxs_grid_nk.update()
 
     def _render_loading_table() -> None:
         vm = state["vm"]
@@ -5050,6 +5161,8 @@ def _build_operational_limits():
         _render_loading_table()
         _refresh_element_choices()
         _render_selected_element()
+        if _current_view_mode() == "Side-by-side":
+            _render_side_by_side()
 
     refresh()
     return refresh
