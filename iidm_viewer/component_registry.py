@@ -184,9 +184,16 @@ def editable_attributes(component: str) -> list[str]:
     return list(entry[1]) if entry else []
 
 
-def get_dataframe(network: NetworkProxy, component: str):
+def get_dataframe(
+    network: NetworkProxy, component: str, *, variant_id: Optional[str] = None,
+):
     """Return the pandas DataFrame for ``component``, with the equipment
     id surfaced as a regular ``id`` column.
+
+    ``variant_id`` (kw-only): when set to a non-InitialState variant,
+    the fetch happens against that variant — switch + read + restore
+    atomically inside one worker round-trip. Defaults to ``None`` /
+    InitialState (the today behaviour, no extra hop).
 
     Returns an empty DataFrame for unknown component types or absent
     extensions (rather than raising) so the UI can show a clean
@@ -194,19 +201,22 @@ def get_dataframe(network: NetworkProxy, component: str):
     """
     import pandas as pd
 
+    from iidm_viewer.variants import with_variant
+
     getter_name = COMPONENT_TYPES.get(component)
     if getter_name is None:
         return pd.DataFrame()
     raw = object.__getattribute__(network, "_obj")
 
     def _do():
-        method = getattr(raw, getter_name, None)
-        if method is None:
-            return pd.DataFrame()
-        df = method()
-        if df is not None and df.index.name:
-            df = df.reset_index()
-        return df if df is not None else pd.DataFrame()
+        with with_variant(raw, variant_id):
+            method = getattr(raw, getter_name, None)
+            if method is None:
+                return pd.DataFrame()
+            df = method()
+            if df is not None and df.index.name:
+                df = df.reset_index()
+            return df if df is not None else pd.DataFrame()
 
     return run(_do)
 

@@ -24,6 +24,7 @@ No streamlit / Qt / NiceGUI imports.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any, Optional
 
 import pandas as pd
@@ -64,6 +65,30 @@ def get_working_variant_id(network: NetworkProxy) -> str:
 # ---------------------------------------------------------------------------
 # Atomic switch + work + restore
 # ---------------------------------------------------------------------------
+@contextmanager
+def with_variant(raw, variant_id: Optional[str]):
+    """Context manager that switches the working variant on entry and
+    restores it on exit. Intended to wrap the body of a worker
+    ``run(...)`` block so the switch + work + restore stays atomic.
+
+    ``variant_id`` is ``None`` or :data:`INITIAL_VARIANT_ID` → no
+    switch happens at all (fast path matching today's behaviour).
+
+    Operates on the **raw** pypowsybl ``Network`` (not the proxy) so
+    every call is local to the worker thread; calling this outside a
+    ``run(...)`` block defeats the atomicity guarantee.
+    """
+    if variant_id is None or variant_id == INITIAL_VARIANT_ID:
+        yield
+        return
+    prev = raw.get_working_variant_id()
+    try:
+        raw.set_working_variant(variant_id)
+        yield
+    finally:
+        raw.set_working_variant(prev)
+
+
 def fetch_for_variant(
     network: NetworkProxy, fn_name: str, variant_id: Optional[str],
     *args: Any, **kwargs: Any,
@@ -80,14 +105,8 @@ def fetch_for_variant(
     raw = object.__getattribute__(network, "_obj")
 
     def _do():
-        if variant_id is None or variant_id == INITIAL_VARIANT_ID:
+        with with_variant(raw, variant_id):
             return getattr(raw, fn_name)(*args, **kwargs)
-        prev = raw.get_working_variant_id()
-        try:
-            raw.set_working_variant(variant_id)
-            return getattr(raw, fn_name)(*args, **kwargs)
-        finally:
-            raw.set_working_variant(prev)
 
     result = run(_do)
     module = type(result).__module__ or ""

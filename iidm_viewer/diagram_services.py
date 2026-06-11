@@ -34,13 +34,21 @@ def generate_sld(
     *,
     use_name: bool = True,
     tooltip_enabled: bool = True,
+    variant_id: Optional[str] = None,
 ) -> tuple[str, str]:
     """Generate an SLD SVG for a voltage-level or substation ``container_id``.
 
-    Returns ``(svg, metadata_json)``. The whole call (param
-    construction + pypowsybl call + result attribute access) runs in
-    a single worker hop.
+    Returns ``(svg, metadata_json)``. The whole call (variant switch
+    if any + param construction + pypowsybl call + result attribute
+    access) runs in a single worker hop.
+
+    ``variant_id`` (kw-only): when set to a non-InitialState variant,
+    the diagram reflects that variant's connection / flow state. The
+    switch + render + restore is atomic; the working variant is
+    always restored before the function returns.
     """
+    from iidm_viewer.variants import with_variant
+
     raw = object.__getattribute__(network, "_obj")
 
     def _do():
@@ -49,8 +57,9 @@ def generate_sld(
             use_name=use_name,
             tooltip_enabled=tooltip_enabled,
         )
-        sld = raw.get_single_line_diagram(container_id, parameters=params)
-        return sld.svg, sld.metadata
+        with with_variant(raw, variant_id):
+            sld = raw.get_single_line_diagram(container_id, parameters=params)
+            return sld.svg, sld.metadata
 
     return run(_do)
 

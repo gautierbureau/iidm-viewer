@@ -327,6 +327,7 @@ def augment_gens_with_step_up_transformer(
     gens_df: pd.DataFrame,
     *,
     vl_to_xf: Optional[pd.DataFrame] = None,
+    variant_id: Optional[str] = None,
 ) -> pd.DataFrame:
     """Add ``step_up_transformer_id`` / ``step_up_transformer_connected``
     to a generators frame, mapped via the gen's ``voltage_level_id``.
@@ -337,11 +338,21 @@ def augment_gens_with_step_up_transformer(
     helper fetches the 2WT frame on the worker thread, enriches it
     against the shared VL lookup and runs the pure reduction itself —
     convenient for one-shot calls from PySide6 / NiceGUI.
+
+    ``variant_id`` (kw-only): when ``vl_to_xf`` is ``None``, the 2WT
+    frame is fetched against ``variant_id`` so the
+    ``step_up_transformer_connected`` flag reflects the variant's
+    connection state. The VL lookup itself is variant-invariant.
     """
+    from iidm_viewer.variants import fetch_for_variant
+
     if "voltage_level_id" not in gens_df.columns:
         return gens_df
     if vl_to_xf is None:
-        twts = network.get_2_windings_transformers(all_attributes=True)
+        twts = fetch_for_variant(
+            network, "get_2_windings_transformers", variant_id,
+            all_attributes=True,
+        )
         if not twts.empty:
             twts = enrich_with_joins(twts.copy(), build_vl_lookup(network))
         vl_to_xf = vl_to_step_up_transformer_table(twts)
@@ -399,6 +410,7 @@ def augment_gens_with_bus_voltage(
     gens_df: pd.DataFrame,
     *,
     bus_voltages: Optional[pd.DataFrame] = None,
+    variant_id: Optional[str] = None,
 ) -> pd.DataFrame:
     """Worker-routed wrapper around :func:`add_bus_voltage_columns`.
 
@@ -406,9 +418,17 @@ def augment_gens_with_bus_voltage(
     it when the host has a cached copy (Streamlit's
     ``caches.get_bus_voltages``). When ``None``, the helper builds a
     minimal one from ``network.get_buses`` on the worker thread.
+
+    ``variant_id`` (kw-only): when ``bus_voltages`` is ``None``, the
+    bus frame is fetched against ``variant_id`` so post-LF voltages
+    come from the right variant.
     """
+    from iidm_viewer.variants import fetch_for_variant
+
     if bus_voltages is None:
-        buses = network.get_buses(all_attributes=True)
+        buses = fetch_for_variant(
+            network, "get_buses", variant_id, all_attributes=True,
+        )
         if buses.empty:
             bus_voltages = pd.DataFrame(columns=["bus_id", "v_mag"])
         else:
@@ -511,6 +531,7 @@ def build_reactive_curves_view_model(
     curves_df: Optional["pd.DataFrame"] = None,
     vl_to_xf: Optional["pd.DataFrame"] = None,
     bus_voltages: Optional["pd.DataFrame"] = None,
+    variant_id: Optional[str] = None,
 ) -> Optional[ReactiveCurvesViewModel]:
     """Build the reactive-curves view model for ``network``.
 
@@ -526,9 +547,17 @@ def build_reactive_curves_view_model(
     5. Augment with step-up transformer and bus-voltage columns.
     6. Classify each gen's operating point against its polygon.
 
+    ``variant_id`` (kw-only): when set, the generator + step-up
+    transformer + bus voltage frames are fetched against that
+    variant. The reactive capability curve points are variant-
+    invariant (they belong to the network's definition) and stay on
+    the InitialState fast path.
+
     Returns ``None`` when the network carries no eligible generators
     after step 2 — hosts surface a "no data" placeholder.
     """
+    from iidm_viewer.variants import fetch_for_variant
+
     if curves_df is None:
         try:
             curves_df = network.get_reactive_capability_curve_points()
@@ -540,7 +569,9 @@ def build_reactive_curves_view_model(
     )
 
     if gens_df is None:
-        gens_df = network.get_generators(all_attributes=True)
+        gens_df = fetch_for_variant(
+            network, "get_generators", variant_id, all_attributes=True,
+        )
     if gens_df.empty:
         return None
 
@@ -562,10 +593,10 @@ def build_reactive_curves_view_model(
             gens_df = narrowed
 
     gens_df = augment_gens_with_step_up_transformer(
-        network, gens_df, vl_to_xf=vl_to_xf,
+        network, gens_df, vl_to_xf=vl_to_xf, variant_id=variant_id,
     )
     gens_df = augment_gens_with_bus_voltage(
-        network, gens_df, bus_voltages=bus_voltages,
+        network, gens_df, bus_voltages=bus_voltages, variant_id=variant_id,
     )
     classified = classify_targets(gens_df, curves_df)
     pv_gen_ids = classified.index[classified["regulation"] == "PV"].tolist()
