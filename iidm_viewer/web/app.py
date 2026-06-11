@@ -3436,8 +3436,19 @@ def _build_data_explorer(on_topology_changed=None):
     create / delete / disconnect that changes the network topology, so
     the caller can rebuild the VL picker and flush diagram caches.
     """
+    from iidm_viewer.variants import INITIAL_VARIANT_ID, NK_VARIANT_ID
+
+    # Active variant + state used by the view-mode dispatch + N-K
+    # read-only gating. N-K mode hides Apply / Remove / bulk-edit UI.
+    de_state: dict = {"variant_id": INITIAL_VARIANT_ID}
+
     with ui.row().classes("q-pa-sm items-center w-full"):
-        ui.label("Component:")
+        ui.label("View:").classes("text-caption")
+        view_mode_select = ui.select(
+            options=["N", "N-K"], value="N",
+        ).props("dense outlined").classes("w-24")
+        view_mode_select.set_enabled(False)
+        ui.label("Component:").classes("q-ml-md")
         select = ui.select(
             options=list(COMPONENT_GETTERS),
             value="Generators",
@@ -3649,6 +3660,7 @@ def _build_data_explorer(on_topology_changed=None):
                 label,
                 selected_vl=_state.selected_vl,
                 filter_by_vl=(vl_applicable and vl_filter.value),
+                variant_id=de_state["variant_id"],
             )
         except Exception as exc:
             grid.options.update({
@@ -3721,6 +3733,11 @@ def _build_data_explorer(on_topology_changed=None):
 
     def on_cell_changed(e) -> None:
         """ag-Grid emits ``cellValueChanged`` with ``data, colId, oldValue, newValue``."""
+        # N-K mode is read-only by contract — drop the edit so the
+        # underlying pypowsybl mutation can't land on the wrong variant.
+        if de_state["variant_id"] != INITIAL_VARIANT_ID:
+            refresh()
+            return
         args = e.args or {}
         col_id = args.get("colId") or (args.get("column") or {}).get("colId")
         new_value = args.get("newValue")
@@ -3760,6 +3777,9 @@ def _build_data_explorer(on_topology_changed=None):
                 _push_nad(_state.selected_vl, _nad_depth)
 
     async def on_bulk_apply(run_lf_after: bool = False) -> None:
+        if de_state["variant_id"] != INITIAL_VARIANT_ID:
+            ui.notify("N-K view is read-only.", type="warning")
+            return
         component = select.value
         attribute = bulk_attr.value
         new_value = bulk_value.value
@@ -3817,6 +3837,9 @@ def _build_data_explorer(on_topology_changed=None):
                 listener(result)
 
     async def on_bulk_disconnect() -> None:
+        if de_state["variant_id"] != INITIAL_VARIANT_ID:
+            ui.notify("N-K view is read-only.", type="warning")
+            return
         component = select.value
         if _state.network is None or not component:
             return
@@ -3852,6 +3875,9 @@ def _build_data_explorer(on_topology_changed=None):
         refresh()
 
     async def on_bulk_delete() -> None:
+        if de_state["variant_id"] != INITIAL_VARIANT_ID:
+            ui.notify("N-K view is read-only.", type="warning")
+            return
         component = select.value
         if _state.network is None or not component:
             return
@@ -3936,6 +3962,27 @@ def _build_data_explorer(on_topology_changed=None):
     delete_button.on_click(on_bulk_delete)
     grid.on("cellValueChanged", on_cell_changed)
     select.on_value_change(lambda _e: refresh())
+
+    def _on_view_mode_changed(_e=None) -> None:
+        new_v = NK_VARIANT_ID if view_mode_select.value == "N-K" else INITIAL_VARIANT_ID
+        if new_v == de_state["variant_id"]:
+            return
+        de_state["variant_id"] = new_v
+        refresh()
+
+    def _on_nk_variant_changed(variant_id) -> None:
+        active = variant_id == NK_VARIANT_ID
+        view_mode_select.set_enabled(active)
+        if not active:
+            view_mode_select.value = "N"
+            view_mode_select.update()
+            if de_state["variant_id"] != INITIAL_VARIANT_ID:
+                de_state["variant_id"] = INITIAL_VARIANT_ID
+                refresh()
+
+    view_mode_select.on("update:model-value", _on_view_mode_changed)
+    _state.on_nk_variant_changed(_on_nk_variant_changed)
+    _state.on_nk_loadflow_completed(lambda _r: refresh())
 
     # When the host's selected_vl changes (Map / NAD / SLD navigation),
     # refresh the data tab so the VL-filter widget and its caption
@@ -4409,8 +4456,18 @@ def _build_reactive_curves():
         build_generator_plot_data,
         build_reactive_curves_view_model,
     )
+    from iidm_viewer.variants import INITIAL_VARIANT_ID, NK_VARIANT_ID
 
-    state: dict = {"vm": None, "gen_id": None}
+    state: dict = {"vm": None, "gen_id": None,
+                   "variant_id": INITIAL_VARIANT_ID}
+
+    # View-mode select — disabled until the dock builds an N-K variant.
+    with ui.row().classes("items-center q-pa-sm"):
+        ui.label("View:").classes("text-caption")
+        view_mode_select = ui.select(
+            options=["N", "N-K"], value="N",
+        ).props("dense outlined").classes("w-24")
+        view_mode_select.set_enabled(False)
 
     only_vl_row = ui.row().classes("items-center q-pa-sm w-full")
     with only_vl_row:
@@ -4652,6 +4709,7 @@ def _build_reactive_curves():
             vm = build_reactive_curves_view_model(
                 _state.network,
                 only_vl=_state.selected_vl if only_vl else None,
+                variant_id=state["variant_id"],
             )
         except Exception as exc:
             placeholder.set_text(f"Reactive curves failed: {exc}")
@@ -4686,6 +4744,27 @@ def _build_reactive_curves():
         _render_selected_gen()
         _render_summary(vm)
 
+    def _on_view_mode_changed(_e=None) -> None:
+        new_v = NK_VARIANT_ID if view_mode_select.value == "N-K" else INITIAL_VARIANT_ID
+        if new_v == state["variant_id"]:
+            return
+        state["variant_id"] = new_v
+        refresh()
+
+    def _on_nk_variant_changed(variant_id) -> None:
+        active = variant_id == NK_VARIANT_ID
+        view_mode_select.set_enabled(active)
+        if not active:
+            view_mode_select.value = "N"
+            view_mode_select.update()
+            if state["variant_id"] != INITIAL_VARIANT_ID:
+                state["variant_id"] = INITIAL_VARIANT_ID
+                refresh()
+
+    view_mode_select.on("update:model-value", _on_view_mode_changed)
+    _state.on_nk_variant_changed(_on_nk_variant_changed)
+    _state.on_nk_loadflow_completed(lambda _r: refresh())
+
     refresh()
     return refresh
 
@@ -4712,15 +4791,46 @@ def _build_operational_limits():
         build_element_chart,
         build_operational_limits_view_model,
     )
+    from iidm_viewer.variants import INITIAL_VARIANT_ID, NK_VARIANT_ID
 
     state: dict = {
         "vm": None, "element_id": None,
         "threshold": 50, "id_filter": "",
+        "variant_id": INITIAL_VARIANT_ID,
     }
 
     placeholder = ui.label(
         "Load a network to see operational limits."
     ).classes("text-caption q-pa-md")
+
+    # View-mode select — disabled until the dock builds an N-K variant.
+    with ui.row().classes("items-center q-pa-sm"):
+        ui.label("View:").classes("text-caption")
+        view_mode_select = ui.select(
+            options=["N", "N-K"], value="N",
+        ).props("dense outlined").classes("w-24")
+        view_mode_select.set_enabled(False)
+
+    def _on_view_mode_changed(_e=None) -> None:
+        new_v = NK_VARIANT_ID if view_mode_select.value == "N-K" else INITIAL_VARIANT_ID
+        if new_v == state["variant_id"]:
+            return
+        state["variant_id"] = new_v
+        refresh()
+
+    def _on_nk_variant_changed(variant_id) -> None:
+        active = variant_id == NK_VARIANT_ID
+        view_mode_select.set_enabled(active)
+        if not active:
+            view_mode_select.value = "N"
+            view_mode_select.update()
+            if state["variant_id"] != INITIAL_VARIANT_ID:
+                state["variant_id"] = INITIAL_VARIANT_ID
+                refresh()
+
+    view_mode_select.on("update:model-value", _on_view_mode_changed)
+    _state.on_nk_variant_changed(_on_nk_variant_changed)
+    _state.on_nk_loadflow_completed(lambda _r: refresh())
 
     # --- Most loaded section --------------------------------------------
     most_loaded_group = ui.column().classes("w-full q-pa-sm")
@@ -4917,7 +5027,9 @@ def _build_operational_limits():
             _set_data_visible(False)
             return
         try:
-            vm = build_operational_limits_view_model(_state.network)
+            vm = build_operational_limits_view_model(
+                _state.network, variant_id=state["variant_id"],
+            )
         except Exception as exc:
             placeholder.set_text(f"Operational limits failed: {exc}")
             state["vm"] = None
