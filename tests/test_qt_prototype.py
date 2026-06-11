@@ -1877,6 +1877,116 @@ def test_qt_appstate_install_network_clears_nk(qapp):
     assert seen == [None]
 
 
+def test_qt_main_window_registers_nk_variant_dock(qapp):
+    """The PySide6 main window must own an :class:`NkVariantDock`
+    wrapped in a :class:`QDockWidget` (hidden until a network loads)."""
+    from PySide6.QtWidgets import QDockWidget
+    from iidm_viewer.qt.main_window import MainWindow
+    from iidm_viewer.qt.nk_variant_dock import NkVariantDock
+
+    window = MainWindow()
+    qapp.processEvents()
+    assert isinstance(window.nk_variant_dock, NkVariantDock)
+    assert isinstance(window.nk_variant_dock_widget, QDockWidget)
+    # Hidden until a network is loaded.
+    assert window.nk_variant_dock_widget.isVisible() is False
+
+
+def test_qt_nk_dock_build_calls_state_build_nk_variant(qapp):
+    """A Build click on the dock funnels through normalize +
+    state.build_nk_variant + emits nk_variant_changed."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.nk_variant_dock import NkVariantDock
+    from iidm_viewer.qt.state import AppState
+    from iidm_viewer.variants import (
+        NK_VARIANT_ID, drop_variant, list_variants,
+    )
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    dock = NkVariantDock()
+    dock.set_state(state)
+    dock.set_network(state.network)
+    qapp.processEvents()
+    try:
+        # Pick the line type, select one element, click Build.
+        idx = dock._type_combo.findText("Lines")
+        assert idx >= 0
+        dock._type_combo.setCurrentIndex(idx)
+        qapp.processEvents()
+
+        # Select L1-2-1 in the list.
+        for i in range(dock._id_list.count()):
+            if dock._id_list.item(i).text() == "L1-2-1":
+                dock._id_list.item(i).setSelected(True)
+                break
+
+        seen: list = []
+        state.nk_variant_changed.connect(lambda v: seen.append(v))
+        dock._on_build_clicked()
+        qapp.processEvents()
+        assert state.nk_variant_id == NK_VARIANT_ID
+        assert NK_VARIANT_ID in list_variants(state.network)
+        assert seen == [NK_VARIANT_ID]
+        # Buttons rebalance — Run LF + Clear enable.
+        assert dock._run_lf_btn.isEnabled() is True
+        assert dock._clear_btn.isEnabled() is True
+    finally:
+        drop_variant(state.network)
+
+
+def test_qt_nk_dock_clear_resets_state(qapp):
+    """Clicking Clear N-K must call state.clear_nk_variant and disable
+    the Run LF + Clear buttons."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.nk_variant_dock import NkVariantDock
+    from iidm_viewer.qt.state import AppState
+    from iidm_viewer.variants import NK_VARIANT_ID, list_variants
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    dock = NkVariantDock()
+    dock.set_state(state)
+    dock.set_network(state.network)
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+    assert dock._clear_btn.isEnabled() is True
+
+    dock._on_clear_clicked()
+    qapp.processEvents()
+    assert state.nk_variant_id is None
+    assert NK_VARIANT_ID not in list_variants(state.network)
+    assert dock._clear_btn.isEnabled() is False
+    assert dock._run_lf_btn.isEnabled() is False
+
+
+def test_qt_nk_dock_status_reflects_active_contingency(qapp):
+    """After Build, the dock's status label surfaces the active
+    contingency id + element ids; after Clear it returns to the
+    discoverability hint."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.nk_variant_dock import NkVariantDock
+    from iidm_viewer.qt.state import AppState
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    dock = NkVariantDock()
+    dock.set_state(state)
+    dock.set_network(state.network)
+
+    state.build_nk_variant({"id": "my_outage", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+    assert "my_outage" in dock._status_lbl.text()
+    assert "L1-2-1" in dock._status_lbl.text()
+
+    state.clear_nk_variant()
+    qapp.processEvents()
+    assert "Build N-K" in dock._status_lbl.text()
+
+
 def test_qt_sld_cache_keyed_by_variant(qapp):
     """The Qt SLD tab's cache key now includes ``variant_id`` so the
     InitialState and N-K SVGs coexist in the same dict slot."""
