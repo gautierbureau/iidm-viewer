@@ -24,13 +24,20 @@ import os
 from typing import Optional
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from iidm_viewer.cache_backend import SLD, CacheBackend, DictBackend
 from iidm_viewer.diagram_services import generate_sld as _generate_sld
 from iidm_viewer.powsybl_worker import NetworkProxy
 from iidm_viewer.qt.web_view import PowsyblWebView
-from iidm_viewer.variants import INITIAL_VARIANT_ID
+from iidm_viewer.variants import INITIAL_VARIANT_ID, NK_VARIANT_ID
 
 
 _SLD_DIST = os.path.join(
@@ -75,15 +82,34 @@ class SldTab(QWidget):
         self._cache_backend: CacheBackend = DictBackend()
         self._ready = False
         self._show_substation = False
+        # Currently displayed variant — flipped by the view-mode combo
+        # once the N-K dock has built a variant. Defaults to InitialState
+        # so today's behaviour is preserved before any combo interaction.
+        self._variant_id = INITIAL_VARIANT_ID
+        self._state = None  # set via set_state
 
         self._status = QLabel("Select a substation on the Network Map.")
         self._status.setStyleSheet("padding: 6px 10px; color: #444;")
         self._expand_btn = QPushButton("Expand to substation")
         self._expand_btn.setVisible(False)
         self._expand_btn.clicked.connect(self._on_expand_toggle)
+
+        # View-mode combo — disabled until an N-K variant exists.
+        # Side-by-side is deferred to a polish step; today the combo
+        # offers N + N-K and flips the active variant rendered into
+        # the single QWebEngineView.
+        self._view_mode_combo = QComboBox()
+        self._view_mode_combo.addItems(["N", "N-K"])
+        self._view_mode_combo.setEnabled(False)
+        self._view_mode_combo.currentTextChanged.connect(
+            self._on_view_mode_changed,
+        )
+
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.addWidget(self._status)
+        header.addWidget(QLabel("View:"))
+        header.addWidget(self._view_mode_combo)
         header.addWidget(self._expand_btn)
         header.addStretch(1)
 
@@ -117,6 +143,37 @@ class SldTab(QWidget):
         gives the same behaviour the previous ``self._cache`` dict had.
         """
         self._cache_backend = backend
+
+    def set_state(self, state) -> None:
+        """Wire the tab to the host's :class:`AppState` so the view-mode
+        combo can enable / disable in response to N-K variant lifecycle
+        events. Called once by the MainWindow after construction."""
+        self._state = state
+        state.nk_variant_changed.connect(self._on_nk_variant_changed)
+        # Initial sync: enable the combo iff a variant is already active.
+        self._on_nk_variant_changed(state.nk_variant_id)
+
+    def _on_nk_variant_changed(self, variant_id) -> None:
+        active = variant_id == NK_VARIANT_ID
+        self._view_mode_combo.setEnabled(active)
+        if not active:
+            # No N-K variant → force the combo back to N so the next
+            # render uses the InitialState cache slot.
+            self._view_mode_combo.blockSignals(True)
+            self._view_mode_combo.setCurrentText("N")
+            self._view_mode_combo.blockSignals(False)
+            if self._variant_id != INITIAL_VARIANT_ID:
+                self._variant_id = INITIAL_VARIANT_ID
+                if self._current_vl:
+                    self.show_voltage_level(self._current_vl)
+
+    def _on_view_mode_changed(self, txt: str) -> None:
+        new_variant = NK_VARIANT_ID if txt == "N-K" else INITIAL_VARIANT_ID
+        if new_variant == self._variant_id:
+            return
+        self._variant_id = new_variant
+        if self._current_vl:
+            self.show_voltage_level(self._current_vl)
 
     def set_network(self, network: Optional[NetworkProxy]) -> None:
         self._network = network
@@ -166,11 +223,11 @@ class SldTab(QWidget):
             svg_type = "voltage-level"
 
         # Cache key is ``(container_id, variant_id)`` so the InitialState
-        # and N-K SVGs coexist in the same slot. The UI dispatch on
-        # variant_id lands with the per-tab N-K rollout; here we only
-        # forward-compat the cache shape.
+        # and N-K SVGs coexist in the same slot. The active variant
+        # follows ``self._variant_id`` — the view-mode combo flips it
+        # and triggers a re-fetch through this method.
         cache = self._cache_backend.setdefault(SLD, {})
-        variant_id = INITIAL_VARIANT_ID
+        variant_id = self._variant_id
         cache_key = (container_id, variant_id)
         if cache_key in cache:
             svg, metadata = cache[cache_key]
@@ -255,7 +312,7 @@ class SldTab(QWidget):
         sid, _ = self._get_substation_for_vl(self._current_vl)
         container_id = sid if (self._show_substation and sid) else self._current_vl
         cache = self._cache_backend.setdefault(SLD, {})
-        entry = cache.get((container_id, INITIAL_VARIANT_ID))
+        entry = cache.get((container_id, self._variant_id))
         if entry is None:
             return
         svg, metadata = entry

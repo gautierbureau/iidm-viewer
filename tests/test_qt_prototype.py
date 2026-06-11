@@ -69,6 +69,8 @@ def test_network_load_auto_selects_highest_voltage(qapp, loaded_window):
 
 
 def test_map_substation_click_jumps_to_sld(qapp, loaded_window):
+    from iidm_viewer.variants import INITIAL_VARIANT_ID
+
     window = loaded_window
     vl_id = "VL1"
 
@@ -80,7 +82,8 @@ def test_map_substation_click_jumps_to_sld(qapp, loaded_window):
     assert window.state.selected_vl == vl_id
     assert window.tabs.currentWidget() is window.sld_tab
 
-    cached = window.sld_tab._cache.get(vl_id)
+    # SLD cache is keyed by (container_id, variant_id) per N-K step 6.
+    cached = window.sld_tab._cache.get((vl_id, INITIAL_VARIANT_ID))
     assert cached is not None, "SLD generation should have populated the cache"
     svg, metadata = cached
     assert "<svg" in svg or svg.lstrip().startswith("<?xml")
@@ -110,26 +113,31 @@ def test_nad_node_click_jumps_to_sld(qapp, loaded_window):
     window.nad_tab._on_value({"type": "nad-vl-click", "vl": target_vl, "ts": 0})
     qapp.processEvents()
 
+    from iidm_viewer.variants import INITIAL_VARIANT_ID
+
     assert window.state.selected_vl == target_vl
     assert window.tabs.currentWidget() is window.sld_tab
-    assert window.sld_tab._cache.get(target_vl) is not None
+    assert window.sld_tab._cache.get((target_vl, INITIAL_VARIANT_ID)) is not None
     # And the NAD itself has cached a render centered on the new VL.
     assert any(k[0] == target_vl for k in window.nad_tab._cache)
 
 
 def test_nad_depth_change_invalidates_for_new_key(qapp, loaded_window):
     """Bumping depth re-runs pypowsybl but keeps the previous entry."""
+    from iidm_viewer.variants import INITIAL_VARIANT_ID
+
     window = loaded_window
     vl = window.state.selected_vl
     assert vl is not None
     initial_keys = set(window.nad_tab._cache.keys())
-    assert (vl, 1) in initial_keys
+    # NAD cache key is now (vl_id, depth, variant_id) per N-K step 6.
+    assert (vl, 1, INITIAL_VARIANT_ID) in initial_keys
 
     window.nad_tab._depth_spin.setValue(2)
     qapp.processEvents()
 
-    assert (vl, 2) in window.nad_tab._cache
-    assert (vl, 1) in window.nad_tab._cache  # old entry preserved
+    assert (vl, 2, INITIAL_VARIANT_ID) in window.nad_tab._cache
+    assert (vl, 1, INITIAL_VARIANT_ID) in window.nad_tab._cache  # old entry preserved
 
 
 def test_data_explorer_renders_voltage_levels_on_load(qapp, loaded_window):
@@ -1985,6 +1993,64 @@ def test_qt_nk_dock_status_reflects_active_contingency(qapp):
     state.clear_nk_variant()
     qapp.processEvents()
     assert "Build N-K" in dock._status_lbl.text()
+
+
+def test_qt_sld_view_mode_combo_disabled_until_variant_built(qapp):
+    """The SLD tab's view-mode combo is disabled until the dock
+    builds an N-K variant; flipping it then routes through the
+    new variant_id-keyed cache."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.sld_tab import SldTab
+    from iidm_viewer.qt.state import AppState
+    from iidm_viewer.variants import (
+        INITIAL_VARIANT_ID, NK_VARIANT_ID, drop_variant,
+    )
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    tab = SldTab()
+    tab.set_cache_backend(state.cache_backend)
+    tab.set_state(state)
+    qapp.processEvents()
+    assert tab._view_mode_combo.isEnabled() is False
+    assert tab._variant_id == INITIAL_VARIANT_ID
+
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+    try:
+        assert tab._view_mode_combo.isEnabled() is True
+        # Flipping to N-K updates the active variant for cache lookups.
+        tab._view_mode_combo.setCurrentText("N-K")
+        qapp.processEvents()
+        assert tab._variant_id == NK_VARIANT_ID
+    finally:
+        drop_variant(state.network)
+
+
+def test_qt_sld_view_mode_resets_to_n_on_clear(qapp):
+    """Clearing the N-K variant must flip the combo back to N
+    and disable it."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.sld_tab import SldTab
+    from iidm_viewer.qt.state import AppState
+    from iidm_viewer.variants import INITIAL_VARIANT_ID
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    tab = SldTab()
+    tab.set_cache_backend(state.cache_backend)
+    tab.set_state(state)
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+    tab._view_mode_combo.setCurrentText("N-K")
+    qapp.processEvents()
+    state.clear_nk_variant()
+    qapp.processEvents()
+    assert tab._view_mode_combo.isEnabled() is False
+    assert tab._view_mode_combo.currentText() == "N"
+    assert tab._variant_id == INITIAL_VARIANT_ID
 
 
 def test_qt_sld_cache_keyed_by_variant(qapp):
