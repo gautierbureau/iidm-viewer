@@ -366,14 +366,22 @@ def _push_sld(vl_id: str) -> None:
         container_id = vl_id
         svg_type = "voltage-level"
 
-    entry = _get_sld_cache().get(container_id)
+    # SLD cache key is (container_id, variant_id) so the InitialState
+    # and N-K SVGs coexist in the same slot. The per-tab N-K rollout
+    # in the NiceGUI app starts using non-default variant_ids; for now
+    # we forward-compat the cache shape with the InitialState default.
+    from iidm_viewer.variants import INITIAL_VARIANT_ID as _INIT
+    cache_key = (container_id, _INIT)
+    entry = _get_sld_cache().get(cache_key)
     if entry is None:
         try:
-            entry = _generate_sld(_state.network, container_id)
+            entry = _generate_sld(
+                _state.network, container_id, variant_id=_INIT,
+            )
         except Exception as exc:
             ui.notify(f"SLD generation failed for {container_id}: {exc}", type="negative")
             return
-        _get_sld_cache()[container_id] = entry
+        _get_sld_cache()[cache_key] = entry
     svg, metadata = entry
     args = {
         "svg": svg, "metadata": metadata,
@@ -469,7 +477,12 @@ def _push_nad(vl_id: str, depth: int) -> None:
     global _last_nad
     if not vl_id or _state.network is None:
         return
-    key = (vl_id, int(depth))
+    # NAD cache key is (vl_id, depth, variant_id) so the InitialState
+    # and N-K NAD SVGs coexist in the same slot. NAD isn't on the
+    # first N-K rollout list; this forward-compat keeps the shape
+    # aligned with the Streamlit + Qt hosts.
+    from iidm_viewer.variants import INITIAL_VARIANT_ID as _INIT
+    key = (vl_id, int(depth), _INIT)
     entry = _get_nad_cache().get(key)
     if entry is None:
         try:
