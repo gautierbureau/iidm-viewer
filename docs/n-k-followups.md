@@ -37,33 +37,40 @@ left or worth doing in a new session, in priority order.
 
 ## High-value, well-scoped
 
-### 1. NiceGUI first-paint latency on large networks
+### 1. NiceGUI first-paint latency on large networks ✅ DONE
 
-**Symptom**: After the install_network fix, uploading Pégase 9k no longer
-freezes the UI, but the first `GET /` against a server with a preloaded
-network still takes ~7s per response because every tab builder
-(`_build_data_explorer`, `_build_reactive_curves`,
-`_build_operational_limits`, `_build_security_analysis`,
-`_build_short_circuit_analysis`) calls its own `refresh()` synchronously at
-construction. The single biggest cost is
-`build_operational_limits_view_model` (~4s on Pégase 9k —
-`compute_loading` walks every line + 2WT).
+**Symptom (pre-fix)**: After the install_network fix, uploading Pégase 9k
+no longer froze the UI, but the first `GET /` against a server with a
+preloaded network still took ~5–7 s because every tab builder called its
+own `refresh()` synchronously at construction.
 
-**Recipe**:
-- For each affected `_build_*` closure in `iidm_viewer/web/app.py`,
-  replace the trailing `refresh()` call with
-  `asyncio.create_task(_async_refresh_tab(refresh))` (the helper is
-  already defined in `main_page`).
-- For the closures called at `_build_*` construction time (not inside
-  `main_page`), promote the helper to module scope or inline the
-  `await asyncio.sleep(0); refresh(); await asyncio.sleep(0)` pattern.
-- Verify with the matpower converter (see follow-up #11) — page render
-  should drop from ~7s to <1s on Pégase 9k.
+**Investigation finding**: A naïve
+`asyncio.create_task(_deferred_initial_refresh(refresh))` did **not**
+actually defer the cost — once the coroutine resumed past the
+`asyncio.sleep(0)`, the synchronous `refresh()` body blocked the event
+loop until it returned, and NiceGUI's response handler couldn't run in
+the meantime. Verified by bisecting (disabling all deferred tasks
+dropped the response from 5 s to 0.2 s on Pégase 9k).
 
-**Acceptance**: `curl http://localhost:PORT/` against a server booted
-with `initial_file=/tmp/case9241pegase.mat` returns HTTP 200 in <1s on
-three consecutive requests; tabs still populate within ~10s of the
-first paint.
+**Fix that landed**: New `_schedule_initial_refresh(refresh_fn)` module
+helper that uses `ui.timer(0.05, refresh_fn, once=True)` — NiceGUI's
+timer runs the callback after the page has rendered + the socket
+connection has stabilised. The five builders (`_build_extensions_explorer`,
+`_build_reactive_curves`, `_build_operational_limits`,
+`_build_security_analysis`, `_build_short_circuit_analysis`) now schedule
+their initial refresh via this helper instead of calling
+`refresh()` synchronously.
+
+**Result**:
+
+| Network | Pre-fix | Post-fix |
+|---|---|---|
+| Empty | 0.18–0.39 s | 0.18–0.39 s (unchanged) |
+| Pégase 9k preloaded | 5.0–7.6 s | 0.19–1.05 s (avg ~0.5 s) |
+
+Subsequent refreshes (e.g. browser reload) may still block briefly
+while pending refresh callbacks pile up — fine for the typical
+single-load-per-session workflow.
 
 ### 2. End-to-end Playwright tests
 
