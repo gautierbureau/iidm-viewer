@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSplitter,
     QTableView,
     QToolButton,
     QVBoxLayout,
@@ -272,8 +273,12 @@ class DataExplorerTab(QWidget):
         self._filter_widgets: dict[str, QWidget] = {}
         # Currently displayed variant — the view-mode combo below flips
         # it; N-K mode is read-only by contract (no in-cell edits, no
-        # bulk apply, no remove).
+        # bulk apply, no remove). ``_view_mode`` (N / N-K /
+        # Side-by-side) tracks the combo selection separately from
+        # the active variant — in Side-by-side, the primary table is
+        # always InitialState and the right pane is N-K.
         self._variant_id = INITIAL_VARIANT_ID
+        self._view_mode = "N"
         self._state = None  # set via set_state
 
         self._combo = QComboBox()
@@ -320,6 +325,18 @@ class DataExplorerTab(QWidget):
             QTableView.DoubleClicked | QTableView.EditKeyPressed | QTableView.AnyKeyPressed
         )
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        # Secondary table for the N-K pane in Side-by-side mode. Read
+        # only by contract (no edit triggers) — N-K rows reflect the
+        # post-LF state under the contingency.
+        self._model_nk = PandasTableModel()
+        self._table_nk = QTableView()
+        self._table_nk.setModel(self._model_nk)
+        self._table_nk.setAlternatingRowColors(True)
+        self._table_nk.setSelectionBehavior(QTableView.SelectRows)
+        self._table_nk.setEditTriggers(QTableView.NoEditTriggers)
+        self._table_nk.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Interactive,
+        )
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setDefaultSectionSize(22)
         self._table.selectionModel().selectionChanged.connect(self._on_selection_changed)
@@ -327,7 +344,10 @@ class DataExplorerTab(QWidget):
         # View-mode combo — disabled until an N-K variant is built.
         # N-K mode is read-only by contract.
         self._view_mode_combo = QComboBox()
-        self._view_mode_combo.addItems(["N", "N-K"])
+        # 'Side-by-side' shows the N rows on the left and the N-K rows
+        # on the right via a QSplitter; the N-K pane is read-only by
+        # contract (bulk-edit buttons stay disabled).
+        self._view_mode_combo.addItems(["N", "N-K", "Side-by-side"])
         self._view_mode_combo.setEnabled(False)
         self._view_mode_combo.currentTextChanged.connect(
             self._on_view_mode_changed,
@@ -451,7 +471,14 @@ class DataExplorerTab(QWidget):
         layout.addWidget(self._create_extension_panel)
         layout.addWidget(self._filters_panel)
         layout.addWidget(self._summary)
-        layout.addWidget(self._table, 1)
+        # Wrap the primary + N-K tables in a QSplitter so Side-by-side
+        # renders them next to each other. Single-pane modes hide the
+        # N-K table.
+        self._table_splitter = QSplitter(Qt.Horizontal)
+        self._table_splitter.addWidget(self._table)
+        self._table_splitter.addWidget(self._table_nk)
+        self._table_nk.setVisible(False)
+        layout.addWidget(self._table_splitter, 1)
         layout.addWidget(self._bulk_panel)
         layout.addWidget(self._change_log_panel)
 
@@ -511,16 +538,29 @@ class DataExplorerTab(QWidget):
             self._view_mode_combo.blockSignals(True)
             self._view_mode_combo.setCurrentText("N")
             self._view_mode_combo.blockSignals(False)
+            self._view_mode = "N"
+            self._table_nk.setVisible(False)
             if self._variant_id != INITIAL_VARIANT_ID:
                 self._variant_id = INITIAL_VARIANT_ID
                 self._refresh(self._combo.currentText())
         self._apply_variant_readonly()
 
     def _on_view_mode_changed(self, txt: str) -> None:
-        new_variant = NK_VARIANT_ID if txt == "N-K" else INITIAL_VARIANT_ID
-        if new_variant == self._variant_id:
+        if txt == self._view_mode:
             return
-        self._variant_id = new_variant
+        self._view_mode = txt
+        if txt == "Side-by-side":
+            # Primary table stays bound to InitialState so bulk-edit
+            # affordances continue to work for N; the N-K table on the
+            # right is populated from a parallel variant view-model.
+            self._variant_id = INITIAL_VARIANT_ID
+            self._table_nk.setVisible(True)
+        elif txt == "N-K":
+            self._variant_id = NK_VARIANT_ID
+            self._table_nk.setVisible(False)
+        else:
+            self._variant_id = INITIAL_VARIANT_ID
+            self._table_nk.setVisible(False)
         self._apply_variant_readonly()
         self._refresh(self._combo.currentText())
 
@@ -828,6 +868,35 @@ class DataExplorerTab(QWidget):
         # The set of editable attributes is component-specific; refresh
         # the bulk panel so its dropdown reflects the current frame.
         self._refresh_bulk_attrs()
+        if self._view_mode == "Side-by-side":
+            self._refresh_nk_table(label)
+
+    def _refresh_nk_table(self, label: str) -> None:
+        """Populate the right-pane N-K table for ``label``. Read-only —
+        no editable columns surfaced. Per-(net_key, lf_gen[N-K],
+        N-K) caching from data_view.get_enriched_dataframe still
+        applies."""
+        if self._network is None:
+            self._model_nk.set_dataframe(pd.DataFrame(), editable_cols=[])
+            return
+        try:
+            nk_vm = build_data_explorer_view_model(
+                self._network,
+                label,
+                selected_vl=self._selected_vl,
+                filter_by_vl=(
+                    self._vl_filter.isChecked() and label in VL_FILTERABLE
+                ),
+                filter_specs=self._filter_specs,
+                variant_id=NK_VARIANT_ID,
+            )
+        except Exception:
+            self._model_nk.set_dataframe(pd.DataFrame(), editable_cols=[])
+            return
+        nk_df = nk_vm.rows_df if nk_vm is not None else pd.DataFrame()
+        self._model_nk.set_dataframe(nk_df, editable_cols=[])
+        if not nk_df.empty:
+            self._table_nk.resizeColumnsToContents()
 
     def _on_log_reverted(self, touched) -> None:
         """When the change-log panel reverts entries, refresh the grid
