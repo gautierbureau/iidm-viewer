@@ -204,6 +204,7 @@ and import from each host rather than copying.
 | Understand where worker round-trips are spent per tab | [docs/worker-round-trips.md](docs/worker-round-trips.md) |
 | Investigate why a rerun feels slow on a large network | [docs/profiling-rerun-cost.md](docs/profiling-rerun-cost.md) |
 | Plan or extend the N vs N-K variant comparison | [docs/n-k-variant-comparison.md](docs/n-k-variant-comparison.md) |
+| Pick up N-K follow-ups (latency, Playwright, script recorder, …) | [docs/n-k-followups.md](docs/n-k-followups.md) |
 | Touch the N-K variant primitives (build / LF / drop) | `iidm_viewer/variants.py` + [docs/n-k-variant-comparison.md](docs/n-k-variant-comparison.md) |
 | Plan the cross-host sharing refactor (cache backend, AppState base, view-models) | [docs/host-sharing.md](docs/host-sharing.md) |
 
