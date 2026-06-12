@@ -37,6 +37,56 @@ left or worth doing in a new session, in priority order.
 
 ## High-value, well-scoped
 
+### 0. Qt first-paint latency on large networks ✅ DONE
+
+**Symptom (pre-fix)**: Loading Pégase 9k via the PySide6 prototype
+froze the UI for ~29 s while every tab's `set_network(network)`
+re-ran its synchronous pypowsybl read on the main thread. Per-tab
+profile (Pégase 9k, single load):
+
+| Tab | Time |
+|---|---|
+| Data Explorer | 7.77 s |
+| Pmax | 4.80 s |
+| Voltage Analysis | 4.16 s |
+| Operational Limits | 3.59 s |
+| Overview | 2.22 s |
+| Reactive Curves | 1.86 s |
+| Map | 0.43 s |
+| Security Analysis | 0.19 s |
+| (other tabs) | <0.05 s each |
+| **Total** | **~25 s + 4 s Qt/WebEngine startup ≈ 29 s** |
+
+**Fix that landed**: New `_pending_tab_refreshes: dict` queue on
+`MainWindow` and a `currentChanged → _on_tab_changed` connection.
+`_on_network_changed` now eagerly refreshes only the Map / NAD /
+SLD trio (the visible landing tabs that share the VL picker)
+and queues the other 10 tabs. Each tab pays its per-tab pypowsybl
+cost on its first activation; subsequent activations are
+no-ops. `network is None` (the clear path) bypasses the queue
+and refreshes every tab synchronously so stale displays wipe.
+
+**Result**:
+
+| Network | Pre-fix | Post-fix |
+|---|---|---|
+| Empty MainWindow | 3.33 s (Qt + WebEngine) | 3.33 s (unchanged) |
+| Pégase 9k load | ~29 s frozen | ~1.8 s frozen |
+| Per-tab cost | paid up-front | amortised across user clicks |
+
+**Test**: `test_qt_main_window_lazy_refreshes_non_visible_tabs`
+in `tests/test_qt_prototype.py` asserts the eager/deferred set
+partition, that activation drains the queue once, and that clear
+(`network=None`) wipes the queue. The `loaded_window` fixture
+drains the queue in-test so every existing tab-state assertion
+keeps working.
+
+**Follow-up risk**: The user can no longer assume a tab is
+"warm" just because a network loaded — the first switch to e.g.
+Data Explorer on Pégase 9k now blocks for ~8 s. A small inline
+status hint ("loading…") on the tab badge would be a nice
+addition; not blocking.
+
 ### 1. NiceGUI first-paint latency on large networks ✅ DONE
 
 **Symptom (pre-fix)**: After the install_network fix, uploading Pégase 9k
@@ -254,8 +304,12 @@ at the call site.
 
 ## Recommended next single step
 
-**Follow-up #1 (NiceGUI first-paint latency)**. It directly addresses
-the user-visible pain the Pégase report surfaced, follows the pattern
-already established by the `install_network` fix, and is a clean
-~1-hour task. Acceptance is measurable
-(`curl` round-trip <1s on a preloaded Pégase 9k).
+Both first-paint latency items (#0 Qt, #1 NiceGUI) have landed.
+The next highest-leverage piece is **follow-up #2 (Playwright /
+QTest end-to-end smoke)**: it's the only item the plan called out
+explicitly as a "Verification" gate, it pins down the
+segfault canary (#10) that the Qt suite hits under stress, and
+it would catch regressions in the side-by-side flow on all
+three hosts in one harness. Acceptance is measurable: one CI
+job per host that scripts upload → build N-K → run LF →
+side-by-side and asserts the process is still alive at the end.

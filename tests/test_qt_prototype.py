@@ -38,7 +38,13 @@ def qapp():
 
 @pytest.fixture
 def loaded_window(qapp):
-    """A MainWindow with IEEE14 loaded and a default VL auto-selected."""
+    """A MainWindow with IEEE14 loaded and a default VL auto-selected.
+
+    Drains the lazy-refresh queue (the production code defers
+    non-visible tabs to first activation so a Pégase 9k load doesn't
+    freeze the UI for 30s) so every existing test that probes a
+    tab's post-load state still works without an explicit
+    ``tabs.setCurrentWidget(...)`` step."""
     window = MainWindow()
     window.show()
     qapp.processEvents()
@@ -49,6 +55,13 @@ def loaded_window(qapp):
     window.open_file(xiidm)
     qapp.processEvents()
     assert window.state.network is not None
+    # Drain pending tab refreshes — IEEE14 is small enough that the
+    # cumulative cost is negligible (sub-second), and it keeps the
+    # existing tests' "tab is already refreshed when probed" contract.
+    while window._pending_tab_refreshes:
+        tab, network = window._pending_tab_refreshes.popitem()
+        tab.set_network(network)
+    qapp.processEvents()
     yield window
     window.close()
     qapp.processEvents()
@@ -1883,6 +1896,77 @@ def test_qt_appstate_install_network_clears_nk(qapp):
     qapp.processEvents()
     assert state.nk_variant_id is None
     assert seen == [None]
+
+
+def test_qt_main_window_lazy_refreshes_non_visible_tabs(qapp, tmp_path):
+    """Loading a network must eagerly refresh only the visible tab
+    family (Map / NAD / SLD) and defer every other tab to first
+    activation. On Pégase 9k this turns ~30s of frozen UI into
+    ~1.8s; on IEEE14 the cumulative cost is negligible but the
+    queuing invariant is the same.
+
+    The pending-refresh queue is the contract: only tabs the user
+    hasn't visited since the last network swap stay in it; each tab
+    activation drains its own entry exactly once. Clearing the
+    network (None) bypasses the queue and refreshes all tabs
+    synchronously so they wipe their stale display."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import run
+    from iidm_viewer.qt.main_window import MainWindow
+
+    window = MainWindow()
+    qapp.processEvents()
+
+    # Write IEEE14 to a tempfile and load it through the production
+    # entry point (open_file) so the network_changed signal fires
+    # with the same code path as the user flow.
+    xiidm = tmp_path / "ieee14.xiidm"
+    run(lambda: pn.create_ieee14().save(str(xiidm), format="XIIDM"))
+    window.open_file(str(xiidm))
+    qapp.processEvents()
+    assert window.state.network is not None
+
+    # Eager: Map / NAD / SLD already drained (not in the queue).
+    eager = {window.map_tab, window.nad_tab, window.sld_tab}
+    pending = set(window._pending_tab_refreshes.keys())
+    assert eager.isdisjoint(pending), (
+        f"eager tabs leaked into the pending queue: {eager & pending}"
+    )
+    # Deferred: every other tab is queued, holding the loaded network.
+    deferred = {
+        window.overview_tab, window.data_tab, window.extensions_tab,
+        window.reactive_curves_tab, window.operational_limits_tab,
+        window.security_analysis_tab, window.short_circuit_tab,
+        window.pmax_visualization_tab, window.voltage_analysis_tab,
+        window.injection_map_tab,
+    }
+    assert deferred == pending
+    for tab in deferred:
+        assert window._pending_tab_refreshes[tab] is window.state.network
+
+    # Activating Data Explorer drains its entry — and only its entry.
+    idx = window.tabs.indexOf(window.data_tab)
+    assert idx >= 0
+    window.tabs.setCurrentIndex(idx)
+    qapp.processEvents()
+    assert window.data_tab not in window._pending_tab_refreshes
+    assert (deferred - {window.data_tab}) == set(
+        window._pending_tab_refreshes.keys()
+    )
+
+    # Re-activating the same tab is a no-op (already drained).
+    window.tabs.setCurrentIndex(idx)
+    qapp.processEvents()
+    assert window.data_tab not in window._pending_tab_refreshes
+
+    # Clearing the network empties the queue (every tab gets a sync
+    # set_network(None) so stale displays wipe).
+    window.state.install_network(None)
+    qapp.processEvents()
+    assert window._pending_tab_refreshes == {}
+
+    window.close()
+    qapp.processEvents()
 
 
 def test_qt_main_window_registers_nk_variant_dock(qapp):
