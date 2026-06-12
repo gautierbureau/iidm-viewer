@@ -2167,6 +2167,48 @@ def test_qt_data_explorer_view_mode_combo_disabled_until_variant_built(qapp):
         drop_variant(state.network)
 
 
+def test_qt_data_explorer_side_by_side_shows_both_tables(qapp):
+    """Picking 'Side-by-side' on the Data Explorer reveals the N-K
+    QTableView next to the InitialState one via the new QSplitter.
+    The N-K table is non-editable."""
+    import pypowsybl.network as pn
+    from PySide6.QtWidgets import QTableView
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.data_explorer_tab import DataExplorerTab
+    from iidm_viewer.qt.state import AppState
+    from iidm_viewer.variants import INITIAL_VARIANT_ID, drop_variant
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    tab = DataExplorerTab()
+    tab.set_network(state.network)
+    tab.set_state(state)
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+    try:
+        opts = [
+            tab._view_mode_combo.itemText(i)
+            for i in range(tab._view_mode_combo.count())
+        ]
+        assert opts == ["N", "N-K", "Side-by-side"]
+        tab._view_mode_combo.setCurrentText("Side-by-side")
+        qapp.processEvents()
+        assert tab._view_mode == "Side-by-side"
+        assert tab._variant_id == INITIAL_VARIANT_ID
+        assert tab._table_splitter.widget(1) is tab._table_nk
+        assert tab._table_nk.isVisibleTo(tab._table_splitter) is True
+        # N-K table is read-only.
+        assert tab._table_nk.editTriggers() == QTableView.NoEditTriggers
+
+        # Flip back to N — the N-K table hides.
+        tab._view_mode_combo.setCurrentText("N")
+        qapp.processEvents()
+        assert tab._view_mode == "N"
+        assert tab._table_nk.isVisibleTo(tab._table_splitter) is False
+    finally:
+        drop_variant(state.network)
+
+
 def test_qt_data_explorer_nk_mode_disables_bulk_buttons(qapp):
     """In N-K mode the Data Explorer's bulk Apply / Apply&LF /
     Disconnect / Delete buttons must stay disabled — N-K is
@@ -2227,6 +2269,42 @@ def test_qt_rcc_view_mode_combo_disabled_until_variant_built(qapp):
         drop_variant(state.network)
 
 
+def test_qt_rcc_side_by_side_shows_containment_comparison(qapp):
+    """Picking 'Side-by-side' on the Reactive Curves tab reveals the
+    N vs N-K containment-summary strip."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.reactive_curves_tab import ReactiveCurvesTab
+    from iidm_viewer.qt.state import AppState
+    from iidm_viewer.variants import INITIAL_VARIANT_ID, drop_variant
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    tab = ReactiveCurvesTab()
+    tab.set_state(state)
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+    try:
+        opts = [
+            tab._view_mode_combo.itemText(i)
+            for i in range(tab._view_mode_combo.count())
+        ]
+        assert opts == ["N", "N-K", "Side-by-side"]
+        tab._view_mode_combo.setCurrentText("Side-by-side")
+        qapp.processEvents()
+        assert tab._view_mode == "Side-by-side"
+        assert tab._variant_id == INITIAL_VARIANT_ID
+        assert tab._sxs_group.isVisibleTo(tab) is True
+
+        # Flip back to N — strip hides.
+        tab._view_mode_combo.setCurrentText("N")
+        qapp.processEvents()
+        assert tab._view_mode == "N"
+        assert tab._sxs_group.isVisibleTo(tab) is False
+    finally:
+        drop_variant(state.network)
+
+
 def test_qt_rcc_view_mode_resets_to_n_on_clear(qapp):
     """Clearing the N-K variant must flip the combo back to N and
     disable it on the Reactive Curves tab."""
@@ -2278,6 +2356,47 @@ def test_qt_oplim_view_mode_combo_disabled_until_variant_built(qapp):
         tab._view_mode_combo.setCurrentText("N-K")
         qapp.processEvents()
         assert tab._variant_id == NK_VARIANT_ID
+    finally:
+        drop_variant(state.network)
+
+
+def test_qt_oplim_side_by_side_shows_both_loading_tables(qapp):
+    """The Operational Limits combo's 'Side-by-side' option must
+    surface the N-K loading table next to the InitialState one via
+    the new QSplitter."""
+    import pypowsybl.network as pn
+    from iidm_viewer.powsybl_worker import NetworkProxy, run
+    from iidm_viewer.qt.operational_limits_tab import OperationalLimitsTab
+    from iidm_viewer.qt.state import AppState
+    from iidm_viewer.variants import INITIAL_VARIANT_ID, drop_variant
+
+    state = AppState()
+    state.install_network(NetworkProxy(run(pn.create_ieee14)))
+    tab = OperationalLimitsTab()
+    tab.set_state(state)
+    state.build_nk_variant({"id": "x", "element_ids": ["L1-2-1"]})
+    qapp.processEvents()
+    try:
+        opts = [
+            tab._view_mode_combo.itemText(i)
+            for i in range(tab._view_mode_combo.count())
+        ]
+        assert opts == ["N", "N-K", "Side-by-side"]
+        tab._view_mode_combo.setCurrentText("Side-by-side")
+        qapp.processEvents()
+        assert tab._view_mode == "Side-by-side"
+        # The N-K loading view becomes part of the splitter's visible
+        # layout (visibility is parent-relative, so check isVisibleTo).
+        assert tab._loading_splitter.widget(1) is tab._loading_view_nk
+        assert tab._loading_view_nk.isVisibleTo(tab._loading_splitter) is True
+        # Primary stays bound to InitialState in Side-by-side.
+        assert tab._variant_id == INITIAL_VARIANT_ID
+
+        # Flip back to N — the N-K table hides.
+        tab._view_mode_combo.setCurrentText("N")
+        qapp.processEvents()
+        assert tab._view_mode == "N"
+        assert tab._loading_view_nk.isVisibleTo(tab._loading_splitter) is False
     finally:
         drop_variant(state.network)
 

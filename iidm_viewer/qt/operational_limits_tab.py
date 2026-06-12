@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QSizePolicy,
     QSlider,
+    QSplitter,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -94,10 +95,13 @@ class OperationalLimitsTab(QWidget):
         self._element_id: Optional[str] = None
         self._threshold: int = 50
         self._plot_tmp: Optional[str] = None  # temp file for Plotly HTML
-        # Active variant the view-model is fetched against. The combo
-        # below flips it; defaults to InitialState so the today UX is
-        # preserved before any combo interaction.
+        # Active variant the view-model is fetched against + view-mode
+        # tracking. ``_view_mode`` is one of 'N' / 'N-K' / 'Side-by-side';
+        # ``_variant_id`` is the primary pane's variant (always
+        # InitialState in Side-by-side, where the N-K pane on the
+        # right is populated separately).
         self._variant_id = INITIAL_VARIANT_ID
+        self._view_mode = "N"
         self._state = None  # set via set_state
 
         root = QVBoxLayout(self)
@@ -108,7 +112,10 @@ class OperationalLimitsTab(QWidget):
         view_row = QHBoxLayout()
         view_row.addWidget(QLabel("View:"))
         self._view_mode_combo = QComboBox()
-        self._view_mode_combo.addItems(["N", "N-K"])
+        # 'Side-by-side' shows the loading table for both variants
+        # side by side; the element-detail section below stays
+        # single-pane (driven by the active variant_id).
+        self._view_mode_combo.addItems(["N", "N-K", "Side-by-side"])
         self._view_mode_combo.setEnabled(False)
         self._view_mode_combo.currentTextChanged.connect(
             self._on_view_mode_changed,
@@ -140,6 +147,8 @@ class OperationalLimitsTab(QWidget):
         self._loading_caption = QLabel("")
         self._loading_caption.setStyleSheet("color: #555;")
         loading_layout.addWidget(self._loading_caption)
+        # Primary loading table — visible in N / N-K modes and as
+        # the left pane in Side-by-side.
         self._loading_view = QTableView()
         self._loading_view.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._loading_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -149,7 +158,23 @@ class OperationalLimitsTab(QWidget):
         )
         self._loading_model = _LoadingTableModel()
         self._loading_view.setModel(self._loading_model)
-        loading_layout.addWidget(self._loading_view)
+        # Secondary loading table for the N-K pane in Side-by-side mode.
+        self._loading_view_nk = QTableView()
+        self._loading_view_nk.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._loading_view_nk.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._loading_view_nk.setMaximumHeight(220)
+        self._loading_view_nk.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Interactive,
+        )
+        self._loading_model_nk = _LoadingTableModel()
+        self._loading_view_nk.setModel(self._loading_model_nk)
+        # Wrap both in a horizontal QSplitter so Side-by-side renders
+        # the two tables next to each other.
+        self._loading_splitter = QSplitter(Qt.Horizontal)
+        self._loading_splitter.addWidget(self._loading_view)
+        self._loading_splitter.addWidget(self._loading_view_nk)
+        self._loading_view_nk.setVisible(False)
+        loading_layout.addWidget(self._loading_splitter)
         root.addWidget(self._loading_group)
 
         # --- Element detail section -----------------------------------
@@ -216,15 +241,28 @@ class OperationalLimitsTab(QWidget):
             self._view_mode_combo.blockSignals(True)
             self._view_mode_combo.setCurrentText("N")
             self._view_mode_combo.blockSignals(False)
+            self._view_mode = "N"
+            self._loading_view_nk.setVisible(False)
             if self._variant_id != INITIAL_VARIANT_ID:
                 self._variant_id = INITIAL_VARIANT_ID
                 self.refresh()
 
     def _on_view_mode_changed(self, txt: str) -> None:
-        new_variant = NK_VARIANT_ID if txt == "N-K" else INITIAL_VARIANT_ID
-        if new_variant == self._variant_id:
+        if txt == self._view_mode:
             return
-        self._variant_id = new_variant
+        self._view_mode = txt
+        if txt == "Side-by-side":
+            # Primary pane stays bound to InitialState (so element-detail
+            # below tracks N); the N-K pane on the right gets its own
+            # view model.
+            self._variant_id = INITIAL_VARIANT_ID
+            self._loading_view_nk.setVisible(True)
+        elif txt == "N-K":
+            self._variant_id = NK_VARIANT_ID
+            self._loading_view_nk.setVisible(False)
+        else:
+            self._variant_id = INITIAL_VARIANT_ID
+            self._loading_view_nk.setVisible(False)
         self.refresh()
 
     def set_network(self, network: Optional[NetworkProxy]) -> None:
@@ -261,6 +299,44 @@ class OperationalLimitsTab(QWidget):
         self._render_loading_table()
         self._refresh_element_choices()
         self._render_selected_element()
+        if self._view_mode == "Side-by-side":
+            self._render_nk_loading_table()
+
+    def _render_nk_loading_table(self) -> None:
+        """Populate the right-pane loading table with the N-K variant's
+        loading_df. Reuses the existing per-(net_key, lf_gen, variant_id)
+        cache in :func:`compute_loading` so the worker only pays once per
+        N-K LF generation."""
+        if self._network is None:
+            self._loading_model_nk.set_dataframe(pd.DataFrame())
+            return
+        try:
+            nk_vm = build_operational_limits_view_model(
+                self._network, variant_id=NK_VARIANT_ID,
+            )
+        except Exception:
+            nk_vm = None
+        if nk_vm is None or nk_vm.loading_df is None or nk_vm.loading_df.empty:
+            self._loading_model_nk.set_dataframe(pd.DataFrame())
+            return
+        loading = nk_vm.loading_df
+        above = loading[loading["loading_pct"] >= self._threshold].copy()
+        if above.empty:
+            self._loading_model_nk.set_dataframe(pd.DataFrame())
+            return
+        show = above[["element_id", "element_name", "element_type", "side",
+                      "current", "permanent_limit", "loading_pct",
+                      "losses"]].copy()
+        show.columns = ["Element", "Name", "Type", "Worst side",
+                        "I (A)", "Permanent limit (A)", "Loading (%)",
+                        "Losses (MW)"]
+        show["Worst side"] = show["Worst side"].map(
+            {"ONE": "Side 1", "TWO": "Side 2"})
+        show["I (A)"] = show["I (A)"].round(1)
+        show["Loading (%)"] = show["Loading (%)"].round(1)
+        show["Losses (MW)"] = show["Losses (MW)"].round(3)
+        self._loading_model_nk.set_dataframe(show)
+        self._loading_view_nk.resizeColumnsToContents()
 
     # ------------------------------------------------------------------
     # Internals

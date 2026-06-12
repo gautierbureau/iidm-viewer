@@ -66,6 +66,7 @@ class ReactiveCurvesTab(QWidget):
         self._gen_id: Optional[str] = None
         self._plot_tmp: Optional[str] = None  # temp file for Plotly HTML
         self._variant_id = INITIAL_VARIANT_ID
+        self._view_mode = "N"
         self._state = None  # set via set_state
 
         layout = QVBoxLayout(self)
@@ -76,7 +77,11 @@ class ReactiveCurvesTab(QWidget):
         view_row = QHBoxLayout()
         view_row.addWidget(QLabel("View:"))
         self._view_mode_combo = QComboBox()
-        self._view_mode_combo.addItems(["N", "N-K"])
+        # 'Side-by-side' adds a comparison strip showing the
+        # containment counts (Inside / Edge / Outside / Unknown) for
+        # the N and N-K variants. The per-gen plot above stays
+        # single-pane and tracks ``self._variant_id``.
+        self._view_mode_combo.addItems(["N", "N-K", "Side-by-side"])
         self._view_mode_combo.setEnabled(False)
         self._view_mode_combo.currentTextChanged.connect(
             self._on_view_mode_changed,
@@ -179,6 +184,29 @@ class ReactiveCurvesTab(QWidget):
             self._subset_views[key] = (header, table)
         layout.addWidget(self._summary_group)
 
+        # Side-by-side comparison group — hidden until 'Side-by-side'
+        # is picked on the view-mode combo. Two columns: containment
+        # bucket counts for N and N-K so the user can spot which gens
+        # flipped state under the contingency.
+        self._sxs_group = QGroupBox("Containment summary — N vs N-K")
+        sxs_layout = QHBoxLayout(self._sxs_group)
+        self._sxs_n_lbl = QLabel("N (base):\n—")
+        self._sxs_n_lbl.setStyleSheet(
+            "padding: 6px 12px; border: 1px solid #ddd; "
+            "border-radius: 4px; background: #fafafa;",
+        )
+        self._sxs_n_lbl.setWordWrap(True)
+        self._sxs_nk_lbl = QLabel("N-K (contingency):\n—")
+        self._sxs_nk_lbl.setStyleSheet(
+            "padding: 6px 12px; border: 1px solid #ddd; "
+            "border-radius: 4px; background: #fafafa;",
+        )
+        self._sxs_nk_lbl.setWordWrap(True)
+        sxs_layout.addWidget(self._sxs_n_lbl, 1)
+        sxs_layout.addWidget(self._sxs_nk_lbl, 1)
+        self._sxs_group.setVisible(False)
+        layout.addWidget(self._sxs_group)
+
     # ------------------------------------------------------------------
     # Public API (mirrors the other Qt tabs).
     # ------------------------------------------------------------------
@@ -198,15 +226,25 @@ class ReactiveCurvesTab(QWidget):
             self._view_mode_combo.blockSignals(True)
             self._view_mode_combo.setCurrentText("N")
             self._view_mode_combo.blockSignals(False)
+            self._view_mode = "N"
+            self._sxs_group.setVisible(False)
             if self._variant_id != INITIAL_VARIANT_ID:
                 self._variant_id = INITIAL_VARIANT_ID
                 self.refresh()
 
     def _on_view_mode_changed(self, txt: str) -> None:
-        new_variant = NK_VARIANT_ID if txt == "N-K" else INITIAL_VARIANT_ID
-        if new_variant == self._variant_id:
+        if txt == self._view_mode:
             return
-        self._variant_id = new_variant
+        self._view_mode = txt
+        if txt == "Side-by-side":
+            self._variant_id = INITIAL_VARIANT_ID
+            self._sxs_group.setVisible(True)
+        elif txt == "N-K":
+            self._variant_id = NK_VARIANT_ID
+            self._sxs_group.setVisible(False)
+        else:
+            self._variant_id = INITIAL_VARIANT_ID
+            self._sxs_group.setVisible(False)
         self.refresh()
 
     def set_network(self, network: Optional[NetworkProxy]) -> None:
@@ -280,6 +318,49 @@ class ReactiveCurvesTab(QWidget):
             self._gen_combo.blockSignals(False)
         self._render_selected_gen()
         self._render_summary(vm)
+        if self._view_mode == "Side-by-side":
+            self._render_sxs_summary()
+
+    def _render_sxs_summary(self) -> None:
+        """Populate the N vs N-K containment-counts strip. Reuses the
+        per-(net_key, lf_gen[variant_id], variant_id) classification
+        cache so subsequent renders are cheap."""
+        if self._network is None:
+            return
+        try:
+            n_vm = build_reactive_curves_view_model(
+                self._network, variant_id=INITIAL_VARIANT_ID,
+            )
+            nk_vm = build_reactive_curves_view_model(
+                self._network, variant_id=NK_VARIANT_ID,
+            )
+        except Exception:
+            return
+        if n_vm is None or nk_vm is None:
+            self._sxs_n_lbl.setText(
+                "N (base):\nBuild + run an N-K LF to populate."
+            )
+            self._sxs_nk_lbl.setText(
+                "N-K (contingency):\nBuild + run an N-K LF to populate."
+            )
+            return
+        n_sum = build_containment_summary(n_vm.classified, n_vm.gens_df)
+        nk_sum = build_containment_summary(nk_vm.classified, nk_vm.gens_df)
+
+        def _fmt(label: str, s) -> str:
+            saturated = (
+                f" (PV→PQ: {s.n_saturated})" if s.n_saturated else ""
+            )
+            return (
+                f"<b>{label}</b><br>"
+                f"Inside: {s.n_inside}<br>"
+                f"Edge/Near: {s.n_warning}<br>"
+                f"Outside/Saturated: {s.n_action}{saturated}<br>"
+                f"Unknown/Needs LF: {s.n_unknown}"
+            )
+
+        self._sxs_n_lbl.setText(_fmt("N (base)", n_sum))
+        self._sxs_nk_lbl.setText(_fmt("N-K (contingency)", nk_sum))
 
     # ------------------------------------------------------------------
     # Internals
