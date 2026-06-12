@@ -354,9 +354,20 @@ class MainWindow(QMainWindow):
         status.showMessage("Ready. Load a network to begin.")
         self.setStatusBar(status)
 
+        # Pending lazy-refresh queue: tabs the user hasn't visited yet
+        # since the last network swap. Loading Pégase 9k synchronously
+        # takes ~30s of frozen UI (each tab's set_network does a
+        # pypowsybl read on the main thread); deferring the non-current
+        # tabs into this queue + processing them on tab-activation
+        # turns that into ~1-2s for the visible Map tab and lets the
+        # other tabs pay their own cost only when the user clicks
+        # them.
+        self._pending_tab_refreshes: dict = {}
+
         self.state.network_changed.connect(self._on_network_changed)
         self.state.loadflow_completed.connect(self._on_loadflow_completed)
         self.state.selected_vl_changed.connect(self._on_selected_vl_changed)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         self.map_tab.substation_clicked.connect(self._on_map_substation_clicked)
         self.nad_tab.node_clicked.connect(self._on_nad_node_clicked)
         self.sld_tab.feeder_clicked.connect(self._on_sld_feeder_clicked)
@@ -690,20 +701,56 @@ class MainWindow(QMainWindow):
         # Surface the N-K dock once a network is loaded so it's
         # discoverable; keep it hidden when there's nothing to outage.
         self.nk_variant_dock_widget.setVisible(network is not None)
-        self.overview_tab.set_network(network)
+        # Eagerly refresh the tabs the user expects to see first:
+        # Map (the default landing tab), plus the lightweight diagram
+        # tabs that share its VL context. Everything else is deferred
+        # into the pending-refresh queue and only fires when the user
+        # navigates to that tab — on Pégase 9k that turns the ~30s
+        # synchronous chain into a few seconds of work for the
+        # visible tab + the other tabs amortise their per-tab
+        # pypowsybl cost across user clicks instead of all at once.
         self.map_tab.set_network(network)
         self.nad_tab.set_network(network)
         self.sld_tab.set_network(network)
-        self.data_tab.set_network(network)
-        self.extensions_tab.set_network(network)
-        self.reactive_curves_tab.set_network(network)
-        self.operational_limits_tab.set_network(network)
-        self.security_analysis_tab.set_network(network)
-        self.short_circuit_tab.set_network(network)
-        self.pmax_visualization_tab.set_network(network)
-        self.voltage_analysis_tab.set_network(network)
-        self.injection_map_tab.set_network(network)
+        eager = {self.map_tab, self.nad_tab, self.sld_tab}
+        self._pending_tab_refreshes = {
+            self.overview_tab: network,
+            self.data_tab: network,
+            self.extensions_tab: network,
+            self.reactive_curves_tab: network,
+            self.operational_limits_tab: network,
+            self.security_analysis_tab: network,
+            self.short_circuit_tab: network,
+            self.pmax_visualization_tab: network,
+            self.voltage_analysis_tab: network,
+            self.injection_map_tab: network,
+        }
+        # A clear (network is None) still needs to propagate immediately
+        # to every tab so they wipe their stale display. The pending
+        # queue is for non-None networks where the cost is real; for
+        # None we fire each set_network straight away (they all
+        # short-circuit on None to a placeholder).
+        if network is None:
+            for tab in list(self._pending_tab_refreshes):
+                tab.set_network(None)
+            self._pending_tab_refreshes.clear()
         self.tabs.setCurrentWidget(self.map_tab)
+        # Map is now current → drain its pending entry if any
+        # (it should already be drained by the eager call above).
+        self._on_tab_changed(self.tabs.currentIndex())
+
+    def _on_tab_changed(self, _index: int) -> None:
+        """Drain the pending-refresh entry for the just-activated tab
+        so its first appearance pays the per-tab pypowsybl cost — but
+        only once per network swap. Subsequent activations are
+        no-ops (the entry has been removed from the queue)."""
+        current = self.tabs.currentWidget()
+        if current is None:
+            return
+        network = self._pending_tab_refreshes.pop(current, None)
+        if network is None:
+            return
+        current.set_network(network)
 
     def _on_sidebar_vl_selected(self, vl_id: str) -> None:
         """Forward a dropdown pick into the AppState — same path as a
