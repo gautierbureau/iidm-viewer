@@ -310,6 +310,39 @@ def _send_render(component: str, args: dict) -> None:
     ui.run_javascript(f"window.iidmRenderTo({json.dumps(component)}, {payload});")
 
 
+def _schedule_initial_refresh(refresh_fn) -> None:
+    """Schedule a tab builder's first refresh to run **after** the
+    initial page render flushes.
+
+    Each ``_build_*`` closure used to call ``refresh()`` synchronously
+    at the bottom — that ran the worker round-trip while the page was
+    being built, blocking the first HTTP response for ~5–7s on Pégase
+    9k (the operational-limits view-model alone is ~4s).
+
+    Calling ``asyncio.create_task(coro)`` where the coroutine then
+    runs a synchronous ``refresh()`` doesn't actually defer the cost:
+    once the task resumes, the synchronous body blocks the event
+    loop until it returns, and NiceGUI's response handler can't run
+    in the meantime. The net response time is unchanged.
+
+    Using :class:`ui.timer` with a small delay sidesteps that:
+    NiceGUI runs the timer callback after the page has rendered + the
+    socket connection has stabilised. The refresh still blocks the
+    event loop while it runs (so subsequent timer callbacks queue),
+    but the HTTP response has already flushed by then.
+
+    Exceptions are swallowed so a failing refresh doesn't abort the
+    rest of the chain.
+    """
+    def _run():
+        try:
+            refresh_fn()
+        except Exception:
+            pass
+
+    ui.timer(0.05, _run, once=True)
+
+
 def _push_map() -> None:
     global _last_map, _map_data_version
     if _state.network is None:
@@ -4622,7 +4655,9 @@ def _build_extensions_explorer():
 
     _state.on_network_changed(_on_network_changed)
     _populate_extensions(_state.network)
-    refresh()
+    # Defer the initial pypowsybl fetch so the page reaches its first
+    # paint immediately on large networks (see _schedule_initial_refresh).
+    _schedule_initial_refresh(refresh)
 
     return refresh
 
@@ -5048,7 +5083,9 @@ def _build_reactive_curves():
     _state.on_nk_variant_changed(_on_nk_variant_changed)
     _state.on_nk_loadflow_completed(lambda _r: refresh())
 
-    refresh()
+    # Defer the initial pypowsybl fetch (build_reactive_curves_view_model
+    # is ~0.5s on Pégase 9k but the cumulative builder cost matters).
+    _schedule_initial_refresh(refresh)
     return refresh
 
 
@@ -5442,7 +5479,11 @@ def _build_operational_limits():
         if _current_view_mode() == "Side-by-side":
             _render_side_by_side()
 
-    refresh()
+    # Defer the initial pypowsybl fetch. build_operational_limits_view_model
+    # is the heaviest single tab call on Pégase 9k (~4s for compute_loading
+    # across all lines + 2WTs) — so this defer is the largest first-paint
+    # win of the set.
+    _schedule_initial_refresh(refresh)
     return refresh
 
 
@@ -5927,7 +5968,7 @@ def _build_security_analysis():
             _render_entry_list(container, [], summary_fn, remover)
         _refresh_action_dependents()
 
-    refresh()
+    _schedule_initial_refresh(refresh)
     return refresh
 
 
@@ -6249,7 +6290,7 @@ def _build_short_circuit_analysis():
         vm.clear()
         _render_results()
 
-    refresh()
+    _schedule_initial_refresh(refresh)
     return refresh
 
 
@@ -8044,19 +8085,24 @@ def main_page() -> None:
         _rebuild_vl_options()
 
     async def _async_refresh_tab(refresh_fn) -> None:
-        """Wrap a synchronous refresh closure so the event loop ticks
-        before + after the call. The refresh body still touches NiceGUI
-        widget state (ag-Grid rows, select options) so it must stay on
-        the event loop, but yielding between refreshes lets the upload
-        completion + button-state updates land immediately — the user
-        sees a responsive UI while the tabs progressively populate
-        instead of an opaque multi-second freeze on large networks."""
-        await asyncio.sleep(0)
+        """Defer a synchronous tab refresh past the current event-loop
+        tick so the response (initial page render or install_network
+        completion) can flush first.
+
+        A bare ``asyncio.sleep(0)`` is not enough: once the task
+        resumes, the synchronous ``refresh_fn()`` blocks the event
+        loop until it returns. NiceGUI's response handler can't run
+        in the meantime, so the response is delayed by the refresh
+        cost. A small ``asyncio.sleep(0.2)`` gives NiceGUI time to
+        flush + the client time to begin rendering before the
+        worker round-trip begins; the tab then populates over
+        the next 1-5s with the user already looking at a responsive
+        UI."""
+        await asyncio.sleep(1.0)
         try:
             refresh_fn()
         except Exception:
             pass
-        await asyncio.sleep(0)
 
     def _on_state_network(network):
         # Enable the Run-LF button + reset status whenever the network
