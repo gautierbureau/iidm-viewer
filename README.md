@@ -1,19 +1,39 @@
 # iidm-viewer
 
-A Streamlit web app for visualising and exploring electrical power networks in [IIDM](https://www.powsybl.org/pages/documentation/grid/formats/xiidm.html) format.
+An app for visualising and exploring electrical power networks in
+[IIDM](https://www.powsybl.org/pages/documentation/grid/formats/xiidm.html)
+format. Ships with three interchangeable front-ends — Streamlit (the
+default web app), NiceGUI (a single-page web alternative), and PySide6
+(a native desktop window) — all driving the same underlying business
+logic.
 
 ## Installation
 
+The base install gives you the Streamlit front-end (`iidm-viewer`):
+
 ```bash
-pip install iidm_viewer
+pip install iidm-viewer
 ```
+
+The two other front-ends ship as optional extras so the default install
+stays lean — PySide6 alone is ~150 MB, and the NiceGUI / `pywebview`
+combo pulls in its own native runtime. Opt in only if you want them:
+
+| Front-end | Install | Launcher |
+|---|---|---|
+| Streamlit (default) | `pip install iidm-viewer` | `iidm-viewer` |
+| NiceGUI | `pip install 'iidm-viewer[nicegui]'` | `iidm-viewer-nicegui` |
+| PySide6 desktop | `pip install 'iidm-viewer[pyside]'` | `iidm-viewer-pyside` |
+
+Want everything: `pip install 'iidm-viewer[nicegui,pyside]'`.
 
 Or from source:
 
 ```bash
 git clone https://github.com/gautierbureau/iidm-viewer.git
 cd iidm-viewer
-pip install -e .
+pip install -e .                       # Streamlit only
+pip install -e '.[nicegui,pyside]'     # all three front-ends
 ```
 
 ### One-line install (Linux)
@@ -77,10 +97,13 @@ for internals.
 ## Running
 
 ```bash
-iidm-viewer
+iidm-viewer            # Streamlit web app    → http://localhost:8501
+iidm-viewer-nicegui    # NiceGUI web app      → http://localhost:8080
+iidm-viewer-pyside     # PySide6 native window
 ```
 
-Then open the URL printed in your terminal (default: `http://localhost:8501`).
+The Streamlit and NiceGUI launchers print the URL on startup; the
+PySide6 launcher opens a window directly.
 
 ## What to expect
 
@@ -99,11 +122,18 @@ Load any `.xiidm` / `.iidm` network file and explore it through 8 tabs:
 
 ## Requirements
 
+Base install (Streamlit front-end):
+
 - Python ≥ 3.9
 - `streamlit` ≥ 1.30
 - `pypowsybl` ≥ 1.14.0
 - `pandas`
 - `plotly`
+
+Optional extras pulled in on demand:
+
+- `[nicegui]` — `nicegui` ≥ 3.0, `pywebview` ≥ 5 (for `--native` mode)
+- `[pyside]` — `PySide6` ≥ 6.6
 
 ## Running tests
 
