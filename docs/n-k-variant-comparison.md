@@ -1,5 +1,21 @@
 # N vs N-K state comparison via pypowsybl variant manager
 
+Status: **fully delivered** as of mid-2026 across all three hosts
+(Streamlit, PySide6, NiceGUI). Side-by-side view available on every
+affected tab (Reactive Curves, Operational Limits, Data Explorer, SLD).
+
+For what's **left** to do — first-paint latency on large networks,
+end-to-end Playwright tests, script-recorder hooks for the N-K
+lifecycle, cache adoption in the prototype hosts, and other
+follow-ups — see [`n-k-followups.md`](n-k-followups.md).
+
+The body of this document is the **original design plan** that the
+implementation was built against. Use it as background for the design
+decisions behind the shipped code (the atomic switch+restore rule,
+the per-variant `_lf_gen` dict, the `NK_CACHE_KEYS` set, etc.).
+
+---
+
 Park for later: design doc for adding side-by-side N (base) vs N-K
 (post-contingency) comparison to the viewer using pypowsybl's variant manager.
 Status: planning only, no code yet. Targets all three hosts:
